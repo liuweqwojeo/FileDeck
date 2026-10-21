@@ -1,6 +1,6 @@
 # 离线文本编辑器资源
 
-仅实现资源和原生桥接协议；尚未接入 Swift 工作台界面。构建产物在 `../Resources/Editors/`，与许可证一起随应用打包。运行时不需要 Node.js 或网络。
+CodeMirror 6 和 markdown-it 已通过 `FWTextContent` / `FWDocumentHost` 接入完整 FileDeck 工作台，提供文本、代码和 Markdown 的预览与编辑。构建产物位于 `../Resources/Editors/`，与许可证一起随应用打包；运行时不需要 Node.js 或网络。独立浏览验证应用不包含这套完整原生编辑会话。
 
 ```sh
 cd EditorAssets
@@ -11,7 +11,7 @@ npm run build
 
 依赖版本与完整性摘要固定在 package-lock.json。需要 Node.js 22.12 或更新版本构建；不影响应用的 macOS 14 运行要求。
 
-真实 macOS WebKit 验收（独立辅助窗口，完成后自动关闭）：
+真实 macOS WebKit 验收从项目根目录执行（若刚完成上面的命令，先用 `cd ..` 返回根目录）。验收在独立辅助窗口中运行，完成后自动关闭：
 
 ```sh
 bash scripts/test-editors.sh
