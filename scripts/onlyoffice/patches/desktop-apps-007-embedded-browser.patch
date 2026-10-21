@@ -1,0 +1,74 @@
+--- a/macos/ONLYOFFICE.xcodeproj/project.pbxproj
++++ b/macos/ONLYOFFICE.xcodeproj/project.pbxproj
+@@ -41,6 +41,13 @@
+ 		5A0229622CCFC05C0011C6EC /* file-xltx.icns in Resources */ = {isa = PBXBuildFile; fileRef = 5A02295C2CCFC05C0011C6EC /* file-xltx.icns */; };
+ 		5A0229632CCFC05C0011C6EC /* file-xltx.icns in Resources */ = {isa = PBXBuildFile; fileRef = 5A02295C2CCFC05C0011C6EC /* file-xltx.icns */; };
+ 		5A0229642CCFC05C0011C6EC /* file-xltx.icns in Resources */ = {isa = PBXBuildFile; fileRef = 5A02295C2CCFC05C0011C6EC /* file-xltx.icns */; };
++		B4D3EA6D0462B6C61128A63D /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F287F21F0F08FDD71ABCB9A /* ContentView.swift */; };
++		DE5888A0067AA088419ECE91 /* FilePreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 884B291E387BDB652F0F51FF /* FilePreviewView.swift */; };
++		B794B831772526D63CC66C96 /* FileMetadataView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A6E17C29249AA3C8CEFF9BB /* FileMetadataView.swift */; };
++		DD6BE1B04C0DCD4EE78CA947 /* WorkspaceDesign.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EC88A5B512DCF06BFE72954 /* WorkspaceDesign.swift */; };
++		62516AD838A5C62C30894C25 /* WorkspaceStartupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56003EE2C1D4ACF3AF93A1C1 /* WorkspaceStartupView.swift */; };
++		D6D25F1CA7555D9BAAC0C9D0 /* WorkspaceSplitView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82C0BD5B1452EE9125C84D6D /* WorkspaceSplitView.swift */; };
++		CF9770A0C278158C8CCDD7DF /* WorkspaceEditorBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FBC3C16411A57F7BCA3FE02 /* WorkspaceEditorBridge.swift */; };
+ 		5A0229652CCFC05C0011C6EC /* file-pptm.icns in Resources */ = {isa = PBXBuildFile; fileRef = 5A02295D2CCFC05C0011C6EC /* file-pptm.icns */; };
+ 		5A0229662CCFC05C0011C6EC /* file-pptm.icns in Resources */ = {isa = PBXBuildFile; fileRef = 5A02295D2CCFC05C0011C6EC /* file-pptm.icns */; };
+ 		5A0229672CCFC05C0011C6EC /* file-pptm.icns in Resources */ = {isa = PBXBuildFile; fileRef = 5A02295D2CCFC05C0011C6EC /* file-pptm.icns */; };
+@@ -521,6 +528,13 @@
+ 		5A0229482CAC14940011C6EC /* he */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = he; path = "he.lproj/Presentation-Reporter.strings"; sourceTree = "<group>"; };
+ 		5A0229492CAC14940011C6EC /* he */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = he; path = he.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+ 		5A02294A2CAC14940011C6EC /* he */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = he; path = he.lproj/InfoPlist.strings; sourceTree = "<group>"; };
++		4F287F21F0F08FDD71ABCB9A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
++		884B291E387BDB652F0F51FF /* FilePreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilePreviewView.swift; sourceTree = "<group>"; };
++		4A6E17C29249AA3C8CEFF9BB /* FileMetadataView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileMetadataView.swift; sourceTree = "<group>"; };
++		9EC88A5B512DCF06BFE72954 /* WorkspaceDesign.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceDesign.swift; sourceTree = "<group>"; };
++		56003EE2C1D4ACF3AF93A1C1 /* WorkspaceStartupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceStartupView.swift; sourceTree = "<group>"; };
++		82C0BD5B1452EE9125C84D6D /* WorkspaceSplitView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceSplitView.swift; sourceTree = "<group>"; };
++		3FBC3C16411A57F7BCA3FE02 /* WorkspaceEditorBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceEditorBridge.swift; sourceTree = "<group>"; };
+ 		5A02294B2CAC14940011C6EC /* he */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = he; path = he.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+ 		5A02294C2CB9C0410011C6EC /* QuickLookUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuickLookUI.framework; path = System/Library/Frameworks/QuickLookUI.framework; sourceTree = SDKROOT; };
+ 		5A02294F2CCFBF260011C6EC /* file-fods.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = "file-fods.icns"; sourceTree = "<group>"; };
+@@ -1242,6 +1256,21 @@
+ /* End PBXFrameworksBuildPhase section */
+ 
+ /* Begin PBXGroup section */
++		C8EF28B06F6C4F907D464EC5 /* FileWorkbenchBrowser */ = {
++			isa = PBXGroup;
++			children = (
++				4F287F21F0F08FDD71ABCB9A /* ContentView.swift */,
++				884B291E387BDB652F0F51FF /* FilePreviewView.swift */,
++				4A6E17C29249AA3C8CEFF9BB /* FileMetadataView.swift */,
++				9EC88A5B512DCF06BFE72954 /* WorkspaceDesign.swift */,
++				56003EE2C1D4ACF3AF93A1C1 /* WorkspaceStartupView.swift */,
++				82C0BD5B1452EE9125C84D6D /* WorkspaceSplitView.swift */,
++				3FBC3C16411A57F7BCA3FE02 /* WorkspaceEditorBridge.swift */,
++			);
++			name = FileWorkbenchBrowser;
++			path = FileWorkbenchNative;
++			sourceTree = "<group>";
++		};
+ 		F10175902EAB739E00C6C1B8 /* License */ = {
+ 			isa = PBXGroup;
+ 			children = (
+@@ -1647,6 +1676,7 @@
+ 				FC98BAD71BAC4C6300747944 /* Resources */,
+ 				FC6718321BD918D90028600F /* Frameworks */,
+ 				FCBC426B1B9D650400405301 /* Supporting Files */,
++				C8EF28B06F6C4F907D464EC5 /* FileWorkbenchBrowser */,
+ 			);
+ 			path = ONLYOFFICE;
+ 			sourceTree = "<group>";
+@@ -2668,6 +2698,13 @@
+ 				FCB4C6FC26DD018B0012C20D /* ASCTabViewCell.m in Sources */,
+ 				F15C17322EBCA75000D266C7 /* NSCefData.mm in Sources */,
+ 				FCB4C6FD26DD018B0012C20D /* ASCReplacePresentationAnimator.mm in Sources */,
++				B4D3EA6D0462B6C61128A63D /* ContentView.swift in Sources */,
++				DE5888A0067AA088419ECE91 /* FilePreviewView.swift in Sources */,
++				B794B831772526D63CC66C96 /* FileMetadataView.swift in Sources */,
++				DD6BE1B04C0DCD4EE78CA947 /* WorkspaceDesign.swift in Sources */,
++				62516AD838A5C62C30894C25 /* WorkspaceStartupView.swift in Sources */,
++				D6D25F1CA7555D9BAAC0C9D0 /* WorkspaceSplitView.swift in Sources */,
++				CF9770A0C278158C8CCDD7DF /* WorkspaceEditorBridge.swift in Sources */,
+ 			);
+ 			runOnlyForDeploymentPostprocessing = 0;
+ 		};

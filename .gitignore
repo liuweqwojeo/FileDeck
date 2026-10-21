@@ -1,0 +1,10 @@
+.build/
+.swiftpm/
+build/
+.DS_Store
+*.xcuserstate
+# 上游源码与构建产物由固定版本清单恢复，避免将嵌套 Git 仓库加入本项目。
+vendor/
+.cache/
+__pycache__/
+EditorAssets/node_modules/

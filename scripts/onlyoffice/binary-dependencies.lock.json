@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "scope": "Only the default CEF 5414 mac_arm64 archive is pinned here; this is not a complete build dependency lock.",
+  "dependencies": {
+    "cef-5414-mac_arm64": {
+      "url": "https://raw.githubusercontent.com/ONLYOFFICE-data/build_tools_data/0e27d998665eac5511925d1067dcfc54a76f858a/cef/5414/mac_arm64/cef_binary.7z",
+      "size": 69526727,
+      "sha256": "008375e4cb31942155cdbcf1c105476eaf208f5e18ffb28bb1f13976cf0386db",
+      "source": {
+        "repository": "https://github.com/ONLYOFFICE-data/build_tools_data.git",
+        "commit": "0e27d998665eac5511925d1067dcfc54a76f858a",
+        "commitTree": "b397b37e3027d752c9d5c67117e61132ac1b1b74",
+        "path": "cef/5414/mac_arm64/cef_binary.7z",
+        "gitBlobSha1": "bb6d397bdfd6a35dd0437b4974282a8e793d961b",
+        "gitLfs": false,
+        "treeAPI": "https://api.github.com/repos/ONLYOFFICE-data/build_tools_data/git/trees/b397b37e3027d752c9d5c67117e61132ac1b1b74?recursive=1",
+        "contentsAPI": "https://api.github.com/repos/ONLYOFFICE-data/build_tools_data/contents/cef/5414/mac_arm64/cef_binary.7z?ref=0e27d998665eac5511925d1067dcfc54a76f858a",
+        "blobURL": "https://github.com/ONLYOFFICE-data/build_tools_data/blob/0e27d998665eac5511925d1067dcfc54a76f858a/cef/5414/mac_arm64/cef_binary.7z",
+        "verification": "GitHub Contents API and the complete, non-truncated Git tree bind this path and blob to the immutable commit. Local git blob SHA-1 (header plus complete archive bytes) and size match that blob; SHA-256 was computed from the same stable bytes. This is a regular Git blob, not an LFS pointer. The local archive also passed 7za t."
+      }
+    }
+  }
+}

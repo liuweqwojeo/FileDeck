@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'nonce-__STYLE_NONCE__'; img-src data:; connect-src 'none'; font-src 'none'; media-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="style-nonce" content="__STYLE_NONCE__">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>文件编辑器</title>
+  <link rel="stylesheet" href="editor.css">
+  <script src="editor.js" defer></script>
+</head>
+<body>
+  <header aria-label="编辑工具">
+    <button type="button" data-command="undo">撤销</button>
+    <button type="button" data-command="redo">重做</button>
+    <button type="button" data-command="search">查找与替换</button>
+    <button type="button" data-command="formatJSON">格式化 JSON</button>
+    <button type="button" data-mode="source" hidden>源码</button>
+    <button type="button" data-mode="preview" hidden>预览</button>
+    <button type="button" data-mode="split" hidden>分屏</button>
+    <span id="status" role="status">等待打开文件</span>
+  </header>
+  <main><section id="editor" aria-label="源码"></section><article id="preview" aria-label="Markdown 预览" hidden></article></main>
+</body>
+</html>

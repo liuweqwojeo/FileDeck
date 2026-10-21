@@ -1,0 +1,17 @@
+--- a/macos/ONLYOFFICE/AppDelegate.mm
++++ b/macos/ONLYOFFICE/AppDelegate.mm
+@@ -787,6 +787,14 @@
+             }
+         }
+         
++#if FW_WORKBENCH_ENABLED
++        // 新文档默认使用发起保存的 Office 标签所在工作台目录，不随当前标签切换。
++        NSURL *workbenchDirectory = [FWWorkbenchCoordinator saveDirectoryForOfficeViewID:viewId.intValue];
++        NSString *originalPath = params[@"path"];
++        if (workbenchDirectory && (!originalPath.length || ![[NSFileManager defaultManager] fileExistsAtPath:originalPath])) {
++            path = [workbenchDirectory.path stringByAppendingPathComponent:path.lastPathComponent];
++        }
++#endif
+         savePanel.directoryURL = [NSURL fileURLWithPath:[path stringByDeletingLastPathComponent]];
+         savePanel.canCreateDirectories = YES;
+         savePanel.nameFieldStringValue = [[path lastPathComponent] stringByDeletingPathExtension];

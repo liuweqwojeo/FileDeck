@@ -1,0 +1,57 @@
+--- a/macos/ONLYOFFICE/Code/Controls/ASCTabs/ASCTabsControl.m
++++ b/macos/ONLYOFFICE/Code/Controls/ASCTabs/ASCTabsControl.m
+@@ -43,6 +43,9 @@
+ 
+ #import <objc/runtime.h>
+ #import "ASCTabsControl.h"
++#if FW_WORKBENCH_ENABLED
++#import "FWWorkbenchCoordinator.h"
++#endif
+ #import "ASCTabView.h"
+ #import "ASCTabViewCell.h"
+ 
+@@ -475,7 +478,9 @@
+     NSEvent *currentEvent = [NSApp currentEvent];
+     
+     if (currentEvent.clickCount > 1) {
+-        // On double click...
++#if FW_WORKBENCH_ENABLED
++        [[FWWorkbenchCoordinator current] pinTab:selectedTab];
++#endif
+     } else {
+         // watch for a drag event and initiate dragging if a drag is found...
+         if ([self.window nextEventMatchingMask:NSEventMaskLeftMouseUp | NSEventMaskLeftMouseDragged
+--- a/macos/ONLYOFFICE/Code/Controllers/MainWindow/ASCTitleBarController.mm
++++ b/macos/ONLYOFFICE/Code/Controllers/MainWindow/ASCTitleBarController.mm
+@@ -57,6 +57,9 @@
+ #import "ASCThemesController.h"
+ #import "ASCApplicationManager.h"
+ #import "AppDelegate.h"
++#if FW_WORKBENCH_ENABLED
++#import "FWWorkbenchCoordinator.h"
++#endif
+ #import "ASCLinguist.h"
+ #import "NSWindow+Extensions.h"
+ #import "NSCefView.h"
+@@ -388,6 +391,9 @@
+         if (tab) {
+             if (NSCefView *cefView = (NSCefView *)tab.webView) {
+                 [cefView.data setChanged:changed];
++#if FW_WORKBENCH_ENABLED
++                if (changed) [[FWWorkbenchCoordinator current] pinTab:tab];
++#endif
+                 
+                 [tab setTitle:[cefView.data title:NO]];
+                 [self.tabsControl updateTab:tab];
+--- a/macos/ONLYOFFICE/Code/Controllers/Common/ASCCommonViewController.mm
++++ b/macos/ONLYOFFICE/Code/Controllers/Common/ASCCommonViewController.mm
+@@ -1601,7 +1601,8 @@
+     }
+     
+     NSImage * selectedTabViewItemImage = [[[tabView selectedTabViewItem] view] windowScreenshot];
+-    NSView * dimView = [[NSView alloc] initWithFrame:tabView.frame];
++    // 工作台中 tabView 已在分栏容器内，遮罩必须换算到当前控制器坐标。
++    NSView * dimView = [[NSView alloc] initWithFrame:[tabView convertRect:tabView.bounds toView:self.view]];
+     dimView.backgroundColor = [NSColor windowBackgroundColor];
+     
+     if (selectedTabViewItemImage) {

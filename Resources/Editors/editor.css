@@ -1,0 +1,26 @@
+:root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: Canvas; color: CanvasText; }
+header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid GrayText; }
+button { border: 1px solid GrayText; border-radius: 5px; padding: 4px 10px; background: ButtonFace; color: ButtonText; }
+button:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
+#status { margin-left: auto; color: GrayText; font-size: 12px; }
+main { display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; flex: 1; }
+main.markdown-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+main.reading-layout { display: flex; justify-content: center; }
+main.reading-layout #preview { width: 100%; max-width: 920px; border-left: 0; }
+#editor[hidden] { display: none; }
+.read-only button[data-command="undo"], .read-only button[data-command="redo"], .read-only button[data-command="formatJSON"] { display: none; }
+button[aria-pressed="true"] { background: Highlight; color: HighlightText; }
+#editor { min-width: 0; overflow: hidden; }
+.cm-editor { height: 100%; font-size: 13px; }
+.cm-scroller { font-family: "SFMono-Regular", Menlo, monospace; }
+#preview { overflow: auto; padding: 20px 28px; border-left: 1px solid GrayText; line-height: 1.65; overflow-wrap: anywhere; }
+#preview[hidden] { display: none; }
+#preview img { max-width: 100%; height: auto; }
+#preview pre { overflow: auto; padding: 12px; background: color-mix(in srgb, CanvasText 7%, Canvas); border-radius: 6px; }
+#preview table { border-collapse: collapse; }
+#preview td, #preview th { padding: 5px 10px; border: 1px solid GrayText; }
+.md-link { color: LinkText; text-decoration: underline; cursor: text; }
+.blocked-image { color: GrayText; font-size: 0.9em; }
+@media (prefers-color-scheme: dark) { .cm-editor { background: #1d1d1f; color: #eee; } .cm-gutters { background: #252527; color: #a9a9ad; border-color: #3c3c40; } }

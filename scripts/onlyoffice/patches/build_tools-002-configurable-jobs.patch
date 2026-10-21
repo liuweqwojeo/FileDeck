@@ -1,0 +1,13 @@
+--- a/scripts/qmake.py
++++ b/scripts/qmake.py
+@@ -20,7 +20,9 @@
+ 
+ def get_j_num():
+   if ("0" != config.option("multiprocess")):
+-    return ["-j" + str(multiprocessing.cpu_count())]
++    # Allow the embedding project to cap memory-intensive C++ compilation.
++    jobs = int(os.environ.get("FW_ONLYOFFICE_BUILD_JOBS", multiprocessing.cpu_count()))
++    return ["-j" + str(max(1, jobs))]
+   return []
+ 
+ def check_support_platform(platform):

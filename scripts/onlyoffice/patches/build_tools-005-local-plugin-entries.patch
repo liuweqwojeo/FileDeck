@@ -1,0 +1,42 @@
+--- a/scripts/base.py
++++ b/scripts/base.py
+@@ -1587,12 +1587,23 @@
+     copy_sdkjs_plugin(plugins_dir, dst_dir, name, is_name_as_guid, is_desktop_local)
+   return
+ 
++def copy_pinned_plugin_entries(out_dir):
++  # 入口文件来自项目已固定提交的仓库，不能再使用随网站发布变化的 URL。
++  source_dir = get_script_dir() + "/../../onlyoffice.github.io/sdkjs-plugins/v1"
++  names = ("plugins.js", "plugins-ui.js", "plugins.css")
++  # 先验证全部输入，避免缺失一个文件时留下混合版本；复制失败必须向上传播。
++  for name in names:
++    if not is_file(source_dir + "/" + name):
++      raise RuntimeError("固定的插件入口文件缺失：" + source_dir + "/" + name)
++  os.makedirs(get_path(out_dir), exist_ok=True)
++  for name in names:
++    shutil.copy2(get_path(source_dir + "/" + name), get_path(out_dir + "/" + name))
++  return
++
+ def support_old_versions_plugins(out_dir):
+   if is_file(out_dir + "/pluginBase.js"):
+     return
+-  download("https://onlyoffice.github.io/sdkjs-plugins/v1/plugins.js", out_dir + "/plugins.js")
+-  download("https://onlyoffice.github.io/sdkjs-plugins/v1/plugins-ui.js", out_dir + "/plugins-ui.js")
+-  download("https://onlyoffice.github.io/sdkjs-plugins/v1/plugins.css", out_dir + "/plugins.css")
++  copy_pinned_plugin_entries(out_dir)
+   content_plugin_base = ""
+   with open(get_path(out_dir + "/plugins.js"), "r") as file:
+     content_plugin_base += file.read()
+--- a/scripts/deploy_desktop.py
++++ b/scripts/deploy_desktop.py
+@@ -233,9 +233,7 @@
+ 
+     # io
+     base.create_dir(root_dir + "/editors/sdkjs-plugins/v1")
+-    base.download("https://onlyoffice.github.io/sdkjs-plugins/v1/plugins.js", root_dir + "/editors/sdkjs-plugins/v1/plugins.js")
+-    base.download("https://onlyoffice.github.io/sdkjs-plugins/v1/plugins-ui.js", root_dir + "/editors/sdkjs-plugins/v1/plugins-ui.js")
+-    base.download("https://onlyoffice.github.io/sdkjs-plugins/v1/plugins.css", root_dir + "/editors/sdkjs-plugins/v1/plugins.css")
++    base.copy_pinned_plugin_entries(root_dir + "/editors/sdkjs-plugins/v1")
+     base.support_old_versions_plugins(root_dir + "/editors/sdkjs-plugins")
+ 
+     base.copy_sdkjs_plugin(git_dir + "/desktop-sdk/ChromiumBasedEditors/plugins/encrypt", root_dir + "/editors/sdkjs-plugins", "advanced2", True)

@@ -1,0 +1,292 @@
+--- a/macos/ONLYOFFICE/Code/Controllers/Common/ASCCommonViewController.mm
++++ b/macos/ONLYOFFICE/Code/Controllers/Common/ASCCommonViewController.mm
+@@ -70,6 +70,9 @@
+ #import "ASCEditorJSVariables.h"
+ #import "ASCPresentationReporter.h"
+ #import "ASCLicenseController.h"
++#if FW_WORKBENCH_ENABLED
++#import "FWWorkbenchCoordinator.h"
++#endif
+ #import <Carbon/Carbon.h>
+ #import <QuartzCore/QuartzCore.h>
+ 
+@@ -145,6 +148,9 @@
+         [self createStartPage];
+         [self loadStartPage];
+         [self setupTouchBar];
++#if FW_WORKBENCH_ENABLED
++        [FWWorkbenchCoordinator installInController:self];
++#endif
+         
+         // External handle
+         if (_externalDelegate && [_externalDelegate respondsToSelector:@selector(onMainWindowLoaded:)]) {
+@@ -439,6 +445,9 @@
+ #pragma mark Public
+ 
+ - (BOOL)shouldCloseWindow {
++#if FW_WORKBENCH_ENABLED
++    if (![[FWWorkbenchCoordinator forController:self] prepareToCloseApplication:NO]) return NO;
++#endif
+     NSInteger unsaved = 0;
+     //    BOOL preventTerminate = NO;
+     
+@@ -450,6 +459,9 @@
+     
+     NSMutableArray * locked_uuids = [NSMutableArray array];
+     for (ASCTabView * tab in self.tabsControl.tabs) {
++#if FW_WORKBENCH_ENABLED
++        if ([[FWWorkbenchCoordinator forController:self] hasChangesForTab:tab]) unsaved++;
++#endif
+         if (NSCefView * cefView = [self cefViewWithTab:tab]) {
+             if ([cefView.data hasChanges]) {
+                 unsaved++;
+@@ -491,7 +503,11 @@
+             NSArray * tabs = [NSArray arrayWithArray:self.tabsControl.tabs];
+             for (ASCTabView * tab in tabs) {
+                 NSCefView * cefView = [self cefViewWithTab:tab];
+-                if ((cefView && [cefView.data hasChanges]) || [locked_uuids containsObject:tab.uuid]) {
++                if ((cefView && [cefView.data hasChanges]) || [locked_uuids containsObject:tab.uuid]
++#if FW_WORKBENCH_ENABLED
++                    || [[FWWorkbenchCoordinator forController:self] hasChangesForTab:tab]
++#endif
++                    ) {
+                     [tabsWithChanges addObject:tab];
+                 } else {
+                     [self.tabsControl removeTab:tab selected:NO animated:NO];
+@@ -552,11 +568,12 @@
+     NSTabViewItem * item = nil;
+     NSCefView * cefView = nil;
+     
+-    if (tab) {
+-        item = [self.tabView tabViewItemAtIndex:[self.tabView indexOfTabViewItemWithIdentifier:tab.uuid]];
+-    } else {
+-        item = [self.tabView tabViewItemAtIndex:[self.tabView indexOfTabViewItemWithIdentifier:rootTabId]];
+-    }
++#if FW_WORKBENCH_ENABLED
++    if ([FWWorkbenchCoordinator isNativeTab:tab]) return nil;
++#endif
++    NSInteger index = [self.tabView indexOfTabViewItemWithIdentifier:tab ? tab.uuid : rootTabId];
++    if (index == NSNotFound) return nil;
++    item = [self.tabView tabViewItemAtIndex:index];
+     
+     if (item) {
+         for (NSView * view in item.view.subviews) {
+@@ -661,6 +678,15 @@
+         }
+     }
+ }
++
++#if FW_WORKBENCH_ENABLED
++- (void)fwCancelPendingClose {
++    ((AppDelegate *)NSApp.delegate).waitingForTerminateApp = NO;
++    self.waitingForClose = NO;
++    self.shouldLogoutPortal = NO;
++    [self.tabsWithChanges removeAllObjects];
++}
++#endif
+ 
+ - (void)safeCloseTabsWithChanges {
+     if ([[self tabsWithChanges] count] > 0) {
+@@ -1273,6 +1299,9 @@
+ #pragma mark ASCTabsControl Delegate
+ 
+ - (void)tabs:(ASCTabsControl *)control didSelectTab:(ASCTabView *)tab {
++#if FW_WORKBENCH_ENABLED
++    [[FWWorkbenchCoordinator forController:self] didSelectTab:tab];
++#endif
+     [[ASCSharedSettings sharedInstance] setSetting:tab forKey:kSettingsCurrentTab];
+     
+     if (tab) {
+@@ -1290,6 +1319,9 @@
+ //}
+ 
+ - (void)tabs:(ASCTabsControl *)control didAddTab:(ASCTabView *)tab {
++#if FW_WORKBENCH_ENABLED
++    if ([[FWWorkbenchCoordinator forController:self] addNativeTab:tab]) return;
++#endif
+     if (tab.params) {
+         BOOL isReattaching = [tab.params[@"reattaching"] boolValue];
+         NSCefView *existingCefView = (NSCefView *)tab.webView;
+@@ -1449,10 +1481,19 @@
+         [cefView autoPinEdgesToSuperviewEdges];
+         
+         [self tabView:self.tabView dimTabViewItem:item];
++#if FW_WORKBENCH_ENABLED
++        [[FWWorkbenchCoordinator forController:self] recordOfficeTab:tab];
++#endif
+     }
+ }
+ 
+ - (BOOL)tabs:(ASCTabsControl *)control willRemovedTab:(ASCTabView *)tab {
++#if FW_WORKBENCH_ENABLED
++    if ([FWWorkbenchCoordinator isNativeTab:tab]) {
++        [[FWWorkbenchCoordinator forController:self] requestCloseTab:tab];
++        return NO;
++    }
++#endif
+     if (tab) {
+         NSCefView * cefView = [self cefViewWithTab:tab];
+         if (cefView && ([cefView checkCloudCryptoNeedBuild] || [cefView checkBuilding])) {
+@@ -1473,7 +1514,12 @@
+ - (void)tabs:(ASCTabsControl *)control didRemovedTab:(ASCTabView *)tab {
+     BOOL isDetached = [tab.params[@"detached"] boolValue];
+ 
+-    if (!isDetached) {
++    BOOL isNative = NO;
++#if FW_WORKBENCH_ENABLED
++    isNative = [FWWorkbenchCoordinator isNativeTab:tab];
++    if (isNative) [[FWWorkbenchCoordinator forController:self] didRemoveTab:tab];
++#endif
++    if (!isDetached && !isNative) {
+         CAscApplicationManager * appManager = [NSAscApplicationWorker getAppManager];
+         appManager->DestroyCefView([tab.uuid intValue]);
+ 
+--- a/macos/ONLYOFFICE/Code/Controllers/Common/ASCCommonViewController.h
++++ b/macos/ONLYOFFICE/Code/Controllers/Common/ASCCommonViewController.h
+@@ -56,6 +56,9 @@
+ - (ASCTabView *)tabViewWithId:(int)viewId;
+ - (ASCTabView *)tabWithParam:(NSString *)param value:(NSString *)value;
+ - (void)safeCloseTabsWithChanges;
++#if FW_WORKBENCH_ENABLED
++- (void)fwCancelPendingClose;
++#endif
+ 
+ - (void)openAcknowledgments;
+ - (void)openEULA;
+--- a/macos/ONLYOFFICE/AppDelegate.mm
++++ b/macos/ONLYOFFICE/AppDelegate.mm
+@@ -66,6 +66,9 @@
+ #import "NSDictionary+Extensions.h"
+ #import "PureLayout.h"
+ #import "ascprinter.h"
++#if FW_WORKBENCH_ENABLED
++#import "FWWorkbenchCoordinator.h"
++#endif
+ 
+ #ifndef _MAS
+     #import "PFMoveApplication.h"
+@@ -96,7 +99,7 @@
+     
+     [self updateAppAppearance];
+     
+-#ifndef _MAS
++#if !defined(_MAS) && !FW_WORKBENCH_ENABLED
+     PFMoveToApplicationsFolderIfNecessary();
+ #endif
+     
+@@ -350,6 +353,9 @@
+ }
+ 
+ - (BOOL)preferOpenEditorWindow {
++#if FW_WORKBENCH_ENABLED
++    return NO;
++#endif
+     CAscApplicationManager * appManager = [NSAscApplicationWorker getAppManager];
+     auto mode = appManager->GetUserSettings()->Get(L"editor-window-mode");
+     return (mode == L"1") ? YES : NO;
+@@ -369,7 +375,13 @@
+     for (NSWindow *window in [NSApp windows]) {
+         if ([window isKindOfClass:[ASCTitleWindow class]]) {
+             controller = (ASCCommonViewController *)window.contentViewController;
++#if FW_WORKBENCH_ENABLED
++            if (![[FWWorkbenchCoordinator forController:controller] prepareToCloseApplication:YES]) return NO;
++#endif
+             for (ASCTabView * tab in controller.tabsControl.tabs) {
++#if FW_WORKBENCH_ENABLED
++                if ([[FWWorkbenchCoordinator forController:controller] hasChangesForTab:tab]) unsaved++;
++#endif
+                 if (NSCefView * cefView = [controller cefViewWithTab:tab]) {
+                     if ([cefView.data hasChanges]) {
+                         unsaved++;
+@@ -433,7 +445,11 @@
+                     NSMutableArray<ASCTabView *> *tabsWithChanges = [NSMutableArray array];
+                     for (ASCTabView * tab in tabs) {
+                         NSCefView * cefView = [controller cefViewWithTab:tab];
+-                        if ([cefView.data hasChanges] || [locked_uuids containsObject:tab.uuid]) {
++                        if ([cefView.data hasChanges] || [locked_uuids containsObject:tab.uuid]
++#if FW_WORKBENCH_ENABLED
++                            || [[FWWorkbenchCoordinator forController:controller] hasChangesForTab:tab]
++#endif
++                            ) {
+                             [tabsWithChanges addObject:tab];
+                         } else {
+                             [controller.tabsControl removeTab:tab selected:NO animated:NO];
+@@ -505,6 +521,14 @@
+ }
+ 
+ - (BOOL)validateMenuItem:(NSMenuItem *)item {
++#if FW_WORKBENCH_ENABLED
++    FWWorkbenchCoordinator *workbench = [FWWorkbenchCoordinator current];
++    if ([workbench hasSelectedNativeDocument]) {
++        if (item.action == @selector(onMenuSave:)) return [workbench canSaveSelectedAs:NO];
++        if (item.action == @selector(onMenuSaveAs:)) return [workbench canSaveSelectedAs:YES];
++        if (item.action == @selector(onMenuPrint:)) return NO;
++    }
++#endif
+ #ifdef _MAS
+     [self.updateMenuItem setHidden:YES];
+     [self.eulaMenuItem setHidden:YES];
+@@ -589,6 +613,9 @@
+ }
+ 
+ - (IBAction)onMenuOpen:(NSMenuItem *)sender {
++#if FW_WORKBENCH_ENABLED
++    if ([FWWorkbenchCoordinator current]) { [[FWWorkbenchCoordinator current] openPanel]; return; }
++#endif
+     NSString * directiry = [[ASCSharedSettings sharedInstance] settingByKey:kSettingsLastOpenDirectory];
+     
+     if (!directiry || directiry.length < 1) {
+@@ -603,6 +630,11 @@
+ }
+ 
+ - (IBAction)onMenuSave:(NSMenuItem *)sender {
++#if FW_WORKBENCH_ENABLED
++    if ([[FWWorkbenchCoordinator current] hasSelectedNativeDocument]) {
++        [[FWWorkbenchCoordinator current] saveSelectedAs:NO]; return;
++    }
++#endif
+     NSCefView * cefView = [self cefViewFromKeyWindow];
+     if (cefView) {
+         NSEditorApi::CAscMenuEvent* pEvent = new NSEditorApi::CAscMenuEvent(ASC_MENU_EVENT_TYPE_CEF_SAVE);
+@@ -611,6 +643,11 @@
+ }
+ 
+ - (IBAction)onMenuSaveAs:(NSMenuItem *)sender {
++#if FW_WORKBENCH_ENABLED
++    if ([[FWWorkbenchCoordinator current] hasSelectedNativeDocument]) {
++        [[FWWorkbenchCoordinator current] saveSelectedAs:YES]; return;
++    }
++#endif
+     NSCefView * cefView = [self cefViewFromKeyWindow];
+     if (cefView) {
+         NSEditorApi::CAscExecCommandJS * pData = new NSEditorApi::CAscExecCommandJS;
+@@ -921,6 +958,19 @@
+ - (void)onCEFCreateTab:(NSNotification *)notification {
+     if (notification && notification.userInfo) {
+         NSMutableDictionary * params = [notification.userInfo mutableCopy];
++#if FW_WORKBENCH_ENABLED
++        // 文件入口统一分类；仅 Office 继续进入上游 canOpenFile / CEF 流程。
++        if (![params[@"fwRouted"] boolValue] && [params[@"path"] isKindOfClass:NSString.class] &&
++            ([params[@"action"] isEqualToNumber:@(ASCTabActionOpenLocalFile)] ||
++             [params[@"action"] isEqualToNumber:@(ASCTabActionOpenLocalRecentFile)])) {
++            NSURL *url = [NSURL fileURLWithPath:params[@"path"]];
++            if (![FWWorkbenchCoordinator isOfficeURL:url]) {
++                [self presentMainWindow];
++                [[FWWorkbenchCoordinator current] openURL:url pinned:YES];
++                return;
++            }
++        }
++#endif
+         
+         if ([params[@"action"] isEqualToNumber:@(ASCTabActionCreateLocalFileFromTemplate)]) {
+             if ( [params objectForKey:@"path"] or [params objectForKey:@"id"] ) {}
+@@ -1218,6 +1268,9 @@
+ }
+ 
+ - (void)onCEFOnOpenLocalFile:(NSNotification *)notification {
++#if FW_WORKBENCH_ENABLED
++    if ([FWWorkbenchCoordinator current]) { [[FWWorkbenchCoordinator current] openPanel]; return; }
++#endif
+     if (notification && notification.userInfo) {
+         NSString * directory = notification.userInfo[@"directory"];
+         

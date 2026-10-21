@@ -1,0 +1,50 @@
+--- a/macos/ONLYOFFICE.xcodeproj/project.pbxproj
++++ b/macos/ONLYOFFICE.xcodeproj/project.pbxproj
+@@ -67,6 +67,7 @@
+ 		5AA06CBD27AC3BA000D67BEE /* ASCLinguist.m in Sources */ = {isa = PBXBuildFile; fileRef = 5AA06CBC27AC3BA000D67BEE /* ASCLinguist.m */; };
+ 		5AA06CC027B1267200D67BEE /* ASCLinguist.m in Sources */ = {isa = PBXBuildFile; fileRef = 5AA06CBC27AC3BA000D67BEE /* ASCLinguist.m */; };
+ 		5AA06CC127B1267600D67BEE /* ASCLinguist.m in Sources */ = {isa = PBXBuildFile; fileRef = 5AA06CBC27AC3BA000D67BEE /* ASCLinguist.m */; };
++		6627DFF256C807439D2DA6B3 /* NewFileTemplate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B77720A66E92BB0561B448D8 /* NewFileTemplate.swift */; };
+ 		5AA2F5842D5B824300C9DDC9 /* file-hwpx.icns in Resources */ = {isa = PBXBuildFile; fileRef = 5AA2F5822D5B824300C9DDC9 /* file-hwpx.icns */; };
+ 		5AA2F5852D5B824300C9DDC9 /* file-hwpx.icns in Resources */ = {isa = PBXBuildFile; fileRef = 5AA2F5822D5B824300C9DDC9 /* file-hwpx.icns */; };
+ 		5AA2F5862D5B824300C9DDC9 /* file-hwpx.icns in Resources */ = {isa = PBXBuildFile; fileRef = 5AA2F5822D5B824300C9DDC9 /* file-hwpx.icns */; };
+@@ -834,6 +835,7 @@
+ 		5A9F8D382848AA06007CA93F /* file-xlsm.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = "file-xlsm.icns"; sourceTree = "<group>"; };
+ 		5AA06CBB27AC3BA000D67BEE /* ASCLinguist.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ASCLinguist.h; sourceTree = "<group>"; };
+ 		5AA06CBC27AC3BA000D67BEE /* ASCLinguist.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ASCLinguist.m; sourceTree = "<group>"; };
++		B77720A66E92BB0561B448D8 /* NewFileTemplate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewFileTemplate.swift; sourceTree = "<group>"; };
+ 		5AA2F5822D5B824300C9DDC9 /* file-hwpx.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = "file-hwpx.icns"; sourceTree = "<group>"; };
+ 		5AA2F5832D5B824300C9DDC9 /* file-hwp.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = "file-hwp.icns"; sourceTree = "<group>"; };
+ 		5AA2F58A2DC16E7E00C9DDC9 /* ur-PK */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "ur-PK"; path = "ur-PK.lproj/Document-Sign.strings"; sourceTree = "<group>"; };
+@@ -1684,6 +1686,7 @@
+ 				FC67182F1BD918250028600F /* Vendor */,
+ 				FCBC426D1B9D650400405301 /* AppDelegate.h */,
+ 				FCBC426E1B9D650400405301 /* AppDelegate.mm */,
++				0184FBDA9C08234B7153DF50 /* FileDeckFileCreation */,
+ 				FCBC42751B9D650500405301 /* Images.xcassets */,
+ 				FC98BAD71BAC4C6300747944 /* Resources */,
+ 				FC6718321BD918D90028600F /* Frameworks */,
+@@ -1720,6 +1723,15 @@
+ 				FCC77C73206CEE5A001B7837 /* ASCSavePanelWithFormatController.m */,
+ 			);
+ 			path = Controls;
++			sourceTree = "<group>";
++		};
++		0184FBDA9C08234B7153DF50 /* FileDeckFileCreation */ = {
++			isa = PBXGroup;
++			children = (
++				B77720A66E92BB0561B448D8 /* NewFileTemplate.swift */,
++			);
++			name = FileDeckFileCreation;
++			path = FileWorkbenchNative;
+ 			sourceTree = "<group>";
+ 		};
+ 		FCC77C54206CDB0A001B7837 /* Extensions */ = {
+@@ -2675,6 +2687,7 @@
+ 				FCB4C6DB26DD018B0012C20D /* NSCefView.mm in Sources */,
+ 				FCB4C6DC26DD018B0012C20D /* ASCTabsControl.m in Sources */,
+ 				FCB4C6DD26DD018B0012C20D /* ASCTitleBarController.mm in Sources */,
++				6627DFF256C807439D2DA6B3 /* NewFileTemplate.swift in Sources */,
+ 				FCB4C6DE26DD018B0012C20D /* SFBPopover.m in Sources */,
+ 				FCB4C6DF26DD018B0012C20D /* ASCEventsController.mm in Sources */,
+ 				FCB4C6E026DD018B0012C20D /* ASCAboutController.m in Sources */,

@@ -1,0 +1,43 @@
+--- a/scripts/core_common/modules/openssl.py
++++ b/scripts/core_common/modules/openssl.py
+@@ -129,13 +129,18 @@
+       if config.option("sysroot") != "":
+         base.restore_sysroot_env()
+ 
+-  if (-1 != config.option("platform").find("mac")) and not base.is_dir("../build/mac_64"):
++  if (-1 != config.option("platform").find("mac")) and not base.is_file("../build/mac_64/.fw-install-complete"):
+     base.cmd("./Configure", ["enable-md2", "no-shared", "no-asm", "darwin64-x86_64-cc", "--prefix=" + old_cur_dir + "/build/mac_64", "--openssldir=" + old_cur_dir + "/build/mac_64", "-mmacosx-version-min=10.11"])
+-    base.cmd("make", ["build_libs", "install"])
++    # Multiple top-level make goals can race under parallel make; finish all outputs before install.
++    base.cmd("make", ["-j" + os.environ.get("FW_ONLYOFFICE_BUILD_JOBS", "4")])
++    base.cmd("make", ["install"])
++    # A directory may exist after a failed install; only this final marker permits reuse.
++    base.writeFile("../build/mac_64/.fw-install-complete", "OpenSSL_1_1_1f")
+ 
+-  if (-1 != config.option("platform").find("mac")) and not base.is_dir("../build/mac_arm64"):
++  if (-1 != config.option("platform").find("mac")) and not base.is_file("../build/mac_arm64/.fw-install-complete"):
+     os.chdir(base_dir)
+-    base.cmd("git", ["clone", "--depth=1", "--branch", "OpenSSL_1_1_1f", "https://github.com/openssl/openssl.git", "openssl2"])
++    if not base.is_dir("openssl2"):
++      base.cmd("git", ["clone", "--depth=1", "--branch", "OpenSSL_1_1_1f", "https://github.com/openssl/openssl.git", "openssl2"])
+     os.chdir(base_dir + "/openssl2")
+     replace1 = "\"darwin64-x86_64-cc\" => {"
+     replace2 = "\"darwin64-arm64-cc\" => {\n\
+@@ -147,9 +152,15 @@
+         perlasm_scheme   => \"macosx\",\n\
+     },\n\
+     \"darwin64-x86_64-cc\" => {"
+-    base.replaceInFile(base_dir + "/openssl2/Configurations/10-main.conf", replace1, replace2)
++    # Reconfiguration after an interrupted build must not duplicate the ARM target.
++    if "\"darwin64-arm64-cc\" =>" not in base.readFile(base_dir + "/openssl2/Configurations/10-main.conf"):
++      base.replaceInFile(base_dir + "/openssl2/Configurations/10-main.conf", replace1, replace2)
+     base.cmd("./Configure", ["enable-md2", "no-shared", "no-asm", "darwin64-arm64-cc", "--prefix=" + old_cur_dir + "/build/mac_arm64", "--openssldir=" + old_cur_dir + "/build/mac_arm64"])
+-    base.cmd("make", ["build_libs", "install"])
++    # Multiple top-level make goals can race under parallel make; finish all outputs before install.
++    base.cmd("make", ["-j" + os.environ.get("FW_ONLYOFFICE_BUILD_JOBS", "4")])
++    base.cmd("make", ["install"])
++    # A directory may exist after a failed install; only this final marker permits reuse.
++    base.writeFile("../build/mac_arm64/.fw-install-complete", "OpenSSL_1_1_1f")
+ 
+   os.chdir(old_cur)
+   return

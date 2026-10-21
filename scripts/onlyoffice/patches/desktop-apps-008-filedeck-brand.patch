@@ -1,0 +1,86 @@
+--- a/macos/ONLYOFFICE/Code/Controllers/MainWindow/ASCTitleBarController.mm
++++ b/macos/ONLYOFFICE/Code/Controllers/MainWindow/ASCTitleBarController.mm
+@@ -66,6 +66,23 @@
+ #import "NSDictionary+Extensions.h"
+ 
+ 
++/// 工作台品牌从最终应用元数据读取；只替换主窗口标识，编辑内核及第三方声明保持原样。
++static NSImage *FWTitleBrandImage(BOOL dark) {
++#if FW_WORKBENCH_ENABLED
++    NSString *name = NSBundle.mainBundle.infoDictionary[@"CFBundleDisplayName"] ?: @"FileDeck";
++    NSDictionary *attributes = @{NSFontAttributeName:[NSFont systemFontOfSize:16 weight:NSFontWeightSemibold],
++                                 NSForegroundColorAttributeName:dark ? NSColor.whiteColor : NSColor.labelColor};
++    NSSize size = [name sizeWithAttributes:attributes];
++    return [NSImage imageWithSize:NSMakeSize(90, 24) flipped:NO drawingHandler:^BOOL(NSRect rect) {
++        [name drawAtPoint:NSMakePoint((NSWidth(rect) - size.width) / 2, (NSHeight(rect) - size.height) / 2)
++          withAttributes:attributes];
++        return YES;
++    }];
++#else
++    return [NSImage imageNamed:dark ? @"logo-tab-light" : @"logo-tab-dark"];
++#endif
++}
++
+ static float kASCWindowDefaultTrafficButtonsLeftMargin = 0;
+ static float kASCWindowMinTitleWidth = 0;
+ static float kASCRTLTabsRightMargin = 0;
+@@ -246,9 +263,7 @@
+             portalButtonCell.lineColor          = kColorRGBA(255, 255, 255, 0.0);
+         }
+ 
+-        if ( [ASCThemesController isCurrentThemeDark] ) {
+-            [self.portalButton setImage:[NSImage imageNamed:@"logo-tab-light"]];
+-        }
++        [self.portalButton setImage:FWTitleBrandImage([ASCThemesController isCurrentThemeDark])];
+     }
+ 
+ 
+@@ -429,11 +444,11 @@
+         [self.portalButton setNeedsDisplay];
+ 
+         if ( [self.portalButton state] != NSControlStateValueOn ) {
+-            [ASCThemesController isDarkWindowAppearance] ? [self.portalButton setImage:[NSImage imageNamed:@"logo-tab-light"]] :
+-                                                    [self.portalButton setImage:[NSImage imageNamed:@"logo-tab-dark"]];
++            [ASCThemesController isDarkWindowAppearance] ? [self.portalButton setImage:FWTitleBrandImage(YES)] :
++                                                    [self.portalButton setImage:FWTitleBrandImage(NO)];
+         } else {
+-            [ASCThemesController isCurrentThemeDark] ? [self.portalButton setImage:[NSImage imageNamed:@"logo-tab-light"]] :
+-                                                    [self.portalButton setImage:[NSImage imageNamed:@"logo-tab-dark"]];
++            [ASCThemesController isCurrentThemeDark] ? [self.portalButton setImage:FWTitleBrandImage(YES)] :
++                                                    [self.portalButton setImage:FWTitleBrandImage(NO)];
+         }
+ 
+         for (ASCTabView * tab in self.tabsControl.tabs) {
+@@ -455,13 +470,13 @@
+             portalButtonCell.bgActiveColor = [ASCThemesController color:btnPortalActiveBackgroundColor forTheme:theme];
+             [self.portalButton setNeedsDisplay];
+ 
+-            [ASCThemesController isDarkWindowAppearance] ? [self.portalButton setImage:[NSImage imageNamed:@"logo-tab-light"]] :
+-                                                        [self.portalButton setImage:[NSImage imageNamed:@"logo-tab-dark"]];
++            [ASCThemesController isDarkWindowAppearance] ? [self.portalButton setImage:FWTitleBrandImage(YES)] :
++                                                        [self.portalButton setImage:FWTitleBrandImage(NO)];
+         }
+     } else {
+         if ( [self.portalButton state] != NSControlStateValueOn ) {
+-            [ASCThemesController isDarkWindowAppearance] ? [self.portalButton setImage:[NSImage imageNamed:@"logo-tab-light"]] :
+-                                                        [self.portalButton setImage:[NSImage imageNamed:@"logo-tab-dark"]];
++            [ASCThemesController isDarkWindowAppearance] ? [self.portalButton setImage:FWTitleBrandImage(YES)] :
++                                                        [self.portalButton setImage:FWTitleBrandImage(NO)];
+         }
+     }
+ 
+@@ -555,11 +570,11 @@
+         [self.portalButton setState:NSControlStateValueOff];
+ 
+         if ( [ASCThemesController isDarkWindowAppearance] )
+-            [self.portalButton setImage:[NSImage imageNamed:@"logo-tab-light"]];
+-        else [self.portalButton setImage:[NSImage imageNamed:@"logo-tab-dark"]];
++            [self.portalButton setImage:FWTitleBrandImage(YES)];
++        else [self.portalButton setImage:FWTitleBrandImage(NO)];
+     } else {
+         [self.portalButton setState:NSControlStateValueOn];
+-        [self.portalButton setImage:[NSImage imageNamed:[ASCThemesController isCurrentThemeDark] ? @"logo-tab-light" : @"logo-tab-dark"]];
++        [self.portalButton setImage:FWTitleBrandImage([ASCThemesController isCurrentThemeDark])];
+     }
+ }
+ 

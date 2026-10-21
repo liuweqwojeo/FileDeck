@@ -1,0 +1,15 @@
+--- a/scripts/build_js.py
++++ b/scripts/build_js.py
+@@ -129,8 +129,10 @@
+   return base.cmd_in_dir(directory_result, "python", ["build.py"] + params)
+ 
+ def build_interface(directory):
+-  _run_npm(directory)
+-  _run_grunt(directory, ["--force", "--verbose"] + base.web_apps_addons_param())
++  # 两个界面项目均自带锁文件；不改写依赖解析，安装失败由 base.cmd 立即终止。
++  _run_npm_ci(directory)
++  # 不传 --force，避免资源生成失败后仍继续部署不完整的编辑器。
++  _run_grunt(directory, ["--verbose"] + base.web_apps_addons_param())
+   return
+ 
+ def get_build_param(minimize=True):

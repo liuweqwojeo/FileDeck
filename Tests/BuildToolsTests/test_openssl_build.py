@@ -1,0 +1,201 @@
+"""在临时目录执行实际 OpenSSL 补丁流程，模拟构建/安装失败；不编译、不联网。"""
+
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import types
+import unittest
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[2]
+SOURCE_PATH = "scripts/core_common/modules/openssl.py"
+PATCH = ROOT / "scripts/onlyoffice/patches/build_tools-004-openssl-resumable-install.patch"
+
+
+class OpenSSLBuildTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        upstream = ROOT / "vendor/onlyoffice/build_tools"
+        if not (upstream / ".git").exists():
+            raise unittest.SkipTest("先获取锁定的 build_tools 源码；本测试不自动下载。")
+        original = subprocess.check_output(["git", "-C", str(upstream), "show",
+                                           "cf4cac0846d03e2e00a6fec5d1ecd4e9463086d5:" + SOURCE_PATH], text=True)
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            target = project / SOURCE_PATH
+            target.parent.mkdir(parents=True)
+            target.write_text(original)
+            subprocess.run(["git", "-C", str(project), "apply", "--check", str(PATCH)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(project), "apply", str(PATCH)], check=True, capture_output=True)
+            cls.patched_source = target.read_text()
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.directory = Path(self.temporary.name).resolve()
+        self.openssl = self.directory / "core/Common/3dParty/openssl"
+        self.openssl.mkdir(parents=True)
+        self.make_source("openssl")
+        self.events = []
+        self.failure = None
+        self.built = set()
+        self.prefixes = {}
+        self.config = types.ModuleType("config")
+        self.config.option = lambda name: "mac_arm64" if name == "platform" else ""
+        self.base = types.ModuleType("base")
+        self.base.get_script_dir = lambda: str(self.directory / "build_tools/scripts")
+        (self.directory / "build_tools/scripts").mkdir(parents=True)
+        self.base.common_check_version = lambda *_: None
+        self.base.host_platform = lambda: "mac"
+        self.base.is_dir = os.path.isdir
+        self.base.is_file = os.path.isfile
+        self.base.readFile = lambda path: Path(path).read_text() if Path(path).is_file() else ""
+        self.base.writeFile = self.write_file
+        self.base.replaceInFile = self.replace_file
+        self.base.find_mac_sdk = lambda: "/fixture/MacOSX.sdk"
+        self.base.cmd = self.command
+        self.module = types.ModuleType("openssl")
+        previous_path = list(sys.path)
+        try:
+            with patch.dict(sys.modules, {"base": self.base, "config": self.config,
+                                         "openssl_mobile": types.ModuleType("openssl_mobile")}):
+                exec(compile(self.patched_source, str(PATCH), "exec"), self.module.__dict__)
+        finally:
+            sys.path[:] = previous_path
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def make_source(self, name):
+        source = self.openssl / name
+        (source / "Configurations").mkdir(parents=True)
+        (source / "Configurations/10-main.conf").write_text('"darwin64-x86_64-cc" => {\n    inherit_from => ["darwin-common"],\n},\n')
+        (source / "Configure").write_text("fixture")
+
+    def marker(self, architecture):
+        return self.openssl / "build" / architecture / ".fw-install-complete"
+
+    def run_make(self, jobs="4"):
+        previous = Path.cwd()
+        try:
+            with patch.dict(os.environ, {"FW_ONLYOFFICE_BUILD_JOBS": jobs}):
+                self.module.make()
+        finally:
+            # 上游 base.cmd 失败会退出进程；测试恢复 cwd 后模拟下一次独立构建。
+            os.chdir(previous)
+
+    def fail_if_requested(self, architecture, stage):
+        if self.failure == (architecture, stage):
+            self.failure = None
+            raise SystemExit("fixture " + architecture + " " + stage + " failed")
+
+    def command(self, executable, arguments):
+        if executable == "git":
+            self.events.append(("clone", arguments[-1]))
+            self.make_source(arguments[-1])
+            return
+        architecture = "mac_arm64" if Path.cwd().name == "openssl2" else "mac_64"
+        if executable == "./Configure":
+            if not Path("Configure").is_file():
+                raise SystemExit("incomplete source checkout")
+            self.events.append((architecture, "configure"))
+            self.prefixes[architecture] = Path(next(value[9:] for value in arguments if value.startswith("--prefix=")))
+            self.built.discard(architecture)
+        elif executable == "make" and len(arguments) == 1 and arguments[0].startswith("-j"):
+            self.events.append((architecture, "build", arguments[0]))
+            self.fail_if_requested(architecture, "build")
+            (Path.cwd() / "apps").mkdir(exist_ok=True)
+            (Path.cwd() / "apps/CA.pl").write_text("generated by full default target")
+            self.built.add(architecture)
+        elif executable == "make" and arguments == ["install"]:
+            self.events.append((architecture, "install"))
+            self.assertIn(architecture, self.built, "install 必须等待完整默认目标结束")
+            self.assertTrue(Path("apps/CA.pl").is_file(), "安装依赖的生成文件必须已经存在")
+            prefix = self.prefixes[architecture]
+            (prefix / "lib").mkdir(parents=True, exist_ok=True)
+            self.fail_if_requested(architecture, "install")
+            (prefix / "lib/libssl.a").write_text("library fixture")
+            (prefix / "lib/libcrypto.a").write_text("library fixture")
+        else:
+            self.fail("不应执行的命令：" + repr((executable, arguments)))
+
+    def write_file(self, path, content):
+        path = Path(path)
+        architecture = path.parent.name
+        self.events.append((architecture, "marker"))
+        self.assertTrue((path.parent / "lib/libssl.a").is_file())
+        self.assertTrue((path.parent / "lib/libcrypto.a").is_file())
+        path.write_text(content)
+
+    def replace_file(self, path, before, after):
+        path = Path(path)
+        if path.is_file():
+            path.write_text(path.read_text().replace(before, after))
+
+    def test_full_build_precedes_install_and_successful_retry_is_noop(self):
+        self.run_make(jobs="3")
+        for architecture in ["mac_64", "mac_arm64"]:
+            self.assertEqual([event[1:] for event in self.events if event[0] == architecture],
+                             [("configure",), ("build", "-j3"), ("install",), ("marker",)])
+            self.assertEqual(self.marker(architecture).read_text(), "OpenSSL_1_1_1f")
+        self.events.clear()
+        self.run_make()
+        self.assertEqual(self.events, [])
+
+    def test_x86_install_failure_leaves_no_marker_and_retries_partial_directory(self):
+        self.failure = ("mac_64", "install")
+        with self.assertRaises(SystemExit):
+            self.run_make()
+        self.assertTrue(self.marker("mac_64").parent.is_dir())
+        self.assertFalse(self.marker("mac_64").exists())
+        self.assertFalse((self.openssl / "openssl2").exists())
+        self.events.clear()
+        self.run_make()
+        self.assertIn(("mac_64", "build", "-j4"), self.events)
+        self.assertTrue(self.marker("mac_64").is_file())
+        self.assertTrue(self.marker("mac_arm64").is_file())
+
+    def test_arm_build_failure_reuses_checkout_and_keeps_one_arm_configuration(self):
+        self.failure = ("mac_arm64", "build")
+        with self.assertRaises(SystemExit):
+            self.run_make()
+        self.assertTrue(self.marker("mac_64").is_file())
+        self.assertFalse(self.marker("mac_arm64").exists())
+        self.events.clear()
+        self.run_make()
+        self.assertFalse(any(event[0] in ["clone", "mac_64"] for event in self.events))
+        self.assertTrue(self.marker("mac_arm64").is_file())
+        text = (self.openssl / "openssl2/Configurations/10-main.conf").read_text()
+        self.assertEqual(text.count('"darwin64-arm64-cc" =>'), 1)
+
+    def test_arm_install_failure_does_not_reuse_partial_install_as_success(self):
+        self.failure = ("mac_arm64", "install")
+        with self.assertRaises(SystemExit):
+            self.run_make()
+        self.assertTrue(self.marker("mac_arm64").parent.is_dir())
+        self.assertFalse(self.marker("mac_arm64").exists())
+        self.events.clear()
+        self.run_make()
+        self.assertEqual([event[1:] for event in self.events if event[0] == "mac_arm64"],
+                         [("configure",), ("build", "-j4"), ("install",), ("marker",)])
+        self.assertFalse(any(event[0] in ["clone", "mac_64"] for event in self.events))
+
+    def test_existing_complete_checkout_without_markers_is_built_without_clone(self):
+        self.make_source("openssl2")
+        for architecture in ["mac_64", "mac_arm64"]:
+            self.marker(architecture).parent.mkdir(parents=True)
+        self.run_make()
+        self.assertFalse(any(event[0] == "clone" for event in self.events))
+        self.assertTrue(self.marker("mac_64").is_file())
+        self.assertTrue(self.marker("mac_arm64").is_file())
+
+    def test_incomplete_checkout_never_gets_success_marker(self):
+        (self.openssl / "openssl2").mkdir()
+        with self.assertRaises(SystemExit):
+            self.run_make()
+        self.assertFalse(self.marker("mac_arm64").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

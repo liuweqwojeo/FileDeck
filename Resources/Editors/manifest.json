@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "target": "Safari 17 / macOS 14",
+  "dependenciesLockSHA256": "57bede355ef831a7f24bac2914fd7ff8256688b2daf2942150202114602fde96",
+  "files": {
+    "editor.js": "5cbdf44084643611ecef425b3e938a342756d613a8839b1f4ade84cb7505f45f",
+    "editor.js.LEGAL.txt": "56957f10208bf202c69f67c8de1b90ea606f0058c643a142f26f9761b7e53fef",
+    "editor.css": "8595c09b5b93d9d30578515a8fbb530534eed0e346d8301840edba9ffb5a1388",
+    "index.html": "50824e0c7eadaa070698caae9f563523cc480b9de1bdef7962645838a37d2ac9",
+    "THIRD-PARTY-NOTICES.txt": "c7eff8702aa1c536ad0e52b527b306dab3237ea217718bc112ed1eb0d102b1e1"
+  }
+}

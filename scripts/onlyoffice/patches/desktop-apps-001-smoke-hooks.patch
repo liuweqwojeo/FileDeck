@@ -1,0 +1,110 @@
+--- a/macos/ONLYOFFICE/main.mm
++++ b/macos/ONLYOFFICE/main.mm
+@@ -56,6 +56,7 @@
+ #import "ASCSharedSettings.h"
+ #import "ASCEventsController.h"
+ #import "ASCThemesController.h"
++#import "FileWorkbenchSmoke/FWOfficeSmoke.h"
+ 
+ CAscApplicationManager * createASCApplicationManager() {
+     return new ASCApplicationManager();
+@@ -118,6 +119,8 @@
+     // setup doc sign
+     [ASCDocSignController shared];
+     
++    // 外部 delegate 会被事件控制器缓存，测试包装器必须提前注册并保活。
++    FWOfficeSmokeInstallDelegate();
+     // Create CEF event listener
+     [ASCEventsController sharedInstance];
+ 
+--- a/macos/ONLYOFFICE/AppDelegate.mm
++++ b/macos/ONLYOFFICE/AppDelegate.mm
+@@ -42,6 +42,7 @@
+ //
+ 
+ #import "AppDelegate.h"
++#import "FileWorkbenchSmoke/FWOfficeSmoke.h"
+ #import "ASCConstants.h"
+ #import "ASCSavePanelWithFormatController.h"
+ #import "ASCCertificatePreviewController.h"
+@@ -718,6 +719,7 @@
+ }
+ 
+ - (void)saveLocalFileWithParams:(NSDictionary *)params {
++    if (FWOfficeSmokeHandleSaveParams(params)) return;
+     if (params) {
+         NSString * path         = params[@"path"];
+         NSString * viewId       = params[@"viewId"];
+--- a/macos/ONLYOFFICE/Code/Utils/ASCHelper.m
++++ b/macos/ONLYOFFICE/Code/Utils/ASCHelper.m
+@@ -42,6 +42,7 @@
+ //
+ 
+ #import "ASCHelper.h"
++#import "../../FileWorkbenchSmoke/FWOfficeSmoke.h"
+ #import "ASCExternalController.h"
+ 
+ static NSMutableDictionary * localSettings;
+@@ -49,6 +50,8 @@
+ @implementation ASCHelper
+ 
+ + (NSString *)applicationDataPath {
++    NSString *smokePath = FWOfficeSmokeApplicationDataPath();
++    if (smokePath) return smokePath;
+     NSError * error;
+     NSString * path = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
+ #ifndef MAS
+--- a/macos/ONLYOFFICE.xcodeproj/project.pbxproj
++++ b/macos/ONLYOFFICE.xcodeproj/project.pbxproj
+@@ -21,6 +21,9 @@
+ /* End PBXAggregateTarget section */
+ 
+ /* Begin PBXBuildFile section */
++		3727BA80E2DCB9E9D3ED54CF /* FWOfficeSmoke.mm in Sources */ = {isa = PBXBuildFile; fileRef = 8AA1000EF2A35D7FAD3AA305 /* FWOfficeSmoke.mm */; };
++		2B5175187F683FC21A1209D8 /* FWOfficeSmoke.mm in Sources */ = {isa = PBXBuildFile; fileRef = 8AA1000EF2A35D7FAD3AA305 /* FWOfficeSmoke.mm */; };
++		E39521775C37437AF2DCBEE5 /* FWOfficeSmoke.mm in Sources */ = {isa = PBXBuildFile; fileRef = 8AA1000EF2A35D7FAD3AA305 /* FWOfficeSmoke.mm */; };
+ 		5A02294D2CB9C0410011C6EC /* QuickLookUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5A02294C2CB9C0410011C6EC /* QuickLookUI.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
+ 		5A02294E2CB9C3260011C6EC /* QuickLookUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5A02294C2CB9C0410011C6EC /* QuickLookUI.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
+ 		5A0229502CCFBF260011C6EC /* file-fods.icns in Resources */ = {isa = PBXBuildFile; fileRef = 5A02294F2CCFBF260011C6EC /* file-fods.icns */; };
+@@ -471,6 +474,8 @@
+ /* End PBXCopyFilesBuildPhase section */
+ 
+ /* Begin PBXFileReference section */
++		8AA1000EF2A35D7FAD3AA305 /* FWOfficeSmoke.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = FileWorkbenchSmoke/FWOfficeSmoke.mm; sourceTree = "<group>"; };
++		C7E784411810056401A79CE3 /* FWOfficeSmoke.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = FileWorkbenchSmoke/FWOfficeSmoke.h; sourceTree = "<group>"; };
+ 		5A0229392C4A54600011C6EC /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
+ 		5A02293A2C7770DF0011C6EC /* en-GB */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "en-GB"; path = "en-GB.lproj/Document-Sign.strings"; sourceTree = "<group>"; };
+ 		5A02293B2C7770E00011C6EC /* en-GB */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "en-GB"; path = "en-GB.lproj/Localizable.strings"; sourceTree = "<group>"; };
+@@ -1586,6 +1591,8 @@
+ 				FCD2B9161BC64F0C00F54560 /* Localizable.stringsdict */,
+ 				FC6718441BD91B3A0028600F /* MoveApplication.strings */,
+ 				FCBC42701B9D650400405301 /* main.mm */,
++				C7E784411810056401A79CE3 /* FWOfficeSmoke.h */,
++				8AA1000EF2A35D7FAD3AA305 /* FWOfficeSmoke.mm */,
+ 			);
+ 			name = "Supporting Files";
+ 			sourceTree = "<group>";
+@@ -2445,6 +2452,7 @@
+ 				FC0BD6B0258B63F700C47F95 /* ASCPresentationReporter.mm in Sources */,
+ 				FC2C43A925D46813003A39C4 /* ASCCertificateQLPreview.m in Sources */,
+ 				FC0BD6B1258B63F700C47F95 /* main.mm in Sources */,
++				3727BA80E2DCB9E9D3ED54CF /* FWOfficeSmoke.mm in Sources */,
+ 				FC0BD6B2258B63F700C47F95 /* KSNavigationController.mm in Sources */,
+ 				FC2C438E25D4326F003A39C4 /* ASCCertificatePreviewController.m in Sources */,
+ 				FC0BD6B3258B63F700C47F95 /* ASCDocumentSignatureStepController.mm in Sources */,
+@@ -2524,6 +2532,7 @@
+ 				FCB4C6EA26DD018B0012C20D /* ASCPresentationReporter.mm in Sources */,
+ 				FCB4C6EB26DD018B0012C20D /* ASCCertificateQLPreview.m in Sources */,
+ 				FCB4C6EC26DD018B0012C20D /* main.mm in Sources */,
++				2B5175187F683FC21A1209D8 /* FWOfficeSmoke.mm in Sources */,
+ 				FCB4C6ED26DD018B0012C20D /* KSNavigationController.mm in Sources */,
+ 				FCB4C6EE26DD018B0012C20D /* ASCCertificatePreviewController.m in Sources */,
+ 				FCB4C6EF26DD018B0012C20D /* ASCDocumentSignatureStepController.mm in Sources */,
+@@ -2603,6 +2612,7 @@
+ 				FC54A2941F94BCE00086F4FE /* ASCPresentationReporter.mm in Sources */,
+ 				FC2C43A825D46813003A39C4 /* ASCCertificateQLPreview.m in Sources */,
+ 				FCBC42711B9D650400405301 /* main.mm in Sources */,
++				E39521775C37437AF2DCBEE5 /* FWOfficeSmoke.mm in Sources */,
+ 				FC8AA30E2084BFE700549F2D /* KSNavigationController.mm in Sources */,
+ 				FC2C438D25D4326F003A39C4 /* ASCCertificatePreviewController.m in Sources */,
+ 				FC8AA31A2084C54D00549F2D /* ASCDocumentSignatureStepController.mm in Sources */,

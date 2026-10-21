@@ -1,0 +1,99 @@
+diff --git a/scripts/core_common/modules/cef.py b/scripts/core_common/modules/cef.py
+--- a/scripts/core_common/modules/cef.py
++++ b/scripts/core_common/modules/cef.py
+@@ -6,6 +6,7 @@
+ import base
+ import os
+ import glob
++from pinned_binary import CEF_MAC_ARM64_5414, prepare_pinned_archive
+ 
+ def clear_module():
+   for child in glob.glob("./*"):
+@@ -50,7 +51,13 @@
+ 
+     os.chdir(platform)
+     
+-    data_url = base.get_file_last_modified_url(url_platform)
++    # 默认 ARM64 路径固定到已核对 Git blob 的 CEF 5414；显式 107 配置保留上游逻辑。
++    pinned_mac_arm64 = platform == "mac_arm64" and not config.check_option("config", "cef_version_107")
++    if pinned_mac_arm64:
++      prepare_pinned_archive(archive_name, CEF_MAC_ARM64_5414)
++      data_url = "sha256:" + CEF_MAC_ARM64_5414["sha256"]
++    else:
++      data_url = base.get_file_last_modified_url(url_platform)
+     old_data_url = base.readFile(archive_name_data)
+ 
+     build_dir_name = "build"
+@@ -60,7 +67,8 @@
+       build_dir_name = "build_103"
+ 
+     if (data_url != old_data_url):
+-      if base.is_file(archive_name):
++      # 固定归档已经完成哈希和 7za 校验；仅失效旧解包缓存，不删除已验证输入。
++      if not pinned_mac_arm64 and base.is_file(archive_name):
+         base.delete_file(archive_name)
+       if base.is_dir(build_dir_name):
+         base.delete_dir(build_dir_name)
+@@ -70,7 +78,7 @@
+       continue
+ 
+     # download
+-    if not base.is_file(archive_name):
++    if not pinned_mac_arm64 and not base.is_file(archive_name):
+       base.download(url_platform, archive_name)
+ 
+     # extract
+diff --git a/scripts/core_common/modules/pinned_binary.py b/scripts/core_common/modules/pinned_binary.py
+new file mode 100644
+--- /dev/null
++++ b/scripts/core_common/modules/pinned_binary.py
+@@ -0,0 +1,49 @@
++"""校验固定来源的构建归档；仅下载临时文件，成功后原子替换缓存。"""
++
++import hashlib
++import os
++import subprocess
++import tempfile
++
++# 与项目 scripts/onlyoffice/binary-dependencies.lock.json 保持一致，测试会检查两者。
++# SHA-256 来自已匹配官方固定提交 Git blob 的完整归档，不能以首次下载内容自动更新。
++CEF_MAC_ARM64_5414 = {
++  "url": "https://raw.githubusercontent.com/ONLYOFFICE-data/build_tools_data/0e27d998665eac5511925d1067dcfc54a76f858a/cef/5414/mac_arm64/cef_binary.7z",
++  "size": 69526727,
++  "sha256": "008375e4cb31942155cdbcf1c105476eaf208f5e18ffb28bb1f13976cf0386db",
++}
++
++
++def matches_dependency(path, dependency):
++  if not os.path.isfile(path) or os.path.islink(path):
++    return False
++  before = os.stat(path)
++  if before.st_size != dependency["size"]:
++    return False
++  digest = hashlib.sha256()
++  with open(path, "rb") as stream:
++    for block in iter(lambda: stream.read(1024 * 1024), b""):
++      digest.update(block)
++  after = os.stat(path)
++  stable = (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) == (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
++  return stable and digest.hexdigest() == dependency["sha256"]
++
++
++def prepare_pinned_archive(archive_name, dependency):
++  destination = os.path.abspath(archive_name)
++  if os.path.islink(destination):
++    raise RuntimeError("固定依赖缓存不能是符号链接：" + destination)
++  if not matches_dependency(destination, dependency):
++    descriptor, temporary = tempfile.mkstemp(prefix=".cef-download-", suffix=".part", dir=os.path.dirname(destination))
++    os.close(descriptor)
++    try:
++      subprocess.check_call(["curl", "--fail", "--location", "--retry", "3", "--connect-timeout", "30", "--output", temporary, dependency["url"]])
++      if not matches_dependency(temporary, dependency):
++        raise RuntimeError("CEF 归档大小或 SHA-256 与固定来源不匹配；保留原缓存。")
++      os.replace(temporary, destination)
++    finally:
++      if os.path.exists(temporary):
++        os.unlink(temporary)
++  # 即使复用缓存，也必须确认归档结构完整；失败直接终止，不能继续解包或构建。
++  subprocess.check_call(["7za", "t", destination])
++  return destination

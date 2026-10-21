@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "desktopRelease": "v10.0.0",
+  "buildToolsVersion": "9.4.0",
+  "target": "mac_arm64",
+  "notes": [
+    "DesktopEditors 发布标签和 build_tools/version 的编号不同，保留上游实际编号，不改写 PRODUCT_VERSION。",
+    "web-apps-pro 的同一提交可从公开 web-apps 仓库获取，无需私有仓库凭据。",
+    "附属仓库固定为核验时的公开提交；完整第三方二进制依赖仍由上游脚本下载，此清单不声称实现逐字节可复现构建。"
+  ],
+  "repositories": [
+    {"path": ".", "url": "https://github.com/ONLYOFFICE/DesktopEditors.git", "commit": "47522aa00c12940ee2c4e2cf1546044e4af8ee75", "source": "v10.0.0"},
+    {"path": "core", "url": "https://github.com/ONLYOFFICE/core.git", "commit": "3250a848ee4ef20c2fb8c38dc86350ec579124b8", "source": "DesktopEditors gitlink"},
+    {"path": "desktop-apps", "url": "https://github.com/ONLYOFFICE/desktop-apps.git", "commit": "8f452c7f703b795dcc09012ba6517df4ca47f9bc", "source": "DesktopEditors gitlink"},
+    {"path": "desktop-sdk", "url": "https://github.com/ONLYOFFICE/desktop-sdk.git", "commit": "2f16486ade20ad7deff17968a8845f955089fa57", "source": "DesktopEditors gitlink"},
+    {"path": "sdkjs", "url": "https://github.com/ONLYOFFICE/sdkjs.git", "commit": "72b0421c0bbf9d01eed9cf14834ae47eb2df1b50", "source": "DesktopEditors gitlink"},
+    {"path": "dictionaries", "url": "https://github.com/ONLYOFFICE/dictionaries.git", "commit": "d3223bbb777883db66ac3cd249f71c6ebdc992c7", "source": "DesktopEditors gitlink"},
+    {"path": "web-apps", "url": "https://github.com/ONLYOFFICE/web-apps.git", "commit": "9c0ca538c3b211052347df09d2a4d6781f023403", "source": "DesktopEditors gitlink; public mirror verified"},
+    {"path": "build_tools", "url": "https://github.com/ONLYOFFICE/build_tools.git", "commit": "cf4cac0846d03e2e00a6fec5d1ecd4e9463086d5", "source": "release/v9.4.0"},
+    {"path": "core-fonts", "url": "https://github.com/ONLYOFFICE/core-fonts.git", "commit": "7030c6681fb5bbed560675cb42422f91df15d5c9", "source": "public master snapshot"},
+    {"path": "document-templates", "url": "https://github.com/ONLYOFFICE/document-templates.git", "commit": "0a52fb76fa53fddf7d70da28878537cde3d29421", "source": "public master snapshot"},
+    {"path": "sdkjs-forms", "url": "https://github.com/ONLYOFFICE/sdkjs-forms.git", "commit": "3349ba8166422dd99ed1456b3ddc77faac69d120", "source": "public master snapshot"},
+    {"path": "onlyoffice.github.io", "url": "https://github.com/ONLYOFFICE/onlyoffice.github.io.git", "commit": "f3263c055c25875874004463b46c2e6a7000a9fd", "source": "public master snapshot"},
+    {"path": "core/Common/3dParty/hyphen/hyphen", "url": "https://github.com/hunspell/hyphen", "commit": "c299444629416f90625a2e56fdfc4efdca131ecc", "source": "verified local dependency HEAD; fetched before upstream hyphen module"}
+  ],
+  "prebuiltDependencies": {
+    "cef": "binary-dependencies.lock.json#dependencies.cef-5414-mac_arm64"
+  }
+}
