@@ -100,6 +100,8 @@ Office 使用应用内的真实空白模板，PDF 和 PNG/JPEG 生成可解码�
 
 ## 源码结构图
 
+[查看交互式架构图](docs/filedeck-architecture.html)：覆盖浏览预览、原生编辑、ONLYOFFICE 和当前工作树中的架构变化，支持节点探索、主题切换及图片导出。下载或克隆仓库后，用浏览器打开该 HTML 文件即可查看。
+
 ### 仓库目录
 
 ```text
