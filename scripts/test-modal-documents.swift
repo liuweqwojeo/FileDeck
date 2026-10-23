@@ -105,6 +105,15 @@ final class ModalDocumentTests: NSObject, NSApplicationDelegate {
                           styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "FileDeck 文档关闭验收（自动关闭）"
         window.isReleasedWhenClosed = false
+        let testCase = ProcessInfo.processInfo.environment["FW_MODAL_DOCUMENT_TEST_CASE"]
+        if testCase != "yaml-preview" {
+            trace("JSON 美化预览")
+            try await jsonPreview()
+        }
+        if testCase == "json-preview" { return }
+        trace("YAML 彩色预览")
+        try await yamlPreview()
+        if testCase == "yaml-preview" || testCase == "structured-preview" { return }
         trace("删除与另存为")
         try await deletionAndSaveAs()
         trace("取消与保存")
@@ -115,6 +124,65 @@ final class ModalDocumentTests: NSObject, NSApplicationDelegate {
         try await conflictAndDiscard()
         trace("载入期间关闭")
         try await closeDuringLoading()
+    }
+    func jsonPreview() async throws {
+        let url = output.appendingPathComponent("美化预览.json")
+        let source = "{\r\n\"id\":9223372036854775807,\"items\":[true,null,{\"名称\":\"中文\"}]}"
+        try Data(source.utf8).write(to: url)
+        let host = try await open(url)
+        let editor = web(in: host.view)!
+        let pretty = try await js(editor, "return document.querySelector('.cm-content').textContent") as? String ?? ""
+        try check("JSON 只读预览自动缩进并保留大整数", pretty.contains("  \"id\": 9223372036854775807,")
+                  && pretty.contains("    true,") && host.readOnly && !host.modified && !host.canSave)
+        let colors = try await js(editor, """
+        const kinds = ['key', 'string', 'number', 'bool', 'null'];
+        const colors = kinds.map(kind => {
+            const token = document.querySelector('.fw-json-' + kind);
+            return token ? getComputedStyle(token).color : null;
+        });
+        return colors.every(Boolean) && new Set(colors).size === kinds.length;
+        """) as? Bool
+        try check("JSON 键名与各类值在真实 WK 中呈现不同颜色", colors == true)
+        let previewSource = try await js(editor, "return window.workbench.getText()") as? String
+        try check("JSON 美化预览不改源码或磁盘文件", previewSource == source && (try Data(contentsOf: url)) == Data(source.utf8))
+        host.beginEditing()
+        try await wait("JSON 进入编辑") { host.isEditing && !host.busy }
+        let editingSource = try await js(editor, "return window.workbench.getText()") as? String
+        let canUndo = try await js(editor, "return window.workbench.getInteractionState().canUndo") as? Bool
+        try check("JSON 进入编辑恢复原文且不产生草稿或撤销项", editingSource == source && !host.modified && canUndo == false)
+        let closed = await close(host)
+        try check("JSON 美化预览关闭不提示保存", closed && window.attachedSheet == nil && (try Data(contentsOf: url)) == Data(source.utf8))
+    }
+    func yamlPreview() async throws {
+        let source = "# 配置说明\r\ndefaults: &defaults\r\n  title: \"中文\"\r\n  host: localhost\r\n  code: !!str 42\r\nservice: *defaults\r\n"
+        for ext in ["yaml", "yml"] {
+            let url = output.appendingPathComponent("彩色预览." + ext)
+            try Data(source.utf8).write(to: url)
+            let host = try await open(url)
+            let editor = web(in: host.view)!
+            // 原生会话 ready 与异步语法加载分别完成，等 token 出现再检查实际颜色。
+            var colored = false
+            for _ in 0..<100 {
+                colored = try await js(editor, """
+                const colors = ['key', 'string', 'comment', 'anchor', 'type', 'punctuation'].map(kind => {
+                    const token = document.querySelector('.fw-yaml-' + kind);
+                    return token ? getComputedStyle(token).color : null;
+                });
+                return colors.every(Boolean) && new Set(colors).size === colors.length;
+                """) as? Bool == true
+                if colored { break }
+                try await Task.sleep(for: .milliseconds(30))
+            }
+            try check(ext + " 键名、文本、注释、锚点、类型及分隔符实际分色", colored && host.readOnly && !host.modified)
+            let original = try await js(editor, "return window.workbench.getText()") as? String
+            try check(ext + " 配色保留缩进、注释、CRLF 和磁盘内容", original == source && (try Data(contentsOf: url)) == Data(source.utf8))
+            host.beginEditing()
+            try await wait(ext + " 进入编辑") { host.isEditing && !host.busy }
+            let editable = try await js(editor, "return !!document.querySelector('.fw-yaml-key') && document.querySelector('.cm-content').getAttribute('contenteditable') === 'true' && !window.workbench.getInteractionState().canUndo") as? Bool
+            try check(ext + " 编辑沿用彩色高亮且不产生草稿或撤销项", editable == true && !host.modified)
+            let closed = await close(host)
+            try check(ext + " 关闭不提示保存或改写文件", closed && window.attachedSheet == nil && (try Data(contentsOf: url)) == Data(source.utf8))
+        }
     }
     func cancelAndSave() async throws {
         let url = output.appendingPathComponent("确认取消.md")

@@ -1,0 +1,31 @@
+--- a/ChromiumBasedEditors/lib/src/spellchecker.cpp
++++ b/ChromiumBasedEditors/lib/src/spellchecker.cpp
+@@ -694,13 +694,15 @@
+ 			std::wstring ws1 = sDirectory + NSFile::CUtf8Converter::GetUnicodeStringFromUTF8((BYTE*)s1.c_str(), (LONG)s1.length());
+ 			std::wstring ws2 = sDirectory + NSFile::CUtf8Converter::GetUnicodeStringFromUTF8((BYTE*)s2.c_str(), (LONG)s2.length());
+ 
++			// Hunspell 原生按行读取 .hz；只扩展枚举条件，原始路径仍交给它自动回退。
++			// 不落盘解压字典，也不改变用户词典和连字符词典的读取方式。
+ 			NSFile::CFileBinary oFile1;
+-			bool b1 = oFile1.OpenFile(ws1);
++			bool b1 = oFile1.OpenFile(ws1) || oFile1.OpenFile(ws1 + L".hz");
+ 			oFile1.CloseFile();
+ 
+ 			NSFile::CFileBinary oFile2;
+-			oFile2.OpenFile(ws2);
+-			bool b2 = oFile2.OpenFile(ws2);
++			bool b2 = oFile2.OpenFile(ws2) || oFile2.OpenFile(ws2 + L".hz");
++			oFile2.CloseFile();
+ 
+ 			if (b1 && b2)
+ 			{
+@@ -870,3 +872,9 @@
+ {
+ 	m_pInternal->Init(sDirectory, sUserDirectory);
+ }
++
++// 打包器验证内核能力后才压缩字典，避免旧内核静默遗漏所有语言。
++extern "C" __attribute__((visibility("default"))) int FWCompressedDictionariesVersion()
++{
++	return 1;
++}

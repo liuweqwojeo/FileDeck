@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { JSDOM } from "jsdom";
+import { EditorState } from "@codemirror/state";
 import { createWorkbench } from "../src/workbench.mjs";
 import { MAX_JSON_FORMAT_DEPTH } from "../src/json-format.mjs";
 
@@ -115,6 +116,64 @@ test("阅读转编辑与确认取消保留同一编辑器、光标、滚动、�
     assert.equal(api.getText("modal"), "# 标题\n正文");
     assert.equal(api.redo("modal"), true);
     assert.equal(api.getText("modal"), "# 标题\n正文\n草稿");
+  });
+});
+
+test("JSON 只读预览自动美化，进入编辑恢复源码、换行与高亮且没有格式化撤销项", async () => {
+  await withWorkbench(async ({ controller, messages, document }) => {
+    const { api } = controller;
+    const source = '{\r\n"id":9223372036854775807,"value":1e+09,"text":"中文\\u4e2d","items":[true,null,{}]}';
+    api.open({ id: "json-preview", text: source, language: "JSON", readOnly: true });
+    const view = controller.view;
+    assert.match(view.state.doc.toString(), /\n  "id": 9223372036854775807,/);
+    assert.match(view.state.doc.toString(), /"items": \[\n    true,\n    null,\n    \{\}/);
+    assert.match(view.state.doc.toString(), /1e\+09/);
+    assert.match(view.state.doc.toString(), /中文\\u4e2d/);
+    assert.equal(api.getText(), source);
+    assert.equal(document.querySelector(".cm-content").getAttribute("contenteditable"), "false");
+    assert.deepEqual(messages.map(({ type }) => type), ["opened"]);
+    api.markSaved({ id: "json-preview", text: source });
+    assert.equal(messages.at(-1).dirty, false);
+    assert.equal(messages.at(-1).text, source);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(view.state.facet(EditorState.tabSize), 7);
+    api.setEditing({ id: "json-preview", enabled: true });
+    assert.equal(controller.view, view);
+    assert.equal(view.state.doc.toString(), source.replaceAll("\r\n", "\n"));
+    assert.equal(view.state.facet(EditorState.tabSize), 7);
+    assert.equal(api.getText(), source);
+    assert.equal(api.undo(), false);
+    assert.equal(document.querySelector("#status").textContent, "已保存");
+    view.dispatch({ changes: { from: view.state.doc.length, insert: " " }, selection: { anchor: 4 } });
+    api.setEditing({ id: "json-preview", enabled: false });
+    assert.equal(api.getText(), source + " ");
+    api.setEditing({ id: "json-preview", enabled: true });
+    assert.equal(view.state.selection.main.anchor, 4);
+    assert.equal(api.undo(), true);
+    assert.equal(api.getText(), source);
+    assert.equal(api.redo(), true);
+    assert.equal(api.getText(), source + " ");
+  }, async () => EditorState.tabSize.of(7));
+});
+
+test("JSON 预览语法错误或排版超限保留原文，并且不影响后续文件", async () => {
+  await withWorkbench(async ({ controller, messages }) => {
+    const { api } = controller;
+    const deep = "[".repeat(MAX_JSON_FORMAT_DEPTH + 1) + "0" + "]".repeat(MAX_JSON_FORMAT_DEPTH + 1);
+    for (const source of ['{"a":1,}', deep]) {
+      api.open({ id: "fallback", text: source, language: "json", readOnly: true });
+      assert.equal(controller.view.state.doc.toString(), source);
+      assert.equal(api.getText(), source);
+      api.setEditing({ id: "fallback", enabled: true });
+      assert.equal(api.getText(), source);
+      assert.equal(api.undo(), false);
+    }
+    api.open({ id: "valid", text: '{"a":1}', language: "json", readOnly: true });
+    assert.notEqual(controller.view.state.doc.toString(), api.getText());
+    api.open({ id: "next", text: "新文件", language: "text", readOnly: true });
+    assert.equal(api.getText(), "新文件");
+    assert.equal(controller.view.state.doc.toString(), "新文件");
+    assert.equal(messages.some(({ type }) => type === "change" || type === "error"), false);
   });
 });
 

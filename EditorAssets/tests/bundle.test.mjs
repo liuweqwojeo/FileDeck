@@ -6,7 +6,7 @@ import { JSDOM } from "jsdom";
 
 const resource = (name) => new URL(`../../Resources/Editors/${name}`, import.meta.url);
 
-test("生成的单文件 bundle 在无网络 DOM 中启动并完成 JSON 编辑及撤销", async () => {
+test("离线 bundle 支持 JSON 编辑撤销及 JSON/YAML 彩色预览", async () => {
   const html = await readFile(resource("index.html"), "utf8");
   const bundle = await readFile(resource("editor.js"), "utf8");
   const dom = new JSDOM(html, { runScripts: "outside-only", pretendToBeVisual: true, url: resource("index.html").href });
@@ -30,6 +30,43 @@ test("生成的单文件 bundle 在无网络 DOM 中启动并完成 JSON 编辑�
     assert.equal(workbench.getText(), source);
     await new Promise((resolve) => setTimeout(resolve, 15));
     assert.equal(messages.some((message) => message.type === "error"), false);
+    workbench.open({ id: "colored-preview", text: '{"name":"中文","count":42,"enabled":true,"empty":null}', language: "json", readOnly: true });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const content = dom.window.document.querySelector(".cm-content");
+    for (const [kind, text] of [["key", '"name"'], ["string", '"中文"'], ["number", "42"], ["bool", "true"], ["null", "null"]]) {
+      assert.ok(Array.from(content.querySelectorAll(`.fw-json-${kind}`)).some((span) => span.textContent === text), `${kind} 应获得对应的语义色彩`);
+    }
+    workbench.setEditing({ id: "colored-preview", enabled: true });
+    assert.equal(content.querySelector(".fw-json-number").textContent, "42");
+    const css = await readFile(resource("editor.css"), "utf8");
+    const [light] = css.split("@media (prefers-color-scheme: dark)");
+    for (const kind of ["key", "string", "number", "bool", "null"]) {
+      assert.match(light, new RegExp(`\\.fw-json-${kind}[^{}]*\\{ color: #[0-9a-f]{6}; \\}`));
+      assert.match(css.slice(css.indexOf("@media (prefers-color-scheme: dark)")), new RegExp(`\\.fw-json-${kind}[^{}]*\\{ color: #[0-9a-f]{6}; \\}`));
+    }
+    const yaml = ['# 配置说明', 'defaults: &defaults', '  title: "中文"', '  host: localhost', '  note: |', '    多行正文', '  code: !!str 42', 'service: *defaults'].join("\r\n");
+    for (const language of ["yaml", "yml", "YAML", "YML"]) {
+      const count = messages.length;
+      workbench.open({ id: language, text: yaml, language, readOnly: true });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const content = dom.window.document.querySelector(".cm-content");
+      for (const [kind, text] of [["key", "title"], ["string", '"中文"'], ["string", "localhost"], ["string", "多行正文"], ["comment", "# 配置说明"], ["anchor", "&defaults"], ["anchor", "*defaults"], ["type", "!!str"], ["punctuation", ":"]]) {
+        assert.ok(Array.from(content.querySelectorAll(`.fw-yaml-${kind}`)).some((span) => span.textContent.trim() === text), `${language} ${text} 应获得 ${kind} 配色`);
+      }
+      assert.equal(workbench.getText(), yaml);
+      assert.equal(content.getAttribute("contenteditable"), "false");
+      workbench.setEditing({ id: language, enabled: true });
+      assert.ok(content.querySelector(".fw-yaml-key"));
+      assert.equal(content.getAttribute("contenteditable"), "true");
+      assert.equal(workbench.getText(), yaml);
+      assert.equal(workbench.undo(), false);
+      assert.deepEqual(messages.slice(count).map(({ type }) => type), ["opened"]);
+    }
+    for (const kind of ["key", "string", "comment", "anchor", "type", "punctuation"]) {
+      for (const theme of [light, css.slice(css.indexOf("@media (prefers-color-scheme: dark)"))]) {
+        assert.match(theme, new RegExp(`\\.fw-yaml-${kind}[^{}]*\\{ color: #[0-9a-f]{6}; \\}`));
+      }
+    }
     const nonce = dom.window.document.querySelector('meta[name="style-nonce"]').content;
     assert.ok(Array.from(dom.window.document.querySelectorAll("style")).some((style) => style.getAttribute("nonce") === nonce));
   } finally { dom.window.close(); }

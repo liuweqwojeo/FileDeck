@@ -1,0 +1,355 @@
+diff --git a/ChromiumBasedEditors/lib/src/cefview.cpp b/ChromiumBasedEditors/lib/src/cefview.cpp
+index 2a981e2..c85ca47 100644
+--- a/ChromiumBasedEditors/lib/src/cefview.cpp
++++ b/ChromiumBasedEditors/lib/src/cefview.cpp
+@@ -78,6 +78,10 @@
+ 
+ #include <algorithm>
+ 
++#if defined(_MAC) && !defined(CEF_2623)
++#include "./filedeck_compressed_help.h"
++#endif
++
+ #if defined (_LINUX) && !defined(_MAC)
+ #define DONT_USE_NATIVE_FILE_DIALOGS
+ #endif
+@@ -2055,6 +2059,15 @@ public:
+ 
+ 	bool CheckPopup(std::wstring sUrl, bool bIsBeforeBrowse = false, bool bIsBackground = false, bool bIsNotOpenLinks = false, const std::wstring& sFrameUrl = L"")
+ 	{
++#if defined(_MAC) && !defined(CEF_2623)
++        // 压缩帮助的弹窗链接复用编辑器现有帮助面板，保证公式说明仍可完全离线打开。
++        if (!bIsBeforeBrowse && m_pParent && m_pParent->GetAppManager() &&
++            FileDeckHelp::IsCompressedPage(m_pParent->GetAppManager()->m_oSettings.local_editors_path, sUrl))
++        {
++            m_pParent->ExecuteInAllFrames(FileDeckHelp::OpenPageScript(sUrl), true);
++            return true;
++        }
++#endif
+ 		NSEditorApi::CAscCefMenuEventListener* pListener = NULL;
+ 		if (NULL != m_pParent && NULL != m_pParent->GetAppManager())
+ 			pListener = m_pParent->GetAppManager()->GetEventListener();
+@@ -5166,6 +5179,15 @@ virtual CefRefPtr<CefResourceHandler> GetResourceHandler(
+ {
+ 	std::wstring url = request->GetURL().ToWString();
+ 
++#if defined(_MAC) && !defined(CEF_2623)
++    if (m_pParent && m_pParent->GetAppManager())
++    {
++        CefRefPtr<CefResourceHandler> help = FileDeckHelp::Handle(
++            m_pParent->GetAppManager()->m_oSettings.local_editors_path, request->GetURL());
++        if (help) return help;
++    }
++#endif
++
+ #ifdef CEF_SUPPORT_STREAMING_CORS_RESOURCE_HANDLER
+ 	if (0 == url.find(L"onlyoffice-proxy://") && frame)
+ 	{
+diff --git a/ChromiumBasedEditors/lib/src/filedeck_compressed_help.h b/ChromiumBasedEditors/lib/src/filedeck_compressed_help.h
+new file mode 100644
+--- /dev/null
++++ b/ChromiumBasedEditors/lib/src/filedeck_compressed_help.h
+@@ -0,0 +1,303 @@
++#ifndef FILEDECK_COMPRESSED_HELP_H
++#define FILEDECK_COMPRESSED_HELP_H
++
++#include "include/cef_parser.h"
++#include "include/cef_zip_reader.h"
++#include "include/wrapper/cef_byte_read_handler.h"
++#include "include/wrapper/cef_stream_resource_handler.h"
++#include <algorithm>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <string>
++#include <vector>
++
++// 打包器先确认此能力，再移除明文帮助。旧内核不能误用压缩资源包。
++extern "C" __attribute__((visibility("default"))) int FWCompressedHelpVersion()
++{
++    return 1;
++}
++
++namespace FileDeckHelp
++{
++const char* const kManifest = "FileDeckCompressedHelpV1.json";
++const size_t kMaximumEntry = 128u * 1024u * 1024u;
++const size_t kMaximumManifest = 16u * 1024u * 1024u;
++
++struct Location
++{
++    std::wstring path;
++    std::wstring archive;
++    std::wstring entry;
++};
++
++// 只做词法归一化：明文帮助已移除，realpath 无法解析其原始 URL。
++// 归一化后还须匹配配置中 apps 根目录及明确列出的帮助目录。
++inline bool Normalize(const std::wstring& value, std::wstring& result)
++{
++    if (value.empty() || value[0] != L'/' || value.find(L'\\') != std::wstring::npos ||
++        value.find(L'\0') != std::wstring::npos)
++        return false;
++    std::vector<std::wstring> parts;
++    size_t begin = 1;
++    while (begin <= value.size())
++    {
++        size_t end = value.find(L'/', begin);
++        if (end == std::wstring::npos) end = value.size();
++        std::wstring part = value.substr(begin, end - begin);
++        if (part == L"..")
++        {
++            if (parts.empty()) return false;
++            parts.pop_back();
++        }
++        else if (!part.empty() && part != L".") parts.push_back(part);
++        begin = end + 1;
++    }
++    result.clear();
++    for (const auto& part : parts) result += L"/" + part;
++    return !result.empty();
++}
++
++inline bool LocatePath(const std::wstring& settingsPath, const std::wstring& input, Location& location)
++{
++    std::wstring apps = NSFile::GetDirectoryName(NSFile::GetDirectoryName(NSFile::GetDirectoryName(settingsPath)));
++    std::wstring normalizedApps;
++    if (!Normalize(apps, normalizedApps) || !Normalize(input, location.path)) return false;
++    static const wchar_t* editors[] = {L"documenteditor", L"spreadsheeteditor", L"presentationeditor",
++                                      L"pdfeditor", L"visioeditor", L"common"};
++    for (const wchar_t* editor : editors)
++    {
++        const std::wstring base = normalizedApps + L"/" + editor + L"/main/resources/help";
++        const std::wstring prefix = base + L"/";
++        if (location.path.compare(0, prefix.size(), prefix) == 0 && location.path.size() > prefix.size())
++        {
++            location.archive = base + L".zip";
++            location.entry = location.path.substr(prefix.size());
++            return true;
++        }
++    }
++    return false;
++}
++
++inline bool LocateUrl(const std::wstring& settingsPath, const CefString& url, Location& location)
++{
++    CefURLParts parts;
++    if (!CefParseURL(url, parts) || CefString(&parts.scheme) != "file") return false;
++    const std::string host = CefString(&parts.host).ToString();
++    if (!host.empty() && host != "localhost") return false;
++    const std::wstring encoded = CefString(&parts.path).ToWString();
++    std::wstring lower = encoded;
++    std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
++    // 不把编码分隔符转换成新的路径层级；普通百分号、空格与中文仍正常解码。
++    if (lower.find(L"%2f") != std::wstring::npos || lower.find(L"%5c") != std::wstring::npos) return false;
++    CefString decoded = CefURIDecode(encoded, true, static_cast<cef_uri_unescape_rule_t>(
++        UU_NORMAL | UU_SPACES | UU_URL_SPECIAL_CHARS_EXCEPT_PATH_SEPARATORS));
++    return LocatePath(settingsPath, decoded.ToWString(), location);
++}
++
++// 每次只打开一个条目，所有 CEF ZIP 操作均在创建 reader 的同一线程完成。
++// CloseFile 校验 CRC；中断、截断与大小不匹配均不能作为成功响应返回。
++inline bool ReadEntry(const Location& location, const std::wstring& name,
++                      size_t maximum, std::vector<unsigned char>& bytes)
++{
++    CefRefPtr<CefStreamReader> stream = CefStreamReader::CreateForFile(location.archive);
++    if (!stream) return false;
++    CefRefPtr<CefZipReader> zip = CefZipReader::Create(stream);
++    if (!zip) return false;
++    bool success = false;
++    if (zip->MoveToFile(name, true))
++    {
++        const int64 length = zip->GetFileSize();
++        if (length >= 0 && static_cast<uint64_t>(length) <= maximum && zip->OpenFile(""))
++        {
++            bytes.resize(static_cast<size_t>(length));
++            size_t offset = 0;
++            while (offset < bytes.size())
++            {
++                const int count = zip->ReadFile(bytes.data() + offset,
++                    std::min<size_t>(65536, bytes.size() - offset));
++                if (count <= 0) break;
++                offset += static_cast<size_t>(count);
++            }
++            success = offset == bytes.size() && zip->Eof();
++            if (!zip->CloseFile()) success = false;
++        }
++    }
++    if (!zip->Close()) success = false;
++    if (!success) bytes.clear();
++    return success;
++}
++
++struct LinkIndex
++{
++    bool valid = false;
++    std::map<std::wstring, std::wstring> links;
++};
++
++inline std::shared_ptr<const LinkIndex> Index(const Location& location)
++{
++    // 只缓存较小的链接索引；帮助正文、GIF 与 PNG 不常驻内存，也不解压到磁盘。
++    // 签名 app 的资源在单次运行期间不可变，进程结束时索引随之释放。
++    static std::mutex mutex;
++    static std::map<std::wstring, std::shared_ptr<const LinkIndex>> indexes;
++    std::lock_guard<std::mutex> lock(mutex);
++    auto existing = indexes.find(location.archive);
++    if (existing != indexes.end()) return existing->second;
++    auto index = std::make_shared<LinkIndex>();
++    std::vector<unsigned char> bytes;
++    if (ReadEntry(location, CefString(kManifest).ToWString(), kMaximumManifest, bytes))
++    {
++        CefRefPtr<CefValue> value = CefParseJSON(bytes.data(), bytes.size(), JSON_PARSER_RFC);
++        if (value && value->GetType() == VTYPE_DICTIONARY)
++        {
++            CefRefPtr<CefDictionaryValue> manifest = value->GetDictionary();
++            CefRefPtr<CefDictionaryValue> links = manifest->GetDictionary("links");
++            if (manifest->GetInt("version") == FWCompressedHelpVersion() && links)
++            {
++                CefDictionaryValue::KeyList names;
++                links->GetKeys(names);
++                index->valid = true;
++                for (const auto& name : names)
++                {
++                    if (links->GetType(name) != VTYPE_STRING) { index->valid = false; break; }
++                    index->links[name.ToWString()] = links->GetString(name).ToWString();
++                }
++            }
++        }
++    }
++    indexes[location.archive] = index;
++    return index;
++}
++
++class Bytes : public CefBaseRefCounted
++{
++public:
++    std::vector<unsigned char> value;
++    IMPLEMENT_REFCOUNTING(Bytes);
++};
++
++inline CefRefPtr<CefResourceHandler> Response(int status, const std::string& mime,
++                                            std::vector<unsigned char>& bytes)
++{
++    CefRefPtr<Bytes> source = new Bytes();
++    source->value.swap(bytes);
++    CefRefPtr<CefStreamReader> stream = CefStreamReader::CreateForHandler(
++        new CefByteReadHandler(source->value.data(), source->value.size(), source));
++    CefResponse::HeaderMap headers;
++    headers.insert(std::make_pair("Cache-Control", "no-store"));
++    return new CefStreamResourceHandler(status, status == 200 ? "OK" : "Resource unavailable", mime, headers, stream);
++}
++
++class FailedResource : public CefResourceHandler
++{
++public:
++    explicit FailedResource(int status) : error_(status == 404 ? ERR_FILE_NOT_FOUND : ERR_FAILED) {}
++
++    bool Open(CefRefPtr<CefRequest>, bool& handleRequest, CefRefPtr<CefCallback>) override
++    {
++        // 原 file:// 文件不存在时触发 XHR.onerror，语言选择依靠该失败回退到默认语言。
++        // 返回 HTTP 404 会被上游本地 fetch 兼容层当成成功，不能替代原来的网络错误语义。
++        handleRequest = true;
++        return false;
++    }
++
++    void GetResponseHeaders(CefRefPtr<CefResponse> response, int64& length, CefString&) override
++    {
++        response->SetError(error_);
++        length = 0;
++    }
++
++    bool Read(void*, int, int& bytesRead, CefRefPtr<CefResourceReadCallback>) override
++    {
++        bytesRead = 0;
++        return false;
++    }
++
++    void Cancel() override {}
++
++private:
++    cef_errorcode_t error_;
++    IMPLEMENT_REFCOUNTING(FailedResource);
++};
++
++inline CefRefPtr<CefResourceHandler> Error(int status)
++{
++    return new FailedResource(status);
++}
++
++inline std::string Mime(const std::wstring& path)
++{
++    std::wstring extension = path.substr(path.find_last_of(L'.') + 1);
++    std::transform(extension.begin(), extension.end(), extension.begin(), ::towlower);
++    if (extension == L"html" || extension == L"htm") return "text/html";
++    if (extension == L"js") return "application/javascript";
++    if (extension == L"json") return "application/json";
++    if (extension == L"css") return "text/css";
++    if (extension == L"png") return "image/png";
++    if (extension == L"gif") return "image/gif";
++    if (extension == L"jpg" || extension == L"jpeg") return "image/jpeg";
++    if (extension == L"svg") return "image/svg+xml";
++    if (extension == L"woff") return "font/woff";
++    if (extension == L"woff2") return "font/woff2";
++    return "application/octet-stream";
++}
++
++inline CefRefPtr<CefResourceHandler> Handle(const std::wstring& settingsPath, const CefString& url)
++{
++    Location location;
++    if (!LocateUrl(settingsPath, url, location) || !NSFile::CFileBinary::Exists(location.archive)) return nullptr;
++    const std::string mime = Mime(location.path);
++    // 原包存在时才接管请求；开发版明文资源仍沿用原来的 file:// 读取。
++    // 已存在压缩包却读取失败时明确返回错误，不能悄悄回退到不完整的磁盘内容。
++    for (unsigned depth = 0; depth <= 16; ++depth)
++    {
++        auto index = Index(location);
++        if (!index->valid) return Error(500);
++        const auto link = index->links.find(location.entry);
++        if (link == index->links.end())
++        {
++            std::vector<unsigned char> bytes;
++            if (!ReadEntry(location, location.entry, kMaximumEntry, bytes)) return Error(404);
++            return Response(200, mime, bytes);
++        }
++        const std::wstring target = link->second;
++        if (depth == 16 || target.empty() || target[0] == L'/') return Error(500);
++        std::vector<unsigned char> storedTarget;
++        if (!ReadEntry(location, location.entry, 16384, storedTarget) ||
++            CefString(std::string(storedTarget.begin(), storedTarget.end())).ToWString() != target)
++            return Error(500);
++        const std::wstring path = NSFile::GetDirectoryName(location.path) + L"/" + target;
++        if (!LocatePath(settingsPath, path, location)) return Error(500);
++    }
++    return Error(500);
++}
++
++inline bool IsCompressedPage(const std::wstring& settingsPath, const CefString& url)
++{
++    Location location;
++    return LocateUrl(settingsPath, url, location) && Mime(location.path) == "text/html" &&
++           NSFile::CFileBinary::Exists(location.archive);
++}
++
++inline std::string OpenPageScript(const CefString& url)
++{
++    CefRefPtr<CefValue> value = CefValue::Create();
++    value->SetString(url);
++    const std::string argument = CefWriteJSON(value, JSON_WRITER_DEFAULT).ToString();
++    // 公式帮助原先交给系统浏览器；压缩资源只能由当前内核读取，使用已有帮助面板。
++    // FileMenu 首次显示才创建帮助面板；必须先 showMenu 再读取 panels.help。
++    // 保留 openUrl，防止目录异步加载完成后又把指定页面切回首页。
++    // JSON 编码参数防止引号、片段和非 ASCII 路径改变脚本语义。
++    return "(function(url){var names=['SSE','DE','PE','PDFE','VE'];"
++           "for(var i=0;i<names.length;i++){var app=window[names[i]];"
++           "if(!app||!app.getController)continue;var controller=app.getController('LeftMenu');"
++           "if(!controller)continue;var left=controller.getView('LeftMenu');"
++           "if(!left||!left.menuFile)continue;left.showMenu('file:help');"
++           "var help=left.menuFile.panels&&left.menuFile.panels.help;if(!help||!help.iFrame)continue;"
++           "var marker='/resources/help/',start=url.indexOf(marker)+marker.length,"
++           "end=url.indexOf('/',start);if(end>=start){help.urlPref=url.slice(0,end+1);"
++           "help.openUrl=url.slice(end+1);}"
++           "help.findUrl(url);help.iFrame.src=url;return;}})(" + argument + ");";
++}
++}
++#endif

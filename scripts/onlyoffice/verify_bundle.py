@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import uuid
+import zipfile
 from xml.parsers.expat import ExpatError
 
 sys.dont_write_bytecode = True
@@ -256,6 +257,18 @@ def verify_bundle(application, runner=run_command):
             check["ok"] = "arm64" in check["architectures"]
             if not check["ok"]:
                 add_error(report, "missingARM64", relative, result["stdout"].strip())
+
+    if not unsafe_links:
+        # 签名只能确认文件未变；同时核对压缩清单，防止漏打归档或读不到的帮助链接。
+        try:
+            from compress_help import verify_compressed_help
+            from compress_dictionaries import verify_compressed_dictionaries
+            report["compressedResources"] = {
+                "help": verify_compressed_help(root, verify_bytes=False),
+                "dictionaries": verify_compressed_dictionaries(root),
+            }
+        except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as error:
+            add_error(report, "compressedResourceInvalid", "Contents/Resources", str(error))
 
     if unsafe_links:
         # 不把包外文件交给 codesign --deep；越界/坏链接已使静态检查失败。

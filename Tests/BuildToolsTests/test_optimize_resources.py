@@ -55,13 +55,13 @@ class ResourceOptimizationTests(unittest.TestCase):
         self.assertEqual(report["linkedFiles"], 0)
         self.assertFalse(first.is_symlink() or second.is_symlink())
 
-    def test_scripts_templates_dictionaries_small_and_executable_files_remain_independent(self):
+    def test_distinct_scripts_templates_small_and_executable_files_remain_independent(self):
         original = self.image("a.png")
         executable = self.image("executable.png")
         executable.chmod(0o755)
         other_mode = self.image("readonly.png")
         other_mode.chmod(0o444)
-        script = self.image("script.js")
+        script = self.image("script.js", b"script" * 1024)
         tiny1 = self.image("tiny1.png", b"tiny")
         tiny2 = self.image("tiny2.png", b"tiny")
         external_scope = self.app / "Contents/Resources/converter/empty/en-US/new.docx"
@@ -70,6 +70,59 @@ class ResourceOptimizationTests(unittest.TestCase):
         report = optimizer.optimize_resources(self.app)
         self.assertEqual(report["linkedFiles"], 0)
         self.assertTrue(all(not p.is_symlink() for p in (original, executable, other_mode, script, tiny1, tiny2, external_scope)))
+
+    def test_duplicate_scripts_plugin_assets_and_file_icons_keep_original_paths(self):
+        script = self.image("help/search/jquery.js", b"/* license */window.search = true;" * 100)
+        plugin = self.app / optimizer.EDITOR_RESOURCES / "sdkjs-plugins/plugin/vendor/jquery.js"
+        plugin.parent.mkdir(parents=True)
+        plugin.write_bytes(script.read_bytes())
+        icons = [self.app / optimizer.RESOURCES / name for name in ("file-a.icns", "file-b.icns")]
+        for icon in icons:
+            icon.write_bytes(b"icon" * 1024)
+        report = optimizer.optimize_resources(self.app)
+        self.assertEqual(report["linkedFiles"], 2)
+        self.assertEqual(report["bytesSaved"], script.stat().st_size + icons[0].stat().st_size)
+        self.assertEqual(script.read_bytes(), plugin.read_bytes())
+        self.assertEqual(icons[0].read_bytes(), icons[1].read_bytes())
+
+    def test_only_exact_development_pages_are_removed_and_function_help_remains(self):
+        for relative in optimizer.DEVELOPMENT_FILES:
+            path = self.app / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"standalone demo")
+        help_page = self.image("help/en/Functions/t-test.htm", b"statistical function help")
+        example_image = self.image("help/en/images/example.png", b"example image")
+        report = optimizer.optimize_resources(self.app)
+        self.assertEqual(len(report["removedFiles"]), 2)
+        self.assertEqual(report["removedBytes"], 2 * len(b"standalone demo"))
+        self.assertTrue(all(not (self.app / relative).exists() for relative in optimizer.DEVELOPMENT_FILES))
+        self.assertEqual(help_page.read_bytes(), b"statistical function help")
+        self.assertEqual(example_image.read_bytes(), b"example image")
+        self.assertEqual(optimizer.optimize_resources(self.app)["removedFiles"], [])
+
+    def test_templates_dictionaries_and_nested_signed_frameworks_are_not_deduplicated(self):
+        data = b"preserve" * 1024
+        paths = [self.app / optimizer.RESOURCES / relative for relative in (
+            "converter/empty/en-US/new.docx", "converter/empty/default/new.docx",
+            "dictionaries/en_US/en_US.dic", "dictionaries/en_US/other.dic",
+            "converter/Helper.framework/a.js", "converter/Helper.framework/b.js",
+            "FileWorkbenchEditors/a.js", "FileWorkbenchEditors/b.js")]
+        for path in paths:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        self.assertEqual(optimizer.optimize_resources(self.app)["linkedFiles"], 0)
+        self.assertTrue(all(not path.is_symlink() for path in paths))
+
+    def test_development_page_under_directory_alias_is_not_deleted(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        page = outside / "example.html"
+        page.write_text("keep")
+        alias = self.app / optimizer.EDITOR_RESOURCES / "web-apps/vendor/monaco"
+        alias.parent.mkdir(parents=True)
+        alias.symlink_to(outside, target_is_directory=True)
+        self.assertEqual(optimizer.optimize_resources(self.app)["removedFiles"], [])
+        self.assertEqual(page.read_text(), "keep")
 
     def test_directory_links_are_not_followed_and_existing_file_links_are_preserved(self):
         outside = self.root / "outside"

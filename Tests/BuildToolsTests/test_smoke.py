@@ -76,6 +76,24 @@ class SmokeVerificationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "正文"):
             verify_ooxml(path, "docx", self.marker)
 
+    def test_compressed_resources_require_native_evidence_for_each_editor(self):
+        self.fixtures()
+        self.request["compressionSamples"] = []
+        (self.directory / "request.json").write_text(json.dumps(self.request))
+        result = self.result()
+        path = self.directory / "native-result.json"
+        path.write_text(json.dumps(result))
+        with self.assertRaisesRegex(RuntimeError, "压缩资源"):
+            verify_run(self.directory)
+        for case in result["cases"]:
+            case["compressedResourcesVerified"] = True
+        path.write_text(json.dumps(result))
+        self.assertTrue(verify_run(self.directory)["compressedResourcesVerified"])
+        result["cases"][-1]["compressedResourcesVerified"] = False
+        path.write_text(json.dumps(result))
+        with self.assertRaisesRegex(RuntimeError, "压缩资源"):
+            verify_run(self.directory)
+
     def test_workbench_requires_all_native_stages_and_exact_saved_text(self):
         self.fixtures()
         self.request["workbench"] = True

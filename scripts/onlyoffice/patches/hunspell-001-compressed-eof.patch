@@ -1,0 +1,23 @@
+--- a/src/hunspell/hunzip.hxx
++++ b/src/hunspell/hunzip.hxx
+@@ -80,7 +80,8 @@
+  public:
+   Hunzip(const char* filename, const char* key = NULL);
+   ~Hunzip();
+-  bool is_open() { return fin.is_open(); }
++  // getbuf() 在读到压缩结尾时已关闭文件；最后一批解码数据仍必须完整返回。
++  bool is_open() { return bufsiz > 0; }
+   bool getline(std::string& dest);
+ };
+ 
+--- a/src/hunspell/hunzip.cxx
++++ b/src/hunspell/hunzip.cxx
+@@ -254,3 +254,8 @@
+   dest.assign(line);
+   return true;
+ }
++
++// 发行包压缩字典前验证此能力，拒绝仍有末尾缓冲丢失问题的旧动态库。
++extern "C" __attribute__((visibility("default"))) int FWCompressedHunspellVersion() {
++  return 1;
++}

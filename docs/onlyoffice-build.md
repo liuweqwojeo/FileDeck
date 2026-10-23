@@ -97,6 +97,47 @@ qmake、OpenSSL 和 Xcode 默认最多 4 路编译，可通过 `--jobs` 调整�
 
 OpenSSL 的 macOS 安装采用“完成默认编译目标 → 安装 → 写完成标记”的顺序。原先同时传入 `build_libs install` 在并行 make 下会竞争生成文件；不使用全局 `MAKEFLAGS` 强加并行。安装目录存在不代表安装成功，缺少完成标记时会重新安装，保留已完成的源码获取和编译缓存。
 
+## 打包资源精简
+
+`package_app.py` 在待签名副本中执行静态资源去重：编辑器内的图片、脚本、样式、JSON、HTML、字体，以及顶层文件图标，只有大小、权限、SHA-256 和完整字节均一致时才合并为包内相对链接。原路径保持可读，ZIP 分发必须保留符号链接；不使用文件系统透明压缩，解压后的资源文件总量也会减少。
+
+打包仅移除两个精确列举的第三方开发演示入口：Monaco 的 `example.html` 与 Select2 的 `docs/examples.html`。不按 `test`、`example` 等关键词批量删除；Excel 统计检验函数帮助、帮助示例图片、语言、字典、模板、插件、原生内核及独立签名框架均保留。`build/filedeck-resource-optimization.json` 记录新增链接、删除路径、字节数和摘要。
+
+可用 `--source /path/to/FileDeck.app` 对已有完整应用重新打包，输入与输出应为不同路径；无需重编未改动的 Office 内核。打包完成仍严格验签，上一份应用保存在 `build/previous-apps/`。
+
+### 离线帮助与拼写字典压缩
+
+使用已经应用本项目 `desktop-sdk-001/002` 和 `hunspell-001` 补丁的内核，可进一步运行：
+
+```sh
+python3 scripts/onlyoffice/package_app.py --configuration Debug --version 0.1.0 --build-number 1 --compress-offline-resources
+python3 scripts/onlyoffice/verify_bundle.py --app build/FileDeck.app
+python3 scripts/onlyoffice/smoke.py --app build/FileDeck.app --workbench --compressed-resources --deadline-seconds 300
+```
+
+打包器先检查两个 framework 的三个能力符号；旧内核不能直接配合压缩资源。普通打包仍兼容明文资源；新增选项只有核验通过后才压缩。完整内核构建会在 Hunspell 上游初始化之后应用 EOF 补丁，避免首次构建的清理动作将补丁删除。
+
+- 六组帮助目录分别保存为 `help.zip`，保留全部语言、HTML、搜索索引、图片、GIF 和跨编辑器相对链接。CEF 接管原来的本地 URL，每次仅把所需文件解压到内存；不创建完整帮助目录缓存。公式说明等原先打开外部浏览器的帮助链接改在应用现有帮助面板中打开，其他外部链接不变。
+- 49 份注册拼写词典覆盖 65 个语言区域 ID；仅将能够逐字节往返且确实变小的 `.aff/.dic` 转成 Hunspell 原生 `.hz`。不适合压缩的文件保留原件，连字符、同义词、额外词典与许可证继续保留。Hunspell 按行读取，不依赖网络、Python、命令行解压器或落盘缓存。
+- Hunspell 上游的 `is_open()` 忽略了已经读入的最后一段缓冲，导致压缩小词典及末尾词丢失；补丁改为以解码缓冲状态判断。构建期 `hzip/hunzip` 只留在 `build/onlyoffice/compression-tools/`，不会进入应用。
+- 帮助 ZIP 内清单与字典目录内完整性清单保存摘要。首次压缩验证全部字节再移除原文件；重打包拒绝损坏、缺失或越界资源。归档本身属于签名资源，应用运行不修改它们。ZIP 分发解压后仍保留这种压缩存储，不依赖 APFS/HFS 文件系统压缩。
+
+`--compressed-resources` 验收通过真实 CEF 请求核对帮助样本摘要，并打开三种编辑器的帮助面板、检查五种语言的原生拼写结果，再执行文档编辑、保存、关闭和重开。全量帮助与词典字节核验和原生读取器边界测试另由构建工具测试覆盖。
+
+本机 ARM64、0.1.0（构建 1）的这轮实测，以已经完成静态资源去重的应用为基线：
+
+| 项目 | 压缩前 | 压缩后 | 减少 |
+| --- | ---: | ---: | ---: |
+| 应用普通文件总量 | 1,616,367,755 字节 | 1,366,303,999 字节 | 250,063,756 字节（15.47%） |
+| 六组离线帮助 | 314,780,327 字节 | 228,590,332 字节 | 86,189,995 字节 |
+| 全部字典目录（含清单） | 249,434,411 字节 | 91,753,028 字节 | 157,681,383 字节 |
+
+帮助文件合并后签名资源清单还减少约 6.35 MB，内核读取支持增加少量代码；以上应用总量已计入这些变化。帮助目录统计包含原符号链接的目标字符串，应用普通文件总量不重复计算链接目标。原应用保留在 `build/previous-apps/`，后续构建应以重新测量为准。
+
+本轮验收包含 138 项构建工具测试、25 项真实 CEF 读取器检查、49 份词典的 6,762 个原生拼写结果对照，以及禁止网络环境下 DOCX/XLSX/PPTX 的帮助目录、页面图片、语言回退、编辑保存重开和工作台混合文档回归。输入通过 SDK 完成，不代表系统输入法或所有 Office 排版兼容性均已覆盖。可复用命令见上文；本机详细结果位于 `build/offline-compression-analysis/`。
+
+最终 ZIP 为 791,012,851 字节，解压到中文及空格路径后，普通文件字节、权限和全部符号链接与发布应用一致，仍为 1,366,303,999 字节。解压副本无文件系统透明压缩标志，并再次通过严格验签、压缩资源检查和断网运行验收。大小与 SHA-256 记录在 `final-size-and-distribution.json` / `SHA256SUMS.txt`；这份本地压缩产物尚未替换已有线上发布包。
+
 ## 验收与已知边界
 
 环境准备已验证：固定 Qt bottle 的哈希、白名单提取、重复准备不重写文件、qmake 版本和系统动态库依赖；对应测试使用临时目录，不修改正在构建的工具链。安全归档测试可用 `python3 -B -m unittest discover -s Tests/BuildToolsTests -p test_setup_tools.py -v` 重跑。**这些结果不表示 Office 内核已编译，也不表示下列离线编辑验收已完成。**

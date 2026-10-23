@@ -1,0 +1,14 @@
+--- a/scripts/core_common/modules/hunspell.py
++++ b/scripts/core_common/modules/hunspell.py
+@@ -20,6 +20,11 @@
+   base.common_check_version("hunspell", "1", clean)
+   base.cmd("python", ["./before.py"])
+ 
++  # FileDeck 的压缩读取修正在初始化完成后应用，避免首次版本清理将补丁删除。
++  patcher = base.get_env("FW_ONLYOFFICE_HUNSPELL_PATCHER")
++  if patcher:
++    base.cmd("python", [patcher, "hunspell"])
++
+   if (build_js):
+     os.chdir(core_common_dir + "/js")
+     base.cmd("python", ["./make.py", core_common_dir + "/3dParty/hunspell/hunspell.json"])

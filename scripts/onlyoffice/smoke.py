@@ -61,7 +61,42 @@ def app_executable(app):
     return executable
 
 
-def create_run_directory(parent, deadline_seconds, workbench=False):
+def compressed_resource_samples(app):
+    """抽取各帮助根的正文、索引、图片和跨目录链接，交给真实 CEF 核对响应摘要。"""
+    from compress_help import HELP_ROOTS, verify_help_archive
+    entries, manifests = {}, {}
+    for relative in HELP_ROOTS:
+        archive = app / relative.with_suffix(".zip")
+        manifest = verify_help_archive(archive)
+        manifests[relative] = manifest
+        for entry in manifest["entries"]:
+            entries[(app / relative / entry["path"]).as_posix()] = (relative, entry)
+    samples = []
+    for relative, manifest in manifests.items():
+        selected = set()
+        for extension in (".htm", ".html", ".js", ".css", ".json", ".png", ".gif"):
+            match = next((item for item in manifest["entries"] if item["kind"] == "file"
+                          and Path(item["path"]).suffix == extension), None)
+            if match:
+                selected.add(match["path"])
+        # 每种已打包语言的目录索引都走一次压缩读取，避免只验证英文帮助。
+        selected.update(item["path"] for item in manifest["entries"] if item["path"].endswith("/Contents.json"))
+        selected.update(list(manifest["links"])[:2])
+        for name in sorted(selected):
+            path = app / relative / name
+            target = path
+            for _ in range(17):
+                owner, entry = entries[target.as_posix()]
+                if entry["kind"] != "symlink":
+                    break
+                target = Path(os.path.normpath(target.parent / manifests[owner]["links"][entry["path"]]))
+            else:
+                raise RuntimeError("帮助测试样本链接循环。")
+            samples.append({"url": path.as_uri(), "bytes": entry["bytes"], "sha256": entry["sha256"]})
+    return samples
+
+
+def create_run_directory(parent, deadline_seconds, workbench=False, compression_samples=None):
     if not 30 <= deadline_seconds <= 1800:
         raise RuntimeError("截止时长必须为 30 到 1800 秒。")
     parent = parent.expanduser().resolve()
@@ -74,6 +109,8 @@ def create_run_directory(parent, deadline_seconds, workbench=False):
                "deadlineUnix": time.time() + deadline_seconds, "networkPolicy": NETWORK_POLICY}
     if workbench:
         request["workbench"] = True
+    if compression_samples is not None:
+        request["compressionSamples"] = compression_samples
     write_new_json(directory / "request.json", request)
     return directory, request
 
@@ -151,7 +188,7 @@ def verify_run(directory):
     directory = Path(directory).expanduser().absolute()
     if directory.is_symlink() or directory.resolve() != directory:
         raise RuntimeError("验收目录不能经过符号链接。")
-    request = read_json(directory / "request.json", 16384)
+    request = read_json(directory / "request.json", 65536)
     native = read_json(directory / "native-result.json")
     token = request.get("token")
     try:
@@ -198,8 +235,12 @@ def verify_run(directory):
             raise RuntimeError("混合文本输出不是受限普通文件。")
         if path.read_bytes() != (marker + "\r\n").encode("utf-8"):
             raise RuntimeError("混合文本正文或原始换行未正确保存。")
+    if "compressionSamples" in request:
+        if not all(case.get("compressedResourcesVerified") is True for case in cases):
+            raise RuntimeError("压缩资源未通过真实 CEF 帮助面板与原生拼写检查验收。")
     return {"schemaVersion": 1, "status": "passed", "directory": str(directory), "cases": verified,
             "workbench": workbench,
+            "compressedResourcesVerified": "compressionSamples" in request,
             "networkPolicy": NETWORK_POLICY, "inputMethod": native.get("inputMethod"),
             "limitations": ["通过 SDK 输入上下文写入中文；系统输入法组合输入和排版兼容性仍需单独验收。"]}
 
@@ -217,12 +258,14 @@ def stop_process(process):
         process.wait(timeout=5)
 
 
-def run(app, output_parent, deadline_seconds, workbench=False):
+def run(app, output_parent, deadline_seconds, workbench=False, compressed_resources=False):
     executable = app_executable(app)
     sandbox = Path("/usr/bin/sandbox-exec")
     if not sandbox.is_file():
         raise RuntimeError("本机没有 sandbox-exec，不能宣称已完成离线验收。")
-    directory, request = create_run_directory(output_parent, deadline_seconds, workbench=workbench)
+    samples = compressed_resource_samples(app.resolve()) if compressed_resources else None
+    directory, request = create_run_directory(output_parent, deadline_seconds, workbench=workbench,
+                                               compression_samples=samples)
     environment = os.environ.copy()
     environment["FW_OFFICE_SMOKE_DIR"] = str(directory)
     environment["FW_OFFICE_SMOKE_TOKEN"] = request["token"]
@@ -268,6 +311,7 @@ def main():
     parser.add_argument("--output-parent", type=Path, default=BUILD / "smoke")
     parser.add_argument("--deadline-seconds", type=int, default=360)
     parser.add_argument("--workbench", action="store_true", help="同时验证 Office/文本/PDF 混合标签和菜单保存路由")
+    parser.add_argument("--compressed-resources", action="store_true", help="同时验证压缩帮助响应、帮助面板和原生拼写检查")
     arguments = parser.parse_args()
     try:
         if arguments.verify:
@@ -275,7 +319,8 @@ def main():
             result["executionVerified"] = False
             result["mode"] = "artifact-verification-only"
         else:
-            result = run(arguments.app, arguments.output_parent, arguments.deadline_seconds, workbench=arguments.workbench)
+            result = run(arguments.app, arguments.output_parent, arguments.deadline_seconds,
+                         workbench=arguments.workbench, compressed_resources=arguments.compressed_resources)
     except (OSError, ValueError, RuntimeError, zipfile.BadZipFile, ET.ParseError) as error:
         result = {"schemaVersion": 1, "status": "failed", "error": str(error)}
     print(json.dumps(result, ensure_ascii=False, indent=2))

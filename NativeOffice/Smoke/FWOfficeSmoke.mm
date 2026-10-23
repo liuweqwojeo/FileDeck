@@ -41,6 +41,7 @@
 @property(nonatomic) ino_t directoryInode;
 @property(nonatomic) dev_t directoryDevice;
 @property(nonatomic) BOOL workbenchRequested;
+@property(nonatomic, copy) NSArray *compressionSamples;
 @property(nonatomic) NSMutableDictionary *workbenchResult;
 #if FW_WORKBENCH_ENABLED
 @property(nonatomic, weak) FWBrowserHost *modalBrowser;
@@ -127,7 +128,7 @@ static NSButton *FWModalSheetButton(NSView *view, NSString *title) {
         NSString *requestPath = [directory stringByAppendingPathComponent:@"request.json"];
         struct stat requestMetadata;
         if (lstat(requestPath.fileSystemRepresentation, &requestMetadata) ||
-            !S_ISREG(requestMetadata.st_mode) || requestMetadata.st_size > 16384) {
+            !S_ISREG(requestMetadata.st_mode) || requestMetadata.st_size > 65536) {
             FWInvalidConfiguration(@"缺少有效的 request.json。");
         }
         NSData *data = [NSData dataWithContentsOfFile:requestPath];
@@ -165,6 +166,12 @@ static NSButton *FWModalSheetButton(NSView *view, NSString *title) {
         instance.viewID = -1;
         instance.results = [NSMutableArray array];
         instance.workbenchRequested = [request[@"workbench"] boolValue];
+        if (request[@"compressionSamples"]) {
+            if (![request[@"compressionSamples"] isKindOfClass:NSArray.class]) {
+                FWInvalidConfiguration(@"压缩帮助验收样本必须为数组。");
+            }
+            instance.compressionSamples = request[@"compressionSamples"];
+        }
         instance.workbenchResult = [NSMutableDictionary dictionary];
         instance.phase = @"configured";
         if (mkdir(instance.profile.fileSystemRepresentation, 0700)) {
@@ -263,6 +270,8 @@ static NSButton *FWModalSheetButton(NSView *view, NSString *title) {
     if (!cef) { [self finish:@"测试编辑器的 CEF 视图已经消失。"]; return; }
     NSDictionary *config = @{@"token": self.token, @"marker": self.marker,
                              @"format": self.current[@"format"], @"deadline": @(self.deadline * 1000),
+                             @"compressed": @(self.compressionSamples != nil),
+                             @"samples": [self.current[@"format"] isEqual:@"docx"] ? (self.compressionSamples ?: @[]) : @[],
                              @"reopen": @([self.phase isEqual:@"verifying-reopen"])};
     NSData *json = [NSJSONSerialization dataWithJSONObject:config options:0 error:nil];
     NSString *jsonText = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
@@ -312,14 +321,110 @@ static NSButton *FWModalSheetButton(NSView *view, NSString *title) {
       setTimeout(check, 250);
     } catch(e) { report('error', String(e && e.stack || e)); }
   }
-  try {
+  function loadBytes(sample) {
+    return new Promise(function(resolve, reject) {
+      AscDesktopEditor.execCommand('editor:event', JSON.stringify({action:'fw:office-smoke',
+        token:c.token, format:c.format, stage:'resources-progress', detail:sample.url}));
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', sample.url + '?filedeck-smoke=1', true);
+      xhr.responseType = 'arraybuffer';
+      xhr.timeout = 15000;
+      xhr.onload = async function() {
+        try {
+          if (xhr.status !== 200 || !xhr.response || xhr.response.byteLength !== sample.bytes)
+            throw Error('压缩帮助响应不完整: ' + sample.url + ' status=' + xhr.status);
+          var digest = await crypto.subtle.digest('SHA-256', xhr.response);
+          var hex = Array.from(new Uint8Array(digest), function(n) { return n.toString(16).padStart(2, '0'); }).join('');
+          if (hex !== sample.sha256) throw Error('压缩帮助响应摘要不一致: ' + sample.url);
+          resolve();
+        } catch(e) { reject(e); }
+      };
+      xhr.onerror = function() { reject(Error('压缩帮助读取失败: ' + sample.url)); };
+      xhr.ontimeout = function() { reject(Error('压缩帮助读取超时: ' + sample.url)); };
+      xhr.send();
+    });
+  }
+  function checkSpell() {
+    if (c.format !== 'docx') return Promise.resolve();
+    return new Promise(function(resolve, reject) {
+      var previous = window.asc_nativeOnSpellCheck;
+      var timeout = setTimeout(function() {
+        window.asc_nativeOnSpellCheck = previous;
+        reject(Error('压缩字典原生回调超时。'));
+      }, 15000);
+      window.asc_nativeOnSpellCheck = function(response) {
+        if (!response || response.fwToken !== c.token) { if (previous) previous(response); return; }
+        clearTimeout(timeout);
+        window.asc_nativeOnSpellCheck = previous;
+        if (JSON.stringify(response.usrCorrect) !== '[true,false,false,false,false,false]')
+          reject(Error('压缩字典拼写结果异常: ' + JSON.stringify(response)));
+        else resolve();
+      };
+      // 无词典时上游会把未知单词当正确；五种语言的错词能发现枚举静默失败。
+      AscDesktopEditor.SpellCheck(JSON.stringify({type:'spell', fwToken:c.token,
+        usrWords:['hello','qzxqzxqzx','qzxqzxqzx','qzxqzxqzx','qzxqzxqzx','qzxqzxqzx'],
+        usrLang:[1033,1033,1036,1031,1049,1025]}));
+    });
+  }
+  function checkHelpPanel() {
+    return new Promise(function(resolve, reject) {
+      var page = c.format === 'xlsx' ? 'en/Functions/sum.htm' : 'en/ProgramInterface/ProgramInterface.htm';
+      var url = new URL('resources/help/' + page, location.href).href;
+      var deadline = Date.now() + 30000;
+      var opened = false;
+      function inspect() {
+        try {
+          var frame = document.querySelector('#id-help-frame iframe');
+          var doc = frame && frame.contentDocument;
+          var app = window.DE || window.SSE || window.PE;
+          var left = app && app.getController('LeftMenu').getView('LeftMenu');
+          var help = left && left.menuFile.panels && left.menuFile.panels.help;
+          // 文档 SDK 就绪早于菜单脚本；按真实可点击条件打开，避免测试抢在菜单初始化前。
+          var ready = Common.Controllers.LaunchController.isScriptLoaded() &&
+            left && left.menuFile.mode && left.menuFile.mode.canHelp;
+          if (!opened && ready) { opened = true; window.open(url, '_blank'); }
+          if (frame && frame.src === url && doc && doc.readyState === 'complete' &&
+              doc.body && doc.body.innerText.length > 30 && frame.offsetWidth > 0 &&
+              help && help.viewHelpPicker.store.length > 0 &&
+              Array.from(doc.images).every(function(image) { return image.complete && image.naturalWidth > 0; })) {
+            left.menuFile.hide();
+            resolve(); return;
+          }
+          if (Date.now() >= deadline) throw Error('压缩帮助面板未完成显示: ' + url +
+            ' ready=' + ready + ' opened=' + opened +
+            ' actual=' + (frame && frame.src) + ' text=' + (doc && doc.body && doc.body.innerText.slice(0, 100)));
+          setTimeout(inspect, 200);
+        } catch(e) { reject(e); }
+      }
+      setTimeout(inspect, 200);
+    });
+  }
+  async function run() {
+    if (c.compressed && !c.reopen) {
+      for (var sample of c.samples) await loadBytes(sample);
+      // 上游本地 fetch 用 XHR.onerror 选择默认语言；404 的成功回调会破坏此回退。
+      await new Promise(function(resolve, reject) {
+        var xhr = new XMLHttpRequest();
+        xhr.open('GET', new URL('resources/help/zz-filedeck-missing/Contents.json', location.href).href);
+        xhr.timeout = 10000;
+        xhr.onload = function() { reject(Error('缺失帮助未保留原本 file URL 的失败语义。')); };
+        xhr.onerror = resolve;
+        xhr.ontimeout = function() { reject(Error('缺失帮助请求超时。')); };
+        xhr.send();
+      });
+      await checkSpell();
+      await checkHelpPanel();
+      AscDesktopEditor.execCommand('editor:event', JSON.stringify({action:'fw:office-smoke',
+        token:c.token, format:c.format, stage:'resources-verified'}));
+    }
     if (!c.reopen) {
       if (typeof a.pluginMethod_InputText !== 'function') throw Error('缺少导出的 pluginMethod_InputText。');
       if (c.format === 'pptx') a.AddSlide(0);
       a.pluginMethod_InputText(c.marker);
     }
     setTimeout(check, 500);
-  } catch(e) { report('error', String(e && e.stack || e)); }
+  }
+  run().catch(function(e) { report('error', String(e && e.stack || e)); });
 })(
 )FWJS";
     std::string script(probe);
@@ -334,6 +439,15 @@ static NSButton *FWModalSheetButton(NSView *view, NSString *title) {
     if (![event isKindOfClass:NSDictionary.class] || ![event[@"action"] isEqual:@"fw:office-smoke"] ||
         ![event[@"token"] isEqual:self.token] || ![event[@"format"] isEqual:self.current[@"format"]]) return;
     if ([event[@"stage"] isEqual:@"error"]) { [self finish:event[@"detail"] ?: @"编辑器脚本失败。"]; return; }
+    if ([event[@"stage"] isEqual:@"resources-verified"]) {
+        self.current[@"compressedResourcesVerified"] = @YES;
+        return;
+    }
+    if ([event[@"stage"] isEqual:@"resources-progress"]) {
+        self.current[@"resourceProgress"] = event[@"detail"] ?: @"";
+        fprintf(stderr, "Compressed resource probe: %s\n", [event[@"detail"] UTF8String]);
+        return;
+    }
     if ([self.phase isEqual:@"inserting"] && [event[@"stage"] isEqual:@"inserted"]) {
         self.phase = @"waiting-dirty";
     } else if ([self.phase isEqual:@"verifying-reopen"] && [event[@"stage"] isEqual:@"verified"]) {

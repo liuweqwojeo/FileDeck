@@ -8,7 +8,7 @@ import shutil
 import sys
 
 sys.dont_write_bytecode = True
-from common import BUILD, SOURCE, LoggedCommands, capture, find_qt_prefix, require_sources
+from common import BUILD, ROOT, SOURCE, LoggedCommands, capture, find_qt_prefix, require_sources
 from doctor import inspect
 from patches import apply_all
 from native_sources import prepare_native_sources, verify_editor_bundle
@@ -38,6 +38,8 @@ def prepare_environment(qt_prefix, jobs=4):
     environment["GIT_CONFIG_VALUE_" + str(git_config_count)] = "HTTP/1.1"
     environment["GIT_CONFIG_COUNT"] = str(git_config_count + 1)
     environment["FW_ONLYOFFICE_BUILD_JOBS"] = str(jobs)
+    # 上游会在首次构建时重新初始化 Hunspell；补丁必须在该步骤完成后、编译前应用。
+    environment["FW_ONLYOFFICE_HUNSPELL_PATCHER"] = str(ROOT / "scripts/onlyoffice/patches.py")
 
     # qt_setup 会修改 mkspecs/features/toolchain.prf；复制工具链避免写入 Homebrew。
     # base.qt_version() 从 QT_DEPLOY 的祖父目录读取版本，目录层级不能省略版本号。
@@ -61,6 +63,8 @@ def prepare_environment(qt_prefix, jobs=4):
 
 def build_core(runner, qt_prefix, clean=False, single_process=False, jobs=4):
     apply_all()
+    # 资源压缩依赖内核按需读取；在内核编译前应用，不能只改发行包。
+    apply_all("desktop-sdk")
     environment, qt_root = prepare_environment(qt_prefix, 1 if single_process else jobs)
     tools = SOURCE / "build_tools"
     # update=0 是必要边界：上游 update=1 会 checkout -f 各仓库并丢弃补丁。

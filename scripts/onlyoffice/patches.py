@@ -21,8 +21,22 @@ def apply_patch(repository, patch):
 
 
 def apply_all(repository_name="build_tools"):
-    if repository_name not in ("build_tools", "desktop-apps"):
+    repositories = {name: SOURCE / name for name in ("build_tools", "desktop-apps", "desktop-sdk")}
+    repositories["hunspell"] = SOURCE / "core/Common/3dParty/hunspell/hunspell"
+    if repository_name not in repositories:
         raise RuntimeError("没有配置此上游仓库的补丁：" + repository_name)
+    if repository_name == "hunspell":
+        repository = repositories[repository_name]
+        code, revision = capture(["git", "-C", str(repository), "rev-parse", "HEAD"])
+        if code or revision != (repository.parent / "HEAD").read_text().strip():
+            raise RuntimeError("Hunspell 与固定内核版本不匹配，保留源码并停止。")
     directory = Path(__file__).with_name("patches")
     for patch in sorted(directory.glob(repository_name + "-*.patch")):
-        apply_patch(SOURCE / repository_name, patch)
+        apply_patch(repositories[repository_name], patch)
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("repository", choices=("build_tools", "desktop-apps", "desktop-sdk", "hunspell"))
+    apply_all(parser.parse_args().repository)
