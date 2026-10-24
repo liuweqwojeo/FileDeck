@@ -8,3 +8,4 @@ vendor/
 .cache/
 __pycache__/
 EditorAssets/node_modules/
+.archify/
