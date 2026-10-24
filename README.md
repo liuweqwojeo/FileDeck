@@ -8,18 +8,20 @@ FileDeck 是面向 **macOS 14+、Apple Silicon（ARM64）** 的本地文件工�
 
 ## 下载与安装
 
-完整应用从 [GitHub Releases · v0.1.0](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.0) 下载：
+完整应用从 [GitHub Releases · v0.1.1](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.1) 下载：
 
-- [FileDeck 0.1.0 · macOS ARM64 下载包](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.0/FileDeck-v0.1.0-macOS-arm64.zip)
-- [SHA-256 校验文件](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.0/SHA256SUMS.txt)
+- [FileDeck 0.1.1 · macOS ARM64 下载包](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.1/FileDeck-v0.1.1-macOS-arm64.zip)
+- [SHA-256 校验文件](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.1/SHA256SUMS.txt)
 
-当前 ZIP 安装包约 **792 MB（755.24 MiB）**，解压后的 `FileDeck.app` 文件总量约 **1.366 GB**；两者分别表示下载体积和应用文件总量，实际磁盘占用会因文件系统而异。
+当前版本为 **v0.1.1（构建号 2）**，对应修复提交 [8249e76](https://github.com/liuweqwojeo/FileDeck/commit/8249e76581211778128aa729f3f51bf3cdb470a1)。本版修复目录与文件拖放、复制粘贴和选中反馈，支持 Finder 拖入拖出、Option 拖动复制及 ⌘C／⌘V。
+
+当前 ZIP 安装包约 **792 MB（755.32 MiB）**，解压后的 `FileDeck.app` 文件总量约 **1.367 GB**；两者分别表示下载体积和应用文件总量，实际磁盘占用会因文件系统而异。
 
 支持 macOS 14+、Apple Silicon。用 macOS 内置归档工具解压，将其中的 `FileDeck.app` 拖入“应用程序”后打开；同包附有安装说明、第三方许可证及源码获取入口。
 
 当前为开发预览版，使用临时签名，尚未完成 Developer ID 签名与 Apple 公证。如果系统阻止打开，请先确认下载来源和校验值，再参考 [Apple 官方打开说明](https://support.apple.com/zh-cn/102445)。
 
-此包保留现有编辑器、语言、拼写字典、文档模板和插件。打包时对完全相同的静态资源使用包内相对链接去重，并无损压缩离线帮助和拼写字典，按需读取且不创建完整解压缓存。相较上一轮静态去重后的应用，解压后的文件总量再减少约 **250.1 MB（15.47%）**，保留离线使用能力。当前安装包更新见 [GitHub Release](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.0)，实现与验收见 [离线资源压缩说明](docs/onlyoffice-build.md#离线帮助与拼写字典压缩)；原版验证和回退方法见 [0.1.0 发布说明](docs/releases/v0.1.0.md)。
+此包保留现有编辑器、语言、拼写字典、文档模板和插件。打包时对完全相同的静态资源使用包内相对链接去重，并无损压缩离线帮助和拼写字典，按需读取且不创建完整解压缓存。压缩实现与历史体积对比见 [离线资源压缩说明](docs/onlyoffice-build.md#离线帮助与拼写字典压缩)；本版更新、验证结果及升级回退方法见 [v0.1.1 发布说明](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.1)。
 
 ## 功能介绍
 
