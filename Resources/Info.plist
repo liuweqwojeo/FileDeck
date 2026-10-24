@@ -16,4 +16,10 @@
     <key>NSDocumentsFolderUsageDescription</key><string>浏览你选择的文稿目录并预览文件。</string>
     <key>NSDesktopFolderUsageDescription</key><string>浏览你选择的桌面目录并预览文件。</string>
     <key>NSDownloadsFolderUsageDescription</key><string>浏览你选择的下载目录并预览文件。</string>
+    <key>UTExportedTypeDeclarations</key>
+    <array><dict>
+        <key>UTTypeIdentifier</key><string>local.filedeck.browser-drag</string>
+        <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+        <key>UTTypeDescription</key><string>FileDeck file drag</string>
+    </dict></array>
 </dict></plist>

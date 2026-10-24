@@ -155,6 +155,29 @@ class PackagingBoundaryTests(unittest.TestCase):
             self.assertNotIn("offlineCompression", report)
             self.assertEqual((destination / help_page.relative_to(source)).read_bytes(), help_page.read_bytes())
 
+    def test_drag_type_is_declared_in_browser_and_preserved_when_repackaging(self):
+        expected = {"UTTypeIdentifier": "local.filedeck.browser-drag",
+                    "UTTypeConformsTo": ["public.data"], "UTTypeDescription": "FileDeck file drag"}
+        browser = Path(__file__).resolve().parents[2] / "Resources/Info.plist"
+        self.assertIn(expected, plistlib.loads(browser.read_bytes())["UTExportedTypeDeclarations"])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, _ = self.fixture(root)
+            source_info = source / "Contents/Info.plist"
+            metadata = plistlib.loads(source_info.read_bytes())
+            foreign = {"UTTypeIdentifier": "example.existing-document", "UTTypeConformsTo": ["public.data"]}
+            metadata["UTExportedTypeDeclarations"] = [foreign]
+            source_info.write_bytes(plistlib.dumps(metadata))
+            published, repacked = root / "published.app", root / "repacked.app"
+            with patch.object(packager, "ROOT", root), \
+                    patch.object(packager.subprocess, "run", side_effect=self.fake_run):
+                packager.package_app(source, published)
+                packager.package_app(published, repacked)
+            for application in (published, repacked):
+                declarations = plistlib.loads((application / "Contents/Info.plist").read_bytes())["UTExportedTypeDeclarations"]
+                self.assertIn(foreign, declarations)
+                self.assertEqual([value for value in declarations if value["UTTypeIdentifier"] == expected["UTTypeIdentifier"]], [expected])
+
     def test_copy_compression_and_signature_failures_clean_only_current_staging(self):
         for failure in ("copy", "compression", "sign", "verify"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:

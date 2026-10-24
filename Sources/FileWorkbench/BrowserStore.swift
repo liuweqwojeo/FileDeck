@@ -127,6 +127,7 @@ final class BrowserStore: ObservableObject {
     private var updatingSelection = false
     private var selectionAnchor: URL?
     private var activePreviewSnapshotID: UUID?
+    private var activeFileDrag: (id: UUID, files: [BrowserFileReference])?
 
     var visibleEntries: [FileEntry] {
         let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -533,45 +534,126 @@ final class BrowserStore: ObservableObject {
         }
     }
 
-    /// 拖入只复制到发起操作时的目录；来源始终保留，同名目标由 copyItem 拒绝覆盖。
-    func importFiles(_ urls: [URL]) {
-        guard !urls.isEmpty else { return }
-        guard let directory = currentDirectory, directoryIssue == nil, !isLoading else {
+    var selectedFileURLs: [URL] { orderedEntries.filter { selectedURLs.contains($0.url) }.map(\.url) }
+
+    @discardableResult
+    func copySelectedFiles(to pasteboard: NSPasteboard = .general) -> Bool {
+        copyFiles(selectedFileURLs, to: pasteboard)
+    }
+
+    /// 写入标准文件 URL，Finder 与其他应用可直接粘贴；空选择不得清空用户剪贴板。
+    @discardableResult
+    func copyFiles(_ urls: [URL], to pasteboard: NSPasteboard = .general) -> Bool {
+        guard !urls.isEmpty, urls.allSatisfy(\.isFileURL) else { return false }
+        pasteboard.clearContents()
+        return pasteboard.writeObjects(urls.map { $0 as NSURL })
+    }
+
+    func pasteFiles(from pasteboard: NSPasteboard = .general, into target: URL? = nil) {
+        guard let directory = target ?? currentDirectory else {
             actionError = "请先选择可访问的目标文件夹。"
             return
         }
-        guard !isImporting else { actionError = "正在复制文件，请稍后再试。"; return }
+        let urls = (pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+        guard !urls.isEmpty else { actionError = "剪贴板中没有可粘贴的文件。"; return }
+        transferFiles(urls.map { BrowserFileReference(url: $0, identity: nil) }, into: directory, move: false, renameConflicts: true)
+    }
+
+    /// 拖动开始时冻结选择与磁盘身份，异步读取载荷后也不能移动后续选中的其他文件。
+    func beginFileDrag(_ url: URL, includingSelection: Bool) -> UUID {
+        let urls = includingSelection && selectedURLs.contains(url) ? selectedFileURLs : [url]
+        if includingSelection && !selectedURLs.contains(url) { selectedURL = url }
+        let files = urls.map(fileReference)
+        // 原生 List 为多选的每一行请求提供器，同一批文件必须共用一个有效令牌。
+        if let drag = activeFileDrag, drag.files == files { return drag.id }
+        let id = UUID()
+        activeFileDrag = (id, files)
+        return id
+    }
+
+    /// Finder 同卷拖出可能直接移动磁盘文件；回到工作台时只在来源确有变化后刷新。
+    func refreshAfterExternalDrag() {
+        guard let drag = activeFileDrag else { return }
+        activeFileDrag = nil
+        let changed = drag.files.contains { reference in
+            guard let identity = try? FileSystem.identity(at: reference.url) else { return true }
+            return identity != reference.identity
+        }
+        if changed { refresh() }
+    }
+
+    func canDropActiveDrag(into directory: URL) -> Bool {
+        guard let drag = activeFileDrag, !drag.files.isEmpty else { return false }
+        let target = directory.resolvingSymlinksInPath().standardizedFileURL
+        return drag.files.allSatisfy {
+            let source = $0.url.standardizedFileURL
+            return source.deletingLastPathComponent().path != target.path
+                && !Self.contains(target, in: source.resolvingSymlinksInPath())
+        }
+    }
+
+    func dropActiveDrag(token: UUID, into directory: URL, copy: Bool) {
+        guard let drag = activeFileDrag, drag.id == token, canDropActiveDrag(into: directory) else { return }
+        activeFileDrag = nil
+        transferFiles(drag.files, into: directory, move: !copy)
+    }
+
+    /// 外部拖入保持复制语义；目标来自落点快照，而非异步加载完成时的当前目录。
+    func importFiles(_ urls: [URL], into target: URL? = nil) {
+        guard let directory = target ?? currentDirectory else {
+            actionError = "请先选择可访问的目标文件夹。"
+            return
+        }
+        transferFiles(urls.map { BrowserFileReference(url: $0, identity: nil) }, into: directory, move: false)
+    }
+
+    private func transferFiles(_ files: [BrowserFileReference], into directory: URL, move: Bool, renameConflicts: Bool = false) {
+        guard !files.isEmpty else { return }
+        guard !isImporting else { actionError = "正在处理文件，请稍后再试。"; return }
+        guard directory.isFileURL, let identity = try? FileSystem.identity(at: directory) else {
+            actionError = "目标文件夹不可访问，请重新选择。"
+            return
+        }
         isImporting = true
         actionError = nil
         Task {
-            let failures = await Task.detached(priority: .userInitiated) {
-                var failures: [String] = []
-                for source in urls {
-                    let accessed = source.startAccessingSecurityScopedResource()
-                    defer { if accessed { source.stopAccessingSecurityScopedResource() } }
-                    do {
-                        guard source.isFileURL else {
-                            throw NSError(domain: NSCocoaErrorDomain, code: NSFileReadUnsupportedSchemeError,
-                                          userInfo: [NSLocalizedDescriptionKey: "只能拖入本机文件。"])
-                        }
-                        let resolvedSource = source.standardizedFileURL.resolvingSymlinksInPath()
-                        let resolvedDirectory = directory.resolvingSymlinksInPath()
-                        // 拒绝把目标目录本身或其祖先复制到内部，避免递归复制无限增长。
-                        guard !Self.contains(resolvedDirectory, in: resolvedSource) else {
-                            throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteInvalidFileNameError,
-                                          userInfo: [NSLocalizedDescriptionKey: "不能将目标目录本身或其上级目录复制到这里。"])
-                        }
-                        let destination = directory.appendingPathComponent(source.lastPathComponent)
-                        try FileManager.default.copyItem(at: source, to: destination)
-                    } catch { failures.append("\(source.lastPathComponent)：\(error.localizedDescription)") }
-                }
-                return failures
+            let result = await Task.detached(priority: .userInitiated) {
+                WorkspaceFileTransfer.perform(files, into: directory, expectedIdentity: identity, move: move, renameConflicts: renameConflicts)
             }.value
             self.isImporting = false
-            if !failures.isEmpty { self.actionError = "部分文件未能复制：\n" + failures.joined(separator: "\n") }
-            // 用户可在复制期间切换目录；完成后不能把界面拉回旧位置。
-            if self.currentDirectory == directory { self.refresh() }
+            if !result.failures.isEmpty { self.actionError = "部分文件未能\(move ? "移动" : "复制")：\n" + result.failures.joined(separator: "\n") }
+            if move { self.relocateBrowserPaths(result.moved) }
+            // 刷新来源与落点的树缓存，但不抢回用户在操作期间切换到的目录。
+            self.refresh()
+            self.saveWorkspace()
         }
+    }
+
+    /// 目录移动后同步管理引用、历史与展开状态，防止侧栏仍持有已不存在的路径。
+    private func relocateBrowserPaths(_ moved: [(source: URL, destination: URL)]) {
+        guard !moved.isEmpty else { return }
+        func relocated(_ url: URL) -> URL {
+            guard let change = moved.first(where: { Self.contains(url, in: $0.source) }) else { return url }
+            let suffix = String(url.path.dropFirst(change.source.path.count))
+            return URL(fileURLWithPath: change.destination.path + suffix, isDirectory: url.hasDirectoryPath)
+        }
+        for root in managedRoots where relocated(root) != root {
+            bookmarks[root] = nil
+            rememberBookmark(for: relocated(root))
+            retainAccess(to: relocated(root))
+        }
+        managedRoots = managedRoots.map { Self.directoryURL(relocated($0)) }
+        currentDirectory = currentDirectory.map { Self.directoryURL(relocated($0)) }
+        rootURL = rootURL.map { Self.directoryURL(relocated($0)) }
+        history = history.map { Self.directoryURL(relocated($0)) }
+        expandedDirectories = Set(expandedDirectories.map { Self.directoryURL(relocated($0)) })
+        navigationRoots = navigationRoots.reduce(into: [:]) { result, pair in
+            result[Self.directoryURL(relocated(pair.key))] = Self.directoryURL(relocated(pair.value))
+        }
+        let selection = Set(selectedURLs.map(relocated))
+        setSelection(selection, primary: selectedURL.map(relocated))
+        selectionAnchor = selectionAnchor.map(relocated)
+        activePreviewSnapshotID = nil
     }
 
     func openSelectedWithDefaultApp() {
@@ -836,5 +918,84 @@ final class BrowserStore: ObservableObject {
         case .unavailable: return "文件夹可能已移动、删除，或所在磁盘尚未连接。"
         case .readFailure: return error.localizedDescription
         }
+    }
+}
+
+/// 磁盘操作共用边界检查；符号链接作为项目本身移动，不递归跟随其内容。
+enum WorkspaceFileTransfer {
+    struct Result: Sendable {
+        var moved: [(source: URL, destination: URL)] = []
+        var failures: [String] = []
+    }
+
+    static func perform(_ files: [BrowserFileReference], into directory: URL,
+                        expectedIdentity: FileIdentity, move: Bool, renameConflicts: Bool = false) -> Result {
+        var result = Result()
+        for file in files {
+            let source = file.url
+            let accessed = source.startAccessingSecurityScopedResource()
+            defer { if accessed { source.stopAccessingSecurityScopedResource() } }
+            do {
+                guard source.isFileURL, directory.isFileURL else { throw failure("只能拖动本机文件。") }
+                guard try FileSystem.identity(at: directory) == expectedIdentity else {
+                    throw failure("目标文件夹已变化，请重新拖放。")
+                }
+                let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isPackageKey])
+                guard values.isDirectory == true, values.isSymbolicLink != true,
+                      !FileSystem.isPackageDirectory(directory, values: values) else {
+                    throw FileSystemError.notBrowsableDirectory(directory)
+                }
+                if move || file.identity != nil {
+                    guard let identity = file.identity, try FileSystem.identity(at: source) == identity else {
+                        throw failure("文件已变化，请刷新后重试。")
+                    }
+                }
+                let resolvedSource = source.standardizedFileURL.resolvingSymlinksInPath().path
+                let target = directory.resolvingSymlinksInPath().path
+                // 同时检查路径边界和链接解析结果，拒绝把祖先复制/移动到自己的后代。
+                guard target != resolvedSource,
+                      !target.hasPrefix(resolvedSource.hasSuffix("/") ? resolvedSource : resolvedSource + "/") else {
+                    throw failure("不能将文件夹拖到自身或其子目录中。")
+                }
+                let destination = directory.appendingPathComponent(source.lastPathComponent)
+                if !renameConflicts && source.standardizedFileURL.path == destination.standardizedFileURL.path { continue }
+                if move {
+                    // 同卷使用内核排他重命名；跨卷由 Foundation 复制后删除，失败保留错误信息。
+                    if renamex_np(source.path, destination.path, UInt32(RENAME_EXCL)) != 0 {
+                        let code = errno
+                        guard code == EXDEV else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(code)) }
+                        try FileManager.default.moveItem(at: source, to: destination)
+                    }
+                    result.moved.append((source, destination))
+                } else {
+                    try copy(source, to: destination, renameConflicts: renameConflicts)
+                }
+            } catch { result.failures.append("\(source.lastPathComponent)：\(error.localizedDescription)") }
+        }
+        return result
+    }
+
+    /// 粘贴遇到冲突时生成副本名；由 copyItem 排他创建，包含悬空链接和并发创建的同名目标。
+    private static func copy(_ source: URL, to destination: URL, renameConflicts: Bool) throws {
+        var target = destination
+        var duplicate = 0
+        while true {
+            do { try FileManager.default.copyItem(at: source, to: target); return }
+            catch {
+                let value = error as NSError
+                let exists = (value.domain == NSCocoaErrorDomain && value.code == NSFileWriteFileExistsError)
+                    || (value.domain == NSPOSIXErrorDomain && value.code == EEXIST)
+                guard renameConflicts && exists else { throw error }
+                duplicate += 1
+                let suffix = duplicate == 1 ? " 副本" : " 副本 \(duplicate)"
+                let ext = source.pathExtension
+                let stem = ext.isEmpty ? source.lastPathComponent : source.deletingPathExtension().lastPathComponent
+                target = destination.deletingLastPathComponent().appendingPathComponent(stem + suffix + (ext.isEmpty ? "" : "." + ext))
+            }
+        }
+    }
+
+    private static func failure(_ message: String) -> NSError {
+        NSError(domain: "FileDeck.FileTransfer", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 }

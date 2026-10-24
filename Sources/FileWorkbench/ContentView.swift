@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 工作台始终保留目录和列表；预览作为独立的临时模态会话呈现。
 @MainActor
@@ -43,6 +44,10 @@ struct ContentView: View {
         .tint(WorkspacePalette.accent)
         .foregroundStyle(WorkspacePalette.primary)
         .onChange(of: store.showHidden) { _, _ in store.refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // 拖动跨越应用时也会切换焦点；仍按住鼠标时不能清除正在使用的内部令牌。
+            if NSEvent.pressedMouseButtons == 0 { store.refreshAfterExternalDrag() }
+        }
         .alert("操作未完成", isPresented: Binding(get: { store.actionError != nil }, set: { if !$0 { store.actionError = nil } })) {
             Button("知道了", role: .cancel) { store.actionError = nil }
         } message: { Text(store.actionError ?? "") }
@@ -186,13 +191,14 @@ struct ContentView: View {
     @ViewBuilder private func quickLocation(_ name: String, icon: String, directory: FileManager.SearchPathDirectory) -> some View {
         if directoryQuery.isEmpty || name.localizedStandardContains(directoryQuery),
            let url = FileManager.default.urls(for: directory, in: .userDomainMask).first {
-            Button { store.openQuickLocation(url) } label: {
-                Label(name, systemImage: icon).font(.system(size: 13)).labelStyle(.titleAndIcon)
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).frame(height: 36)
-                    .contentShape(Rectangle())
-            }.buttonStyle(.plain)
+            Label(name, systemImage: icon).font(.system(size: 13)).labelStyle(.titleAndIcon)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).frame(height: 36)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(name)
                 .accessibilityIdentifier("directory.quick.\(url.path)")
+                .modifier(WorkspaceDirectoryDragSource(store: store, url: url, open: { store.openQuickLocation(url) }))
                 .contextMenu { NewFileMenu(directory: url, disabled: fileOperationBusy, create: beginCreation) }
+                .modifier(WorkspaceFileDropTarget(store: store, directory: url))
                 .foregroundStyle(store.currentDirectory?.path == url.path ? WorkspacePalette.accent : WorkspacePalette.primary)
                 .background(store.currentDirectory?.path == url.path ? WorkspacePalette.accent.opacity(0.10) : .clear,
                             in: RoundedRectangle(cornerRadius: 7))
@@ -211,6 +217,10 @@ struct ContentView: View {
             Divider()
             HStack(spacing: 12) {
                 NewFileMenu(directory: store.currentDirectory, disabled: !browsable || fileOperationBusy, create: beginCreation)
+                Button { store.copySelectedFiles() } label: { Label("复制", systemImage: "doc.on.doc") }
+                    .disabled(store.selectedURLs.isEmpty).help("复制所选文件（⌘C）")
+                Button { store.pasteFiles() } label: { Label("粘贴", systemImage: "clipboard") }
+                    .disabled(!browsable || store.isImporting).help("将剪贴板文件复制到当前目录（⌘V）")
                 Spacer(minLength: 0)
                 Menu {
                     Picker("文件类型", selection: $store.typeFilter) {
@@ -235,20 +245,29 @@ struct ContentView: View {
                 .contentShape(Rectangle())
                 .contextMenu {
                     NewFileMenu(directory: store.currentDirectory, disabled: !browsable || fileOperationBusy, create: beginCreation)
+                    Button("粘贴") { store.pasteFiles() }.disabled(!browsable || store.isImporting)
                     Button("刷新当前目录", action: store.refresh).disabled(store.currentDirectory == nil)
                 }
-                .dropDestination(for: URL.self) { urls, _ in
-                    guard browsable, !urls.isEmpty, urls.allSatisfy(\.isFileURL) else { return false }
-                    store.importFiles(urls)
-                    return true
-                }
+                .modifier(WorkspaceFileDropTarget(store: store, directory: browsable ? store.currentDirectory : nil))
             Divider()
             HStack {
                 Text(store.currentDirectory == nil ? "尚未选择目录" : store.isLoading ? "正在读取目录…" : "\(store.visibleEntries.count) 个项目")
-                if let entry = store.selectedEntry { Text("· 已选择 \(store.selectedURLs.count) 个\(entry.displaySize.isEmpty ? "" : " · " + entry.displaySize)") }
+                if let entry = store.selectedEntry {
+                    Text("· 已选择 \(store.selectedURLs.count) 个：\(entry.name)")
+                        .lineLimit(1).truncationMode(.middle).help(entry.url.path)
+                }
                 Spacer()
+                if store.isImporting {
+                    ProgressView().controlSize(.mini)
+                    Text("正在处理文件…")
+                }
             }.font(.system(size: 11)).foregroundStyle(WorkspacePalette.secondary).padding(.horizontal, 20).frame(height: 30)
         }.background(.white)
+            // 命令仅挂在文件浏览区；搜索框与预览编辑器继续使用各自的文本复制粘贴。
+            .onCopyCommand(perform: store.selectedFileURLs.isEmpty ? nil : {
+                store.selectedFileURLs.map { NSItemProvider(object: $0 as NSURL) }
+            })
+            .onPasteCommand(of: [.fileURL]) { _ in store.pasteFiles() }
     }
 
     private var breadcrumb: some View {
@@ -309,22 +328,30 @@ struct ContentView: View {
             // 原生 List 负责鼠标与键盘的选择语义；再叠加单击 toggle 会让 ⌘ 单击执行两次。
             List(selection: Binding(get: { store.selectedURLs }, set: { updateListSelection($0) })) {
                 ForEach(displayedEntries) { entry in
-                    FileRow(entry: entry).tag(entry.url).listRowSeparator(.visible)
-                        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
-                        .contentShape(Rectangle()).onTapGesture(count: 2) { activate(entry) }
-                        .simultaneousGesture(TapGesture().onEnded {
-                            // 原生选择提交后只记录实际点击的主项目，不重复修改 ⌘/Shift 选中集合。
-                            DispatchQueue.main.async {
-                                if store.selectedURLs.contains(entry.url) {
-                                    store.setSelection(store.selectedURLs, primary: entry.url)
-                                }
-                            }
-                        })
+                    FileRow(entry: entry, selected: store.selectedURLs.contains(entry.url))
+                        .contentShape(Rectangle())
                         .accessibilityElement(children: .combine)
-                        .accessibilityAction { selectForPreview(entry) }
-                        .contextMenu { entryActions(entry) }
+                        .modifier(WorkspaceFileDropTarget(store: store, directory: entry.isBrowsableDirectory ? entry.url : nil))
+                        // List 使用原生行提供器，避免 onDrag 的视图手势吞掉单击选择和键盘焦点。
+                        .itemProvider { WorkspaceFileDrag.provider(url: entry.url, store: store, selection: true) }
+                        // 行的选择 trait 必须在拖放包装之外，供原生 List 直接读取。
+                        .tag(entry.url)
+                        .listRowSeparator(.visible)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
+                        .listRowBackground(store.selectedURLs.contains(entry.url) ? WorkspacePalette.accent.opacity(0.16) : Color.clear)
                 }
             }.listStyle(.plain)
+                // 让 List 自己分派双击和右键，行内手势或按钮会截获原生选择与第一响应者。
+                .contextMenu(forSelectionType: URL.self) { urls in
+                    if let entry = displayedEntries.first(where: { urls.contains($0.url) }) {
+                        entryActions(entry)
+                    } else {
+                        NewFileMenu(directory: store.currentDirectory, disabled: !browsable || fileOperationBusy, create: beginCreation)
+                        Button("粘贴") { store.pasteFiles() }.disabled(!browsable || store.isImporting)
+                    }
+                } primaryAction: { urls in
+                    if let entry = displayedEntries.first(where: { urls.contains($0.url) }) { activate(entry) }
+                }
                 .onKeyPress(.space) {
                     guard let entry = store.selectedEntry, !entry.isBrowsableDirectory else { return .ignored }
                     editor.preview(entry.url, source: "space")
@@ -349,6 +376,15 @@ struct ContentView: View {
                                 Text(entry.name).font(.system(size: 12)).lineLimit(2).multilineTextAlignment(.center)
                             }.frame(maxWidth: .infinity).frame(height: 112)
                                 .background(store.selectedURLs.contains(entry.url) ? WorkspacePalette.accent.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 8))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(store.selectedURLs.contains(entry.url) ? WorkspacePalette.accent : .clear, lineWidth: 2)
+                                }
+                                .overlay(alignment: .topTrailing) {
+                                    if store.selectedURLs.contains(entry.url) {
+                                        Image(systemName: "checkmark.circle.fill").foregroundStyle(WorkspacePalette.accent).padding(6)
+                                    }
+                                }
                                 .contentShape(Rectangle())
                                 .onTapGesture(count: 2) { activate(entry) }
                                 .onTapGesture { gridFocused = true; selectForPreview(entry) }
@@ -356,6 +392,8 @@ struct ContentView: View {
                                 .accessibilityLabel(entry.name)
                                 .accessibilityAction { gridFocused = true; selectForPreview(entry) }
                                 .contextMenu { entryActions(entry) }
+                                .onDrag { WorkspaceFileDrag.provider(url: entry.url, store: store, selection: true) }
+                                .modifier(WorkspaceFileDropTarget(store: store, directory: entry.isBrowsableDirectory ? entry.url : nil))
                                 .id(entry.url)
                         }
                     }.padding(20)
@@ -450,7 +488,7 @@ struct ContentView: View {
             Spacer()
             if store.isImporting {
                 ProgressView().controlSize(.mini)
-                Text("正在复制文件…")
+                Text("正在处理文件…")
             }
             if browsable { Text("\(store.visibleEntries.count) 个项目 · 已选择 \(store.selectedURLs.count) 个") }
             Spacer()
@@ -539,6 +577,12 @@ struct ContentView: View {
             Button("使用默认应用打开") { NSWorkspace.shared.open(entry.url) }
         }
         Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([entry.url]) }
+        Button("复制") {
+            selectPrimary(entry)
+            store.copySelectedFiles()
+        }
+        Button("粘贴") { store.pasteFiles(into: entry.isBrowsableDirectory ? entry.url : store.currentDirectory) }
+            .disabled(store.isImporting)
         Button("复制路径") { copyPath(entry.url) }
         Divider()
         Button("重命名…") {
@@ -697,29 +741,30 @@ private struct FolderBranch: View {
                         .accessibilityIdentifier("directory.expand.\(url.path)")
                         .help(expanded ? "收起子目录" : "展开子目录")
                         .accessibilityLabel("\(expanded ? "收起" : "展开") \(url.lastPathComponent)")
-                    Button { store.navigate(to: url) } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "folder.fill").font(.system(size: 17))
-                                .foregroundStyle(store.treeErrors[url] == nil ? WorkspacePalette.accent.opacity(0.78) : WorkspacePalette.tertiary)
-                            Text(url.lastPathComponent).font(.system(size: 13)).lineLimit(1)
-                            Spacer(minLength: 0)
-                            if store.treeErrors[url] != nil { Image(systemName: "exclamationmark.triangle").font(.system(size: 11)).foregroundStyle(.orange).accessibilityLabel("目录不可用") }
-                        }.padding(.leading, 4).padding(.trailing, 8)
-                            .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
-                            // plain 样式不会自动把 Spacer 作为点击区；形状必须放在按钮 label 内。
-                            .contentShape(Rectangle())
-                    }.buttonStyle(.plain)
+                    HStack(spacing: 8) {
+                        Image(systemName: "folder.fill").font(.system(size: 17))
+                            .foregroundStyle(store.treeErrors[url] == nil ? WorkspacePalette.accent.opacity(0.78) : WorkspacePalette.tertiary)
+                        Text(url.lastPathComponent).font(.system(size: 13)).lineLimit(1)
+                        Spacer(minLength: 0)
+                        if store.treeErrors[url] != nil { Image(systemName: "exclamationmark.triangle").font(.system(size: 11)).foregroundStyle(.orange).accessibilityLabel("目录不可用") }
+                    }.padding(.leading, 4).padding(.trailing, 8)
+                        .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                        .accessibilityElement(children: .ignore)
                         .accessibilityIdentifier("directory.navigate.\(url.path)")
                         .accessibilityLabel("打开目录 \(url.lastPathComponent)")
+                        .modifier(WorkspaceDirectoryDragSource(store: store, url: url, open: { store.navigate(to: url) }))
                 }.padding(.leading, CGFloat(min(depth, 12)) * 16 + 4)
                     .background(store.currentDirectory == url ? WorkspacePalette.accent.opacity(0.12) : hovered ? .black.opacity(0.035) : .clear,
                                 in: RoundedRectangle(cornerRadius: 6))
                     .onHover { hovered = $0 }.help(store.treeErrors[url] ?? url.path)
+                    .modifier(WorkspaceFileDropTarget(store: store, directory: store.treeErrors[url] == nil ? url : nil))
                     .contextMenu {
                         NewFileMenu(directory: url, disabled: creationDisabled, create: create)
                         Divider()
                         Button("打开目录") { store.navigate(to: url) }
                         Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                        Button("复制文件夹") { store.copyFiles([url]) }
+                        Button("粘贴") { store.pasteFiles(into: url) }.disabled(store.isImporting)
                         Button("复制路径") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.path, forType: .string) }
                         Button("刷新") { store.refresh() }
                         if url == root {
@@ -744,13 +789,16 @@ private struct FolderBranch: View {
 
 private struct FileRow: View {
     let entry: FileEntry
+    var selected = false
     var body: some View {
         GeometryReader { proxy in
             HStack(spacing: 0) {
                 HStack(spacing: 9) {
                     Image(nsImage: NSWorkspace.shared.icon(forFile: entry.url.path)).resizable().frame(width: 22, height: 22)
-                    Text(entry.name).lineLimit(1).truncationMode(.middle)
-                }.frame(width: proxy.size.width * 0.42, alignment: .leading)
+                    Text(entry.name).fontWeight(selected ? .semibold : .regular).lineLimit(1).truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if selected { Image(systemName: "checkmark.circle.fill").foregroundStyle(WorkspacePalette.accent) }
+                }.padding(.trailing, 10).frame(width: proxy.size.width * 0.42, alignment: .leading)
                 Text(entry.typeLabel).foregroundStyle(WorkspacePalette.secondary).lineLimit(1).frame(width: proxy.size.width * 0.18, alignment: .leading)
                 Text(entry.displaySize.isEmpty ? "—" : entry.displaySize).foregroundStyle(WorkspacePalette.secondary).frame(width: proxy.size.width * 0.15, alignment: .trailing)
                 Text(entry.modifiedAt?.formatted(.dateTime.year().month(.twoDigits).day(.twoDigits)) ?? "—")
@@ -800,5 +848,125 @@ private struct DirectoryOverview: View {
     }
     private func metric(_ label: String, _ value: String) -> some View {
         HStack { Text(label).foregroundStyle(WorkspacePalette.secondary); Spacer(); Text(value) }.font(.system(size: 12))
+    }
+}
+
+/// 目录导航同时支持单击、键盘与拖动；Button 会截获拖动，不能作为这里的外层控件。
+private struct WorkspaceDirectoryDragSource: ViewModifier {
+    @ObservedObject var store: BrowserStore
+    let url: URL
+    let open: () -> Void
+
+    func body(content: Content) -> some View {
+        content.contentShape(Rectangle())
+            .onTapGesture(perform: open)
+            .focusable()
+            .onKeyPress(keys: [.return, .space]) { _ in open(); return .handled }
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { open() }
+            .onDrag { WorkspaceFileDrag.provider(url: url, store: store, selection: false) }
+    }
+}
+
+/// 标准文件 URL 保持 Finder 兼容；随机令牌用于校验同一浏览器发起的多选移动。
+enum WorkspaceFileDrag {
+    static let contentType = UTType(exportedAs: "local.filedeck.browser-drag", conformingTo: .data)
+    static let type = contentType.identifier
+
+    @MainActor
+    static func provider(url: URL, store: BrowserStore, selection: Bool) -> NSItemProvider {
+        let token = store.beginFileDrag(url, includingSelection: selection)
+        let provider = NSItemProvider(object: url as NSURL)
+        // SwiftUI 经系统拖放桥接后会丢弃 ownProcess 表征；令牌必须可传递，再由 store 校验身份。
+        provider.registerDataRepresentation(forTypeIdentifier: type, visibility: .all) { completion in
+            completion(Data(token.uuidString.utf8), nil)
+            return nil
+        }
+        return provider
+    }
+}
+
+/// 目录行独立命中拖放，避免把落在子目录上的文件复制到列表当前目录。
+struct WorkspaceFileDropTarget: ViewModifier {
+    @ObservedObject var store: BrowserStore
+    let directory: URL?
+    @State private var targeted = false
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if directory != nil {
+            content
+                .overlay {
+                    if targeted {
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(WorkspacePalette.accent, lineWidth: 2)
+                            .background(WorkspacePalette.accent.opacity(0.08))
+                            .allowsHitTesting(false)
+                    }
+                }
+                .onDrop(of: [WorkspaceFileDrag.contentType, .fileURL],
+                        delegate: FileDropDelegate(store: store, directory: directory, targeted: $targeted))
+        } else { content }
+    }
+}
+
+@MainActor
+private struct FileDropDelegate: DropDelegate {
+    let store: BrowserStore
+    let directory: URL?
+    @Binding var targeted: Bool
+
+    private func isInternal(_ info: DropInfo) -> Bool {
+        info.hasItemsConforming(to: [WorkspaceFileDrag.type])
+    }
+
+    func validateDrop(info: DropInfo) -> Bool {
+        guard let directory, !store.isImporting else { return false }
+        return !isInternal(info) || store.canDropActiveDrag(into: directory)
+    }
+
+    func dropEntered(info: DropInfo) { targeted = validateDrop(info: info) }
+    func dropExited(info: DropInfo) { targeted = false }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        guard validateDrop(info: info) else { targeted = false; return DropProposal(operation: .forbidden) }
+        targeted = true
+        return DropProposal(operation: isInternal(info) && !NSEvent.modifierFlags.contains(.option) ? .move : .copy)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        targeted = false
+        guard validateDrop(info: info), let directory else { return false }
+        let copy = NSEvent.modifierFlags.contains(.option)
+        if isInternal(info), let provider = info.itemProviders(for: [WorkspaceFileDrag.type])
+            .first(where: { $0.hasItemConformingToTypeIdentifier(WorkspaceFileDrag.type) }) {
+            provider.loadDataRepresentation(forTypeIdentifier: WorkspaceFileDrag.type) { data, _ in
+                Task { @MainActor in
+                    guard let data, let value = String(data: data, encoding: .utf8), let token = UUID(uuidString: value) else {
+                        store.actionError = "无法读取拖动的文件信息，请重试。"
+                        return
+                    }
+                    store.dropActiveDrag(token: token, into: directory, copy: copy)
+                }
+            }
+        } else {
+            let providers = info.itemProviders(for: [UTType.fileURL.identifier])
+                .filter { $0.canLoadObject(ofClass: NSURL.self) }
+            guard !providers.isEmpty else { return false }
+            Task { @MainActor in
+                var urls: [URL] = []
+                for provider in providers {
+                    let url: URL? = await withCheckedContinuation { continuation in
+                        _ = provider.loadObject(ofClass: NSURL.self) { object, _ in
+                            continuation.resume(returning: (object as? URL).flatMap { $0.isFileURL ? $0 : nil })
+                        }
+                    }
+                    if let url { urls.append(url) }
+                }
+                if urls.count == providers.count { store.importFiles(urls, into: directory) }
+                else { store.actionError = "无法读取拖入的文件，请重试。" }
+            }
+        }
+        return true
     }
 }

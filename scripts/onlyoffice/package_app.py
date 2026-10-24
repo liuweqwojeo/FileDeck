@@ -60,6 +60,13 @@ def package_app(source, destination, version=None, build_number=None, compress_o
         info.update(CFBundleName="FileDeck", CFBundleDisplayName="FileDeck", CFBundleExecutable="FileDeck",
                     CFBundleIconFile="FileDeck.icns",
                     SUEnableAutomaticChecks=False)
+        # 拖动令牌需声明为 data 子类型，否则 SwiftUI 的系统桥接仅回传文件 URL。
+        drag_type = {"UTTypeIdentifier": "local.filedeck.browser-drag",
+                     "UTTypeConformsTo": ["public.data"], "UTTypeDescription": "FileDeck file drag"}
+        info["UTExportedTypeDeclarations"] = [
+            value for value in info.get("UTExportedTypeDeclarations", [])
+            if value.get("UTTypeIdentifier") != drag_type["UTTypeIdentifier"]
+        ] + [drag_type]
         if version is not None:
             info["CFBundleShortVersionString"] = version
         if build_number is not None:
