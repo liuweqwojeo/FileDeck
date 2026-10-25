@@ -6,7 +6,12 @@ import UniformTypeIdentifiers
 /// 真实文件会话回归；独立编译以便不把原生 ONLYOFFICE 窗口代码纳入旧 SwiftPM 应用入口。
 @main
 struct MediaContentRegression {
-    @MainActor static func main() async throws {
+    @MainActor static func main() async {
+        // 断言失败应给出正常的测试退出码，不能由 async main 的未捕获错误触发系统崩溃报告。
+        do { try await run() }
+        catch { print("FAIL: \(error.localizedDescription)"); exit(1) }
+    }
+    @MainActor static func run() async throws {
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("fw-media-session-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
@@ -37,6 +42,8 @@ struct MediaContentRegression {
         try body()
     }
     @MainActor static func imageSaveAndConflict(_ source: URL, directory: URL, original: Data) async throws {
+        try await unmodifiedImageSavesPreserveBytes(directory: directory)
+        try await editedImagePreservesMetadata(directory: directory)
         let content = try await FWImageContent.open(url: source)
         try expect(!content.isModified && content.kind == .png, "Image initial state")
         try mutation(content) { try content.rotate(clockwise: true) }
@@ -63,6 +70,53 @@ struct MediaContentRegression {
         try expect(content.path == destination, "Export must not retarget image")
         try await content.close()
     }
+    @MainActor static func unmodifiedImageSavesPreserveBytes(directory: URL) async throws {
+        for type in [UTType.jpeg, .png] {
+            let original = try makeMetadataImage(type: type)
+            let source = directory.appendingPathComponent("未修改.\(type.preferredFilenameExtension!)")
+            try original.write(to: source)
+            let content = try await FWImageContent.open(url: source)
+            try await content.save()
+            try expect(Data(contentsOf: source) == original, "Unmodified \(type.identifier) save must preserve every byte")
+            let destination = directory.appendingPathComponent("未修改副本.\(type.preferredFilenameExtension!)")
+            try await content.saveAs(to: destination)
+            try expect(Data(contentsOf: destination) == original, "Same-format Save As must preserve every byte")
+            // 原样写回仍走快照检查，不能为了避免重编码而绕过外部修改冲突。
+            let external = try makePNG()
+            try external.write(to: destination)
+            do { try await content.save(); throw failure("Unmodified image overwrote an external change") }
+            catch DocumentIOError.externalModification { }
+            try expect(Data(contentsOf: destination) == external, "Failed unmodified save must preserve external content")
+            try await content.close()
+        }
+    }
+    @MainActor static func editedImagePreservesMetadata(directory: URL) async throws {
+        let source = directory.appendingPathComponent("带方向与元数据.jpg")
+        try makeMetadataImage(type: .jpeg).write(to: source)
+        let content = try await FWImageContent.open(url: source)
+        // 原始 120×80 像素携带方向 6，读取为 80×120；用户再右转后应为 120×80。
+        try mutation(content) { try content.rotate(clockwise: true) }
+        try await content.save()
+        let saved = try Data(contentsOf: source)
+        let metadata = try imageProperties(saved)
+        let tiff = metadata[kCGImagePropertyTIFFDictionary as String] as? [String: Any]
+        let exif = metadata[kCGImagePropertyExifDictionary as String] as? [String: Any]
+        try expect(tiff?[kCGImagePropertyTIFFArtist as String] as? String == "FileDeck metadata author", "Edited JPEG must retain author")
+        try expect(tiff?[kCGImagePropertyTIFFImageDescription as String] as? String == "Preserve image description", "Edited JPEG must retain description")
+        try expect(exif?[kCGImagePropertyExifDateTimeOriginal as String] as? String == "2025:01:02 03:04:05", "Edited JPEG must retain capture date")
+        try expect((metadata[kCGImagePropertyOrientation as String] as? NSNumber)?.intValue == 1, "Edited JPEG orientation must be normalized")
+        try expect((exif?[kCGImagePropertyExifPixelXDimension as String] as? NSNumber)?.intValue == 120 && (exif?[kCGImagePropertyExifPixelYDimension as String] as? NSNumber)?.intValue == 80, "Edited JPEG metadata must use output dimensions")
+        try expect(ImageOperations.read(saved).width == 120 && ImageOperations.read(saved).height == 80, "Reopened JPEG must not apply source orientation twice")
+        try await content.save()
+        try expect(Data(contentsOf: source) == saved && !content.isModified, "Repeated save must preserve encoded bytes and clean state")
+        let destination = directory.appendingPathComponent("已编辑同格式副本.jpg")
+        try await content.saveAs(to: destination)
+        try expect(Data(contentsOf: destination) == saved, "Same-format Save As after editing must reuse saved bytes")
+        try await content.export(to: directory.appendingPathComponent("已编辑导出副本.png"), format: .png)
+        try await content.save()
+        try expect(Data(contentsOf: destination) == saved, "Exporting another format must not invalidate source encoded bytes")
+        try await content.close()
+    }
     @MainActor static func imageEditsDuringSave(_ source: URL, directory: URL) async throws {
         let content = try await FWImageContent.open(url: source)
         var changed = false
@@ -80,6 +134,31 @@ struct MediaContentRegression {
         try expect(ImageOperations.read(Data(contentsOf: destination)).width == 120, "Image save wrote captured snapshot")
         try await content.save()
         try expect(ImageOperations.read(Data(contentsOf: destination)).width == 80 && !content.isModified, "Next image save writes newer edit")
+        try await unmodifiedJPEGEditsDuringSave(directory: directory)
+    }
+    @MainActor static func unmodifiedJPEGEditsDuringSave(directory: URL) async throws {
+        let source = directory.appendingPathComponent("原样保存期间编辑.jpg")
+        let original = try makeMetadataImage(type: .jpeg)
+        try original.write(to: source)
+        let content = try await FWImageContent.open(url: source)
+        var changed = false
+        var editError: Error?
+        content.onStateChanged = {
+            if content.isBusy && !changed {
+                changed = true
+                do { try mutation(content) { try content.rotate(clockwise: true) } } catch { editError = error }
+            }
+        }
+        try await content.save()
+        if let editError { throw editError }
+        try expect(changed && content.isModified, "Edits during byte-preserving JPEG save must remain dirty")
+        try expect(Data(contentsOf: source) == original, "Byte-preserving save must write its original snapshot")
+        try await content.save()
+        let saved = try Data(contentsOf: source)
+        let tiff = try imageProperties(saved)[kCGImagePropertyTIFFDictionary as String] as? [String: Any]
+        try expect(!content.isModified && ImageOperations.read(saved).width == 120 && ImageOperations.read(saved).height == 80, "Next JPEG save must write the concurrent edit")
+        try expect(tiff?[kCGImagePropertyTIFFArtist as String] as? String == "FileDeck metadata author", "Concurrent edit must retain metadata")
+        try await content.close()
     }
     @MainActor static func pdfSaveAndUndo(_ source: URL, directory: URL, original: Data) async throws {
         let content = try await FWPDFContent.open(url: source)
@@ -187,6 +266,27 @@ struct MediaContentRegression {
                                 space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         context.setFillColor(CGColor(red: 0.2, green: 0.6, blue: 0.9, alpha: 1)); context.fill(CGRect(x: 0, y: 0, width: 120, height: 80))
         return try ImageOperations.export(context.makeImage()!, format: .png)
+    }
+    static func makeMetadataImage(type: UTType) throws -> Data {
+        let image = try ImageOperations.read(makePNG())
+        let data = NSMutableData()
+        let destination = CGImageDestinationCreateWithData(data, type.identifier as CFString, 1, nil)!
+        let properties: [CFString: Any] = [
+            kCGImagePropertyOrientation: 6,
+            kCGImageDestinationLossyCompressionQuality: 1.0,
+            kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFArtist: "FileDeck metadata author", kCGImagePropertyTIFFImageDescription: "Preserve image description"],
+            kCGImagePropertyExifDictionary: [kCGImagePropertyExifDateTimeOriginal: "2025:01:02 03:04:05", kCGImagePropertyExifPixelXDimension: 120, kCGImagePropertyExifPixelYDimension: 80]
+        ]
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { throw failure("Metadata fixture encoding failed") }
+        return data as Data
+    }
+    static func imageProperties(_ data: Data) throws -> [String: Any] {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] else {
+            throw failure("Image properties are missing")
+        }
+        return properties
     }
     static func failure(_ text: String) -> Error { NSError(domain: "NativeMediaRegression", code: 1, userInfo: [NSLocalizedDescriptionKey: text]) }
 }

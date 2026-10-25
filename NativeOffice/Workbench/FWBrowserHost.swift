@@ -13,16 +13,34 @@ public final class FWBrowserHost: NSViewController {
     private var observations = Set<AnyCancellable>()
     private var pendingPreview: (URL, String)?
     private let commandHandler: (String) -> Void
+    private let workbenchDefaults: UserDefaults
     @objc public var currentDirectory: URL? { browserStore.currentDirectory }
     @objc public var hasFilePreview: Bool { previewModal?.mode == .file }
     @objc public var hasAnyPreview: Bool { previewModal != nil }
     @objc public var previewDocument: FWDocumentHost? { previewModal?.documentHost }
     @objc public var previewBusy: Bool { previewModal?.isClosing == true || previewDocument?.busy == true }
 
+    enum TestPreferencesError: Error { case invalidSuite, unavailableSuite }
+
+    /// 验收工作区使用显式偏好域；CFFIXED_USER_HOME 不能保证 CFPreferences 不读写正式域。
+    static func makeWorkbenchDefaults(environment: [String: String]) throws -> UserDefaults {
+        guard let suite = environment["FW_WORKBENCH_TEST_SUITE"] else { return .standard }
+        let prefix = "local.fileworkbench.ui-test-"
+        let suffix = String(suite.dropFirst(prefix.count))
+        guard suite.hasPrefix(prefix), let identifier = UUID(uuidString: suffix),
+              identifier.uuidString.lowercased() == suffix.lowercased() else {
+            throw TestPreferencesError.invalidSuite
+        }
+        guard let defaults = UserDefaults(suiteName: suite) else { throw TestPreferencesError.unavailableSuite }
+        return defaults
+    }
+
     @objc(initWithEditorView:openHandler:commandHandler:)
     public init(editorView: NSView, openHandler: @escaping (URL, Bool) -> Void,
                 commandHandler: @escaping (String) -> Void) {
-        browserStore = BrowserStore()
+        do { workbenchDefaults = try Self.makeWorkbenchDefaults(environment: ProcessInfo.processInfo.environment) }
+        catch { fatalError("无效或不可用的 FW_WORKBENCH_TEST_SUITE；拒绝回退到正式工作区：\(error)") }
+        browserStore = BrowserStore(defaults: workbenchDefaults)
         editorBridge = WorkspaceEditorBridge(nativeView: editorView, openHandler: openHandler, commandHandler: commandHandler)
         self.commandHandler = commandHandler
         super.init(nibName: nil, bundle: nil)
@@ -42,7 +60,8 @@ public final class FWBrowserHost: NSViewController {
 
     public override func loadView() {
         let root = NSView()
-        backgroundView = NSHostingView(rootView: ContentView(store: browserStore, editor: editorBridge).preferredColorScheme(.light))
+        backgroundView = NSHostingView(rootView: ContentView(store: browserStore, editor: editorBridge)
+            .defaultAppStorage(workbenchDefaults).preferredColorScheme(.light))
         backgroundView.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(backgroundView)
         NSLayoutConstraint.activate([

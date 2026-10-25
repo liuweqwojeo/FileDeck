@@ -42,6 +42,9 @@ public final class FWDocumentHost: NSViewController {
         self.notice = notice
         super.init(nibName: nil, bundle: nil)
         content.onStateChanged = { [weak self] in self?.stateDidChange?() }
+        (content as? FWTextContent)?.onSaveRecoveryDraft = { [weak self] in
+            self?.save(in: nil, saveAs: true) { _ in }
+        }
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
@@ -349,14 +352,16 @@ public final class FWDocumentHost: NSViewController {
         if [.png, .jpeg, .heic].contains(content.kind) { formats = exporting ? [.png, .jpeg, .pdf] : [.png, .jpeg] }
         else { formats = [content.kind] }
         let initial = formats.contains(content.kind) ? content.kind : formats[0]
+        let recoveringDraft = (content as? FWTextContent)?.loadError != nil && !exporting
         let panel = NSSavePanel()
-        panel.title = exporting ? "导出文件" : "保存文件"
+        panel.title = recoveringDraft ? "另存内存草稿" : exporting ? "导出文件" : "保存文件"
         panel.prompt = exporting ? "导出" : "保存"
         panel.canCreateDirectories = true
         panel.directoryURL = content.path?.deletingLastPathComponent() ?? directory
         let base = content.path?.deletingPathExtension().lastPathComponent ?? "未命名"
         let defaultExtension = content.kind == .code && !exporting ? content.path?.pathExtension : nil
-        panel.nameFieldStringValue = base + "." + (defaultExtension.flatMap { $0.isEmpty ? nil : $0 } ?? Self.fileExtension(for: initial))
+        panel.nameFieldStringValue = base + (recoveringDraft ? "-恢复草稿" : "") + "."
+            + (defaultExtension.flatMap { $0.isEmpty ? nil : $0 } ?? Self.fileExtension(for: initial))
         panel.allowedContentTypes = [Self.contentType(for: initial)]
         panel.allowsOtherFileTypes = [.code, .text].contains(content.kind)
         let formatChoice = FWExportChoice(panel: panel, formats: formats, initial: initial)

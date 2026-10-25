@@ -25,7 +25,8 @@ final class TextDocumentSession: DocumentSession {
     private(set) var isModified: Bool
     private(set) var isClosed = false
     private var document: TextFileDocument
-    private var savedText: String
+    // 重建 WebKit 时需要恢复真实磁盘基线，不能把内存草稿误标为已保存。
+    private(set) var savedText: String
     private var work: Work?
     private let storage: Storage
 

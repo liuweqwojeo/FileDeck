@@ -618,25 +618,14 @@ struct ContentView: View {
     private func rename(_ entry: FileEntry) {
         guard !fileOperationBusy else { return }
         let name = renamedName
-        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              name != ".", name != "..", !name.contains("/"), !name.contains("\0") else {
-            renameError = "请输入有效文件名称，不能包含路径分隔符。"
-            return
-        }
         guard name != entry.name else { renamingEntry = nil; return }
-        let directory = store.currentDirectory
         fileOperationBusy = true
         Task {
-            let result = await Task.detached(priority: .userInitiated) {
-                Result { try Self.renameOnDisk(entry, name: name) }
-            }.value
-            fileOperationBusy = false
-            switch result {
-            case .success:
+            defer { fileOperationBusy = false }
+            do {
+                try await store.rename(entry, to: name)
                 renamingEntry = nil
-                if store.currentDirectory == directory { store.refresh() }
-            case .failure(let error): renameError = error.localizedDescription
-            }
+            } catch { renameError = error.localizedDescription }
         }
     }
 
@@ -665,18 +654,6 @@ struct ContentView: View {
         }
     }
 
-    nonisolated private static func renameOnDisk(_ entry: FileEntry, name: String) throws {
-        try requireSameFile(entry)
-        let destination = entry.url.deletingLastPathComponent().appendingPathComponent(name)
-        // 排他重命名在内核中拒绝已存在的目标，避免预检查后出现同名文件被覆盖。
-        guard renamex_np(entry.url.path, destination.path, UInt32(RENAME_EXCL)) == 0 else {
-            let code = errno
-            if code == EEXIST {
-                throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [NSLocalizedDescriptionKey: "已存在同名文件，请使用其他名称。"])
-            }
-            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
-        }
-    }
 }
 
 private struct FileCreationRequest: Identifiable, Sendable {

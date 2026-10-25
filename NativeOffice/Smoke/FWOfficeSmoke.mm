@@ -9,6 +9,7 @@
 #import "FileWorkbenchNative-Swift.h"
 #import "AppDelegate.h"
 #import <PDFKit/PDFKit.h>
+#import <WebKit/WebKit.h>
 @interface AppDelegate (FWMixedSmokeMenu)
 - (IBAction)onMenuSave:(id)sender;
 @end
@@ -41,6 +42,8 @@
 @property(nonatomic) ino_t directoryInode;
 @property(nonatomic) dev_t directoryDevice;
 @property(nonatomic) BOOL workbenchRequested;
+@property(nonatomic) BOOL recoveryPanelRequested;
+@property(nonatomic) NSMutableDictionary *recoveryPanelResult;
 @property(nonatomic, copy) NSArray *compressionSamples;
 @property(nonatomic) NSMutableDictionary *workbenchResult;
 #if FW_WORKBENCH_ENABLED
@@ -48,6 +51,8 @@
 @property(nonatomic, weak) NSWindow *modalWindow;
 @property(nonatomic, strong) FWDocumentHost *modalDocument;
 @property(nonatomic, copy) NSData *modalSavedData;
+@property(nonatomic, weak) WKWebView *recoveryEditor;
+@property(nonatomic, strong) NSSavePanel *recoveryPanel;
 #endif
 + (instancetype)configuredInstance;
 - (void)start:(ASCCommonViewController *)controller;
@@ -106,6 +111,11 @@ static NSButton *FWModalSheetButton(NSView *view, NSString *title) {
     }
     return nil;
 }
+
+static void FWCollectWebViews(NSView *view, NSMutableArray<WKWebView *> *editors) {
+    if ([view isKindOfClass:WKWebView.class]) [editors addObject:(WKWebView *)view];
+    for (NSView *child in view.subviews) FWCollectWebViews(child, editors);
+}
 #endif
 
 @implementation FWOfficeSmoke
@@ -147,7 +157,10 @@ static NSButton *FWModalSheetButton(NSView *view, NSString *title) {
             ![request[@"networkPolicy"] isEqual:@"sandbox-exec-deny-network"]) {
             FWInvalidConfiguration(@"请求令牌、唯一中文标记、截止时间或离线策略不匹配。");
         }
-        for (NSString *name in @[@"word.docx", @"cell.xlsx", @"slide.pptx", @"mixed.txt", @"mixed.pdf", @"native-result.json", @"profile"]) {
+        if (request[@"recoveryPanel"] && (![request[@"recoveryPanel"] isEqual:@YES] || ![request[@"workbench"] isEqual:@YES])) {
+            FWInvalidConfiguration(@"恢复面板验收必须显式启用 workbench 和 recoveryPanel。");
+        }
+        for (NSString *name in @[@"word.docx", @"cell.xlsx", @"slide.pptx", @"mixed.txt", @"mixed.pdf", @"mixed-恢复草稿.txt", @"recovery-panel-checkpoint.json", @"native-result.json", @"profile"]) {
             NSString *path = [directory stringByAppendingPathComponent:name];
             struct stat existing;
             if (lstat(path.fileSystemRepresentation, &existing) == 0 || errno != ENOENT) {
@@ -166,6 +179,8 @@ static NSButton *FWModalSheetButton(NSView *view, NSString *title) {
         instance.viewID = -1;
         instance.results = [NSMutableArray array];
         instance.workbenchRequested = [request[@"workbench"] boolValue];
+        instance.recoveryPanelRequested = [request[@"recoveryPanel"] boolValue];
+        instance.recoveryPanelResult = [NSMutableDictionary dictionary];
         if (request[@"compressionSamples"]) {
             if (![request[@"compressionSamples"] isKindOfClass:NSArray.class]) {
                 FWInvalidConfiguration(@"压缩帮助验收样本必须为数组。");
@@ -520,6 +535,7 @@ static NSButton *FWModalSheetButton(NSView *view, NSString *title) {
 #if FW_WORKBENCH_ENABLED
     if ([self.phase hasPrefix:@"mixed-"]) { [self tickMixedWorkbench]; return; }
     if ([self.phase hasPrefix:@"modal-"]) { [self tickModalWorkbench]; return; }
+    if ([self.phase hasPrefix:@"recovery-"]) { [self tickRecoveryPanel]; return; }
 #endif
     if ([@[@"inserting", @"verifying-reopen"] containsObject:self.phase] && now >= self.nextProbe) {
         self.nextProbe = now + 1;
@@ -763,6 +779,13 @@ static NSButton *FWModalSheetButton(NSView *view, NSString *title) {
                     [self finish:@"不保存关闭未正常完成，或 mixed.txt 的原始标记/CRLF 字节发生变化。"]; return;
                 }
                 self.workbenchResult[@"modalDiscardClosed"] = @YES;
+                if (self.recoveryPanelRequested) {
+                    // 独立重开已验证的源文件，避免恢复验收改变既有关闭/退出测试的含义。
+                    self.phase = @"recovery-loading";
+                    [self.modalBrowser openPreviewURL:[NSURL fileURLWithPath:[self.directory stringByAppendingPathComponent:@"mixed.txt"]]
+                                               source:@"smoke-recovery"];
+                    return;
+                }
                 self.phase = @"modal-completed";
                 [self finish:nil];
             }];
@@ -779,6 +802,147 @@ static NSButton *FWModalSheetButton(NSView *view, NSString *title) {
         [discard performClick:nil];
     }
 }
+
+/// checkpoint 仅报告实际面板状态，外部操作者通过 Accessibility/真实键鼠取消、保存。
+/// 驱动不向面板注入 URL、确认动作或完成回调；系统选定的 URL 才能进入生产保存流程。
+- (void)writeRecoveryCheckpoint:(NSString *)stage {
+    NSDictionary *checkpoint = @{@"schemaVersion": @1, @"token": self.token, @"phase": stage,
+                                 @"pid": @(getpid()), @"directory": self.directory,
+                                 @"sourceFile": @"mixed.txt", @"expectedFileName": @"mixed-恢复草稿.txt",
+                                 @"expectedPath": [self.directory stringByAppendingPathComponent:@"mixed-恢复草稿.txt"],
+                                 @"panelTitle": self.recoveryPanel.title ?: @"",
+                                 @"panelWindowNumber": @(self.recoveryPanel.windowNumber),
+                                 @"checks": self.recoveryPanelResult};
+    NSString *path = [self.directory stringByAppendingPathComponent:@"recovery-panel-checkpoint.json"];
+    struct stat metadata;
+    BOOL exists = lstat(path.fileSystemRepresentation, &metadata) == 0;
+    BOOL missing = !exists && errno == ENOENT;
+    NSError *error;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:checkpoint options:NSJSONWritingPrettyPrinted error:&error];
+    if (![self directoryUnchanged] || (exists && !S_ISREG(metadata.st_mode)) || (!exists && !missing) ||
+        !data || ![data writeToFile:path options:NSDataWritingAtomic error:&error]) {
+        [self finish:error.localizedDescription ?: @"无法安全写入恢复面板进度。"]; return;
+    }
+    fprintf(stdout, "Recovery panel checkpoint: %s (%s)\n", path.UTF8String, stage.UTF8String);
+    fflush(stdout);
+}
+
+- (BOOL)recoverySourceUnchanged {
+    return [[NSData dataWithContentsOfFile:[self.directory stringByAppendingPathComponent:@"mixed.txt"]]
+            isEqualToData:self.modalSavedData];
+}
+
+- (void)presentRecoveryPanel:(BOOL)second {
+    NSButton *button = FWModalSheetButton(self.modalDocument.view, @"另存内存草稿…");
+    if (!button || self.modalWindow.attachedSheet || !self.modalDocument.canSaveAs) {
+        [self finish:@"缺少正式草稿另存入口，或上一面板尚未结束。"]; return;
+    }
+    self.phase = second ? @"recovery-second-panel" : @"recovery-first-panel";
+    [button performClick:nil];
+}
+
+- (void)tickRecoveryPanel {
+    FWDocumentHost *host = self.modalDocument;
+    FWBrowserHost *browser = self.modalBrowser;
+    NSWindow *window = self.modalWindow;
+    if (!self.recoveryPanelRequested || !window.visible || FWBrowserForWindow(self.controller, window) != browser) {
+        [self finish:@"恢复面板验收离开了本次工作台窗口。"]; return;
+    }
+    if ([self.phase isEqual:@"recovery-loading"]) {
+        host = browser.previewDocument;
+        if (!host || !host.canBeginEditing) return;
+        self.modalDocument = host;
+        self.phase = @"recovery-enter-edit";
+        [host beginEditing];
+    } else if ([self.phase isEqual:@"recovery-enter-edit"]) {
+        if (host.busy || !host.canSave) return;
+        self.phase = @"recovery-editing";
+        [host smokeReplaceText:[self.marker stringByAppendingString:@" recovery draft e\u0301 🌱"] completion:^(NSError *error) {
+            if (self.finished) return;
+            NSMutableArray<WKWebView *> *editors = [NSMutableArray array];
+            FWCollectWebViews(self.modalDocument.view, editors);
+            if (error || ![self.phase isEqual:@"recovery-editing"] || ![self modalDraftIsRetained] || editors.count != 1) {
+                [self finish:error.localizedDescription ?: @"恢复验收没有唯一且已同步草稿的 WK 编辑器。"]; return;
+            }
+            WKWebView *editor = editors.firstObject;
+            id<WKNavigationDelegate> delegate = editor.navigationDelegate;
+            if (![delegate respondsToSelector:@selector(webViewWebContentProcessDidTerminate:)]) {
+                [self finish:@"当前 WK 没有公开的进程终止委托入口。"]; return;
+            }
+            self.recoveryEditor = editor;
+            self.recoveryPanelResult[@"editorSynchronized"] = @YES;
+            // 注入公开故障回调，范围是仍存活的 Swift 会话，不能宣称执行了进程 kill。
+            [delegate webViewWebContentProcessDidTerminate:editor];
+            if (self.modalDocument.busy || self.modalDocument.canSave || !self.modalDocument.canSaveAs ||
+                ![self.modalDocument.sessionState isEqual:@"LOAD_ERROR"] || ![self recoverySourceUnchanged]) {
+                [self finish:@"故障后普通保存未关闭、草稿另存不可用，或源文件被修改。"]; return;
+            }
+            self.recoveryPanelResult[@"terminationInjected"] = @YES;
+            [self presentRecoveryPanel:NO];
+        }];
+    } else if ([self.phase isEqual:@"recovery-first-panel"] || [self.phase isEqual:@"recovery-second-panel"]) {
+        if (!window.attachedSheet) return;
+        if (![window.attachedSheet isKindOfClass:NSSavePanel.class]) {
+            [self finish:@"草稿另存未显示真实系统保存面板。"]; return;
+        }
+        NSSavePanel *panel = (NSSavePanel *)window.attachedSheet;
+        if (!panel.visible) return;
+        if (![panel.nameFieldStringValue isEqual:@"mixed-恢复草稿.txt"] ||
+            ![panel.directoryURL.URLByStandardizingPath.path isEqual:self.directory] ||
+            ![self modalDraftIsRetained] || ![self recoverySourceUnchanged]) {
+            [self finish:@"系统恢复面板默认目录、文件名或草稿状态不符合预期。"]; return;
+        }
+        self.recoveryPanel = panel;
+        BOOL second = [self.phase isEqual:@"recovery-second-panel"];
+        self.recoveryPanelResult[second ? @"secondPanelPresented" : @"firstPanelPresented"] = @YES;
+        self.phase = second ? @"recovery-await-save" : @"recovery-await-cancel";
+        [self writeRecoveryCheckpoint:second ? @"awaiting-save" : @"awaiting-cancel"];
+    } else if ([self.phase isEqual:@"recovery-await-cancel"]) {
+        if (window.attachedSheet || host.busy) return;
+        NSString *destination = [self.directory stringByAppendingPathComponent:@"mixed-恢复草稿.txt"];
+        if (![self modalDraftIsRetained] || !host.canSaveAs || host.lastSavedURL ||
+            ![host.documentURL.path isEqual:[self.directory stringByAppendingPathComponent:@"mixed.txt"]] ||
+            ![self recoverySourceUnchanged] || [NSFileManager.defaultManager fileExistsAtPath:destination]) {
+            [self finish:@"取消系统面板后草稿、来源或磁盘状态发生变化。"]; return;
+        }
+        self.recoveryPanelResult[@"cancelPreservedDraft"] = @YES;
+        self.recoveryPanel = nil;
+        [self presentRecoveryPanel:YES];
+    } else if ([self.phase isEqual:@"recovery-await-save"]) {
+        if (window.attachedSheet || host.busy) return;
+        NSString *destination = [self.directory stringByAppendingPathComponent:@"mixed-恢复草稿.txt"];
+        NSData *expected = [[self.marker stringByAppendingString:@" recovery draft e\u0301 🌱"] dataUsingEncoding:NSUTF8StringEncoding];
+        struct stat metadata;
+        if (![host.lastSavedURL.URLByStandardizingPath.path isEqual:destination] ||
+            ![host.documentURL.URLByStandardizingPath.path isEqual:destination] ||
+            ![self.recoveryPanel.URL.URLByStandardizingPath.path isEqual:destination] || host.modified ||
+            ![self recoverySourceUnchanged] || lstat(destination.fileSystemRepresentation, &metadata) ||
+            !S_ISREG(metadata.st_mode) || ![[NSData dataWithContentsOfFile:destination] isEqualToData:expected]) {
+            [self finish:@"系统面板保存未完成，或目标、源文件、正文、dirty 状态不正确。"]; return;
+        }
+        [self.recoveryPanelResult addEntriesFromDictionary:@{@"saveCompleted": @YES, @"sourceUnchanged": @YES,
+            @"recoveredTextVerified": @YES, @"dirtyCleared": @YES, @"sourceFile": @"mixed.txt",
+            @"destinationFile": @"mixed-恢复草稿.txt", @"lastSavedPath": host.lastSavedURL.path,
+            @"panelSelectedPath": self.recoveryPanel.URL.path}];
+        self.recoveryPanel = nil;
+        self.phase = @"recovery-closing";
+        [browser requestClosePreviewWithCompletion:^(BOOL closed) {
+            if (self.finished) return;
+            if (!closed || self.modalBrowser.hasAnyPreview || ![self.modalDocument.sessionState isEqual:@"CLOSED"] ||
+                ![self recoverySourceUnchanged]) {
+                [self finish:@"已抢救的草稿未正常关闭，或原文件被修改。"]; return;
+            }
+            self.phase = @"recovery-await-release";
+        }];
+    } else if ([self.phase isEqual:@"recovery-await-release"]) {
+        if (self.recoveryEditor) return; // 等待本轮 AppKit/WK 临时引用退栈，实际观察对象释放。
+        self.recoveryPanelResult[@"closedAndReleased"] = @YES;
+        self.recoveryPanelResult[@"passed"] = @YES;
+        self.phase = @"recovery-completed";
+        [self writeRecoveryCheckpoint:@"completed"];
+        [self finish:nil];
+    }
+}
 #endif
 
 - (void)finish:(NSString *)error {
@@ -792,6 +956,7 @@ static NSButton *FWModalSheetButton(NSView *view, NSString *title) {
                                      @"profileIsolated": @(self.profileVerified),
                                      @"inputMethod": @"SDK pluginMethod_InputText; system IME not tested"} mutableCopy];
     if (self.workbenchRequested) result[@"workbench"] = self.workbenchResult;
+    if (self.recoveryPanelRequested) result[@"recoveryPanel"] = self.recoveryPanelResult;
     if (error) { result[@"error"] = error; if (self.current) result[@"currentCase"] = self.current; }
     NSData *data = [NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted error:nil];
     NSError *writeError;

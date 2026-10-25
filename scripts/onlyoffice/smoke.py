@@ -9,6 +9,7 @@ import plistlib
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -19,7 +20,13 @@ from common import BUILD
 
 CASES = {"docx": "word.docx", "xlsx": "cell.xlsx", "pptx": "slide.pptx"}
 REQUIRED_STAGES = ("created", "edited", "saved", "closed", "reopened", "verifiedInEditor", "closedAfterReopen")
+RECOVERY_STAGES = ("editorSynchronized", "terminationInjected", "firstPanelPresented", "cancelPreservedDraft",
+                   "secondPanelPresented", "saveCompleted", "sourceUnchanged", "recoveredTextVerified",
+                   "dirtyCleared", "closedAndReleased", "passed")
+RECOVERY_FILE = "mixed-恢复草稿.txt"
+RECOVERY_DRAFT_SUFFIX = " recovery draft e\u0301 🌱"
 NETWORK_POLICY = "sandbox-exec-deny-network"
+WORKBENCH_TEST_SUITE_PREFIX = "local.fileworkbench.ui-test-"
 MAX_ZIP_BYTES = 64 * 1024 * 1024
 MAX_XML_BYTES = 16 * 1024 * 1024
 
@@ -96,7 +103,7 @@ def compressed_resource_samples(app):
     return samples
 
 
-def create_run_directory(parent, deadline_seconds, workbench=False, compression_samples=None):
+def create_run_directory(parent, deadline_seconds, workbench=False, compression_samples=None, recovery_panel=False):
     if not 30 <= deadline_seconds <= 1800:
         raise RuntimeError("截止时长必须为 30 到 1800 秒。")
     parent = parent.expanduser().resolve()
@@ -106,9 +113,12 @@ def create_run_directory(parent, deadline_seconds, workbench=False, compression_
     directory.chmod(0o700)
     token = str(uuid.uuid4())
     request = {"schemaVersion": 1, "token": token, "marker": "文件工作台离线验收-" + token,
-               "deadlineUnix": time.time() + deadline_seconds, "networkPolicy": NETWORK_POLICY}
-    if workbench:
+               "deadlineUnix": time.time() + deadline_seconds, "networkPolicy": NETWORK_POLICY,
+               "workbenchTestSuite": WORKBENCH_TEST_SUITE_PREFIX + token}
+    if workbench or recovery_panel:
         request["workbench"] = True
+    if recovery_panel:
+        request["recoveryPanel"] = True
     if compression_samples is not None:
         request["compressionSamples"] = compression_samples
     write_new_json(directory / "request.json", request)
@@ -200,6 +210,8 @@ def verify_run(directory):
         raise RuntimeError("请求版本或中文标记无效。")
     if request.get("networkPolicy") != NETWORK_POLICY:
         raise RuntimeError("此运行没有声明所需的进程网络隔离。")
+    if "workbenchTestSuite" in request and request["workbenchTestSuite"] != WORKBENCH_TEST_SUITE_PREFIX + token:
+        raise RuntimeError("工作台测试偏好域与本次令牌不一致。")
     if native.get("schemaVersion") != 1 or native.get("token") != token:
         raise RuntimeError("原生结果不属于本次测试。")
     if native.get("status") != "passed":
@@ -235,11 +247,36 @@ def verify_run(directory):
             raise RuntimeError("混合文本输出不是受限普通文件。")
         if path.read_bytes() != (marker + "\r\n").encode("utf-8"):
             raise RuntimeError("混合文本正文或原始换行未正确保存。")
+    recovery = None
+    if request.get("recoveryPanel") is True:
+        recovery = native.get("recoveryPanel")
+        if request.get("workbench") is not True or not isinstance(recovery, dict) or not all(
+                recovery.get(stage) is True for stage in RECOVERY_STAGES):
+            raise RuntimeError("未完成恢复草稿的真实系统面板取消、保存与关闭释放验收。")
+        expected_path = str(directory / RECOVERY_FILE)
+        if (recovery.get("sourceFile") != "mixed.txt" or recovery.get("destinationFile") != RECOVERY_FILE
+                or recovery.get("lastSavedPath") != expected_path or recovery.get("panelSelectedPath") != expected_path):
+            raise RuntimeError("恢复草稿的实际系统面板选择或保存路径不匹配。")
+        # 独立重读真实文件；只有状态布尔值或标记包含关系不能证明完整草稿已抢救。
+        path = directory / RECOVERY_FILE
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 16384:
+            raise RuntimeError("恢复草稿输出不是受限普通文件。")
+        if path.read_bytes() != (marker + RECOVERY_DRAFT_SUFFIX).encode("utf-8"):
+            raise RuntimeError("恢复草稿正文与已同步的完整内容不一致。")
+        checkpoint = read_json(directory / "recovery-panel-checkpoint.json")
+        if (checkpoint.get("schemaVersion") != 1 or checkpoint.get("token") != token
+                or checkpoint.get("phase") != "completed" or checkpoint.get("directory") != str(directory)
+                or checkpoint.get("sourceFile") != "mixed.txt" or checkpoint.get("expectedFileName") != RECOVERY_FILE
+                or checkpoint.get("expectedPath") != expected_path or checkpoint.get("checks") != recovery):
+            raise RuntimeError("恢复面板进度与本次运行的最终结果不一致。")
     if "compressionSamples" in request:
         if not all(case.get("compressedResourcesVerified") is True for case in cases):
             raise RuntimeError("压缩资源未通过真实 CEF 帮助面板与原生拼写检查验收。")
     return {"schemaVersion": 1, "status": "passed", "directory": str(directory), "cases": verified,
             "workbench": workbench,
+            "workbenchTestSuite": request.get("workbenchTestSuite"),
+            "recoveryPanel": recovery,
             "compressedResourcesVerified": "compressionSamples" in request,
             "networkPolicy": NETWORK_POLICY, "inputMethod": native.get("inputMethod"),
             "limitations": ["通过 SDK 输入上下文写入中文；系统输入法组合输入和排版兼容性仍需单独验收。"]}
@@ -258,18 +295,23 @@ def stop_process(process):
         process.wait(timeout=5)
 
 
-def run(app, output_parent, deadline_seconds, workbench=False, compressed_resources=False):
+def run(app, output_parent, deadline_seconds, workbench=False, compressed_resources=False, recovery_panel=False):
     executable = app_executable(app)
     sandbox = Path("/usr/bin/sandbox-exec")
     if not sandbox.is_file():
         raise RuntimeError("本机没有 sandbox-exec，不能宣称已完成离线验收。")
     samples = compressed_resource_samples(app.resolve()) if compressed_resources else None
     directory, request = create_run_directory(output_parent, deadline_seconds, workbench=workbench,
-                                               compression_samples=samples)
+                                               compression_samples=samples, recovery_panel=recovery_panel)
+    if recovery_panel:
+        # 外部操作者只观察 checkpoint 并操作实际系统面板，不向进程回传保存 URL 或伪造成功。
+        print("恢复面板进度：" + str(directory / "recovery-panel-checkpoint.json"), file=sys.stderr, flush=True)
     environment = os.environ.copy()
     environment["FW_OFFICE_SMOKE_DIR"] = str(directory)
     environment["FW_OFFICE_SMOKE_TOKEN"] = request["token"]
-    # CoreFoundation 的偏好目录单独隔离，不改用户 HOME；业务缓存另由原生 ASCHelper 钩子隔离。
+    # 工作台偏好显式隔离；CFFIXED_USER_HOME 仅辅助路径重定向，不保证隔离 CFPreferences。
+    environment["FW_WORKBENCH_TEST_SUITE"] = request["workbenchTestSuite"]
+    # Office 数据隔离仍由 ASCHelper 钩子与真实 app_data_path 检查保证。
     preferences = directory / "preferences-home"
     preferences.mkdir(mode=0o700)
     environment["CFFIXED_USER_HOME"] = str(preferences)
@@ -311,6 +353,7 @@ def main():
     parser.add_argument("--output-parent", type=Path, default=BUILD / "smoke")
     parser.add_argument("--deadline-seconds", type=int, default=360)
     parser.add_argument("--workbench", action="store_true", help="同时验证 Office/文本/PDF 混合标签和菜单保存路由")
+    parser.add_argument("--recovery-panel", action="store_true", help="包含 workbench；等待外部真实取消一次、保存一次恢复草稿系统面板")
     parser.add_argument("--compressed-resources", action="store_true", help="同时验证压缩帮助响应、帮助面板和原生拼写检查")
     arguments = parser.parse_args()
     try:
@@ -320,7 +363,8 @@ def main():
             result["mode"] = "artifact-verification-only"
         else:
             result = run(arguments.app, arguments.output_parent, arguments.deadline_seconds,
-                         workbench=arguments.workbench, compressed_resources=arguments.compressed_resources)
+                         workbench=arguments.workbench, compressed_resources=arguments.compressed_resources,
+                         recovery_panel=arguments.recovery_panel)
     except (OSError, ValueError, RuntimeError, zipfile.BadZipFile, ET.ParseError) as error:
         result = {"schemaVersion": 1, "status": "failed", "error": str(error)}
     print(json.dumps(result, ensure_ascii=False, indent=2))

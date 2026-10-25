@@ -43,6 +43,55 @@ final class MediaOperationsTests: XCTestCase {
         XCTAssertEqual(normalized.height, 12)
     }
 
+    func testImageEditsRetainMetadataWithoutReapplyingSourceOrientation() throws {
+        let input = try makeImage(width: 12, height: 8)
+        let data = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil))
+        let originalProperties: [CFString: Any] = [
+            kCGImagePropertyOrientation: 6,
+            kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFArtist: "图片作者", kCGImagePropertyTIFFImageDescription: "拍摄说明"],
+            kCGImagePropertyExifDictionary: [kCGImagePropertyExifDateTimeOriginal: "2025:01:02 03:04:05", kCGImagePropertyExifUserComment: "Preserve capture comment",
+                                            kCGImagePropertyExifPixelXDimension: 12, kCGImagePropertyExifPixelYDimension: 8,
+                                            kCGImagePropertyExifSubjectArea: [2, 3]],
+            kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitudeRef: "N", kCGImagePropertyGPSLatitude: 30.25]
+        ]
+        CGImageDestinationAddImage(destination, input, originalProperties as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        let original = data as Data
+        let originalSource = try XCTUnwrap(CGImageSourceCreateWithData(original as CFData, nil))
+        let fixtureProperties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(originalSource, 0, nil) as? [CFString: Any])
+        let fixtureExif = try XCTUnwrap(fixtureProperties[kCGImagePropertyExifDictionary] as? [CFString: Any])
+        XCTAssertEqual(fixtureExif[kCGImagePropertyExifUserComment] as? String, "Preserve capture comment", "先确认 ImageIO 已正确生成原始测试元数据")
+        let normalized = try ImageOperations.read(original)
+        let outputs = [try ImageOperations.rotate90(normalized),
+                       try ImageOperations.crop(normalized, pixelRect: CGRect(x: 1, y: 2, width: 4, height: 6)),
+                       try ImageOperations.resize(normalized, width: 30, height: 20)]
+        for image in outputs {
+            // 控制器先把变换结果放进无损 PNG 快照，JPEG 保存再编码；两个阶段都不能丢失描述或复用旧方向。
+            let png = try ImageOperations.export(image, format: .png, preservingMetadataFrom: original)
+            let jpeg = try ImageOperations.export(ImageOperations.read(png), format: .jpeg(quality: 0.92), preservingMetadataFrom: png)
+            for encoded in [png, jpeg] {
+                let source = try XCTUnwrap(CGImageSourceCreateWithData(encoded as CFData, nil))
+                let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])
+                let tiff = try XCTUnwrap(properties[kCGImagePropertyTIFFDictionary] as? [CFString: Any])
+                let exif = try XCTUnwrap(properties[kCGImagePropertyExifDictionary] as? [CFString: Any])
+                let gps = try XCTUnwrap(properties[kCGImagePropertyGPSDictionary] as? [CFString: Any])
+                XCTAssertEqual(tiff[kCGImagePropertyTIFFArtist] as? String, "图片作者")
+                XCTAssertEqual(tiff[kCGImagePropertyTIFFImageDescription] as? String, "拍摄说明")
+                XCTAssertEqual(exif[kCGImagePropertyExifDateTimeOriginal] as? String, "2025:01:02 03:04:05")
+                XCTAssertEqual(exif[kCGImagePropertyExifUserComment] as? String, "Preserve capture comment")
+                XCTAssertEqual(gps[kCGImagePropertyGPSLatitude] as? Double, 30.25)
+                XCTAssertEqual((properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue, 1)
+                XCTAssertEqual((exif[kCGImagePropertyExifPixelXDimension] as? NSNumber)?.intValue, image.width)
+                XCTAssertEqual((exif[kCGImagePropertyExifPixelYDimension] as? NSNumber)?.intValue, image.height)
+                XCTAssertNil(exif[kCGImagePropertyExifSubjectArea], "裁剪或旋转后不能复用旧像素区域")
+                let reopened = try ImageOperations.read(encoded)
+                XCTAssertEqual(reopened.width, image.width)
+                XCTAssertEqual(reopened.height, image.height)
+            }
+        }
+    }
+
     func testImageRotationDirectionAndCropOrigin() throws {
         let red: [UInt8] = [255, 0, 0, 255]
         let green: [UInt8] = [0, 255, 0, 255]

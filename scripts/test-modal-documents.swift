@@ -106,6 +106,11 @@ final class ModalDocumentTests: NSObject, NSApplicationDelegate {
         window.title = "FileDeck 文档关闭验收（自动关闭）"
         window.isReleasedWhenClosed = false
         let testCase = ProcessInfo.processInfo.environment["FW_MODAL_DOCUMENT_TEST_CASE"]
+        if testCase == "webkit-recovery" {
+            try await webKitRecovery()
+            try await webKitFailureAfterWrite()
+            return
+        }
         if testCase != "yaml-preview" {
             trace("JSON 美化预览")
             try await jsonPreview()
@@ -124,6 +129,97 @@ final class ModalDocumentTests: NSObject, NSApplicationDelegate {
         try await conflictAndDiscard()
         trace("载入期间关闭")
         try await closeDuringLoading()
+        trace("WebKit 故障草稿恢复")
+        try await webKitRecovery()
+        try await webKitFailureAfterWrite()
+    }
+
+    /// 注入公开的进程终止委托回调；正文仍经真实 WK 输入/桥接，恢复与另存均操作真实对象和文件。
+    func webKitRecovery() async throws {
+        let source = output.appendingPathComponent("故障恢复.md")
+        let baseline = "# 磁盘基线\r\n保留原文件\r\n"
+        try Data(baseline.utf8).write(to: source)
+        let host = try await open(source)
+        let oldEditor = try await edit(host, text: "# 未保存草稿\n中文 e\u{301} 与 emoji 🌱")
+        guard let content = host.children.first as? FWTextContent,
+              let draft = try await js(oldEditor, "return window.workbench.getText()") as? String else {
+            throw Failed.assertion("没有可故障注入的文本内容")
+        }
+        content.webViewWebContentProcessDidTerminate(oldEditor)
+        try check("进程终止后只开放草稿另存且明确恢复范围", host.modified && !host.busy && !host.canSave && host.canSaveAs
+                  && host.statusText.contains("最近已同步"))
+        let closing = Task { await close(host) }
+        try await press("取消")
+        try check("故障后取消关闭仍保留草稿", !(await closing.value) && host.modified && host.canSaveAs)
+
+        let existing = output.appendingPathComponent("不可覆盖的恢复目标.md")
+        try Data("目标原文".utf8).write(to: existing)
+        do {
+            try await content.saveAs(to: existing)
+            throw Failed.assertion("恢复另存静默覆盖已有目标")
+        } catch DocumentIOError.destinationExists { }
+        try check("故障另存失败保留原目标、来源和草稿", host.modified && !host.busy && host.documentURL == source
+                  && (try String(contentsOf: existing, encoding: .utf8)) == "目标原文")
+
+        guard let recover = button(in: host.view, title: "恢复编辑器") else { throw Failed.assertion("缺少恢复编辑器入口") }
+        recover.performClick(nil)
+        try await wait("从内存重建 WK") { !host.busy && host.canSave && self.web(in: host.view) !== oldEditor }
+        let recovered = web(in: host.view)!
+        let restored = try await js(recovered, "return window.workbench.getText()") as? String
+        let dirtyLabel = try await js(recovered, "return document.querySelector('#status').textContent") as? String
+        try check("重建编辑器保留草稿、原保存基线和磁盘", restored == draft && host.modified && dirtyLabel == "未保存"
+                  && (try Data(contentsOf: source)) == Data(baseline.utf8))
+        content.webViewWebContentProcessDidTerminate(oldEditor)
+        try check("旧 WK 延迟终止回调不污染新编辑器", host.canSave && host.sessionState == "DIRTY")
+        try check("新 WK 恢复后可继续输入", try await js(recovered, """
+        const element = document.querySelector('.cm-content');
+        element.focus(); document.execCommand('selectAll');
+        return document.execCommand('insertText', false, '恢复后继续修改');
+        """) as? Bool == true)
+        // 再次通过真实编辑事务与完整同步，确保故障前最后一条输入已进入 session。
+        try await content.replaceTextForSmoke("恢复后继续修改")
+        let latest = try await js(recovered, "return window.workbench.getText()") as? String
+        content.webViewWebContentProcessDidTerminate(recovered)
+        // 注入回调不会真的杀死 WebKit；移除 JS API，证明抢救写盘不依赖仍能调用的旧网页。
+        _ = try await js(recovered, "window.workbench = null; return true")
+        guard let rescue = button(in: host.view, title: "另存内存草稿…") else { throw Failed.assertion("缺少草稿另存入口") }
+        // 单独验证按钮派发和真实存储：系统 NSSavePanel 的远程确认在无人值守环境可能挂起。
+        // 此回归显式选择临时路径，不把它当作系统面板键鼠端到端验收。
+        var recoveryRequested = false
+        let chooseDestination = content.onSaveRecoveryDraft
+        content.onSaveRecoveryDraft = { recoveryRequested = true }
+        rescue.performClick(nil)
+        content.onSaveRecoveryDraft = chooseDestination
+        try check("故障另存按钮派发选择目标请求", recoveryRequested)
+        let saved = output.appendingPathComponent("故障恢复-恢复草稿.md")
+        try await content.saveAs(to: saved)
+        try check("无 WebKit 时另存草稿保留源文件并更新保存基线", host.documentURL == saved && !host.modified
+                  && (try String(contentsOf: saved, encoding: .utf8)) == latest
+                  && (try Data(contentsOf: source)) == Data(baseline.utf8))
+        try check("已抢救草稿可正常关闭并释放故障 WK", await close(host) && host.sessionState == "CLOSED" && web(in: host.view) == nil)
+    }
+
+    func webKitFailureAfterWrite() async throws {
+        let source = output.appendingPathComponent("写盘后桥接故障.md")
+        try Data("原文".utf8).write(to: source)
+        let host = try await open(source)
+        let editor = try await edit(host, text: "本次实际写盘内容")
+        let expected = try await js(editor, "return window.workbench.getText()") as? String
+        // 保留写入前的 getText，只让写盘完成后的异步确认失败，确定性覆盖该时间窗口。
+        _ = try await js(editor, """
+        window.workbench = { ...window.workbench, markSaved: async () => {
+            throw new Error('regression: bridge failed after disk save');
+        }};
+        return true;
+        """)
+        let saved = await withCheckedContinuation { continuation in
+            host.save(in: output, saveAs: false) { continuation.resume(returning: $0) }
+        }
+        try check("写盘后桥接失败不误报磁盘保存失败", saved && host.lastError == nil && host.lastSavedURL == source
+                  && !host.modified && host.sessionState == "LOAD_ERROR"
+                  && (try String(contentsOf: source, encoding: .utf8)) == expected)
+        try check("写盘后桥接故障仍提供恢复入口", host.canSaveAs && button(in: host.view, title: "恢复编辑器")?.isEnabled == true)
+        try check("已落盘故障文档可安全关闭", await close(host))
     }
     func jsonPreview() async throws {
         let url = output.appendingPathComponent("美化预览.json")

@@ -122,7 +122,8 @@ final class BrowserStore: ObservableObject {
     private var treeGeneration = UUID()
     private var openPanel: NSOpenPanel?
     private var bookmarks: [URL: Data] = [:]
-    private var scopedURLs: Set<URL> = []
+    // 键跟随浏览路径，值保留系统最初授予的作用域令牌；重命名不能丢弃仍有效的授权。
+    private var scopedURLs: [URL: URL] = [:]
     private var navigationRoots: [URL: URL] = [:]
     private var updatingSelection = false
     private var selectionAnchor: URL?
@@ -168,7 +169,7 @@ final class BrowserStore: ObservableObject {
     }
 
     deinit {
-        for url in scopedURLs { url.stopAccessingSecurityScopedResource() }
+        for url in scopedURLs.values { url.stopAccessingSecurityScopedResource() }
     }
 
     func skipWelcome() {
@@ -476,8 +477,8 @@ final class BrowserStore: ObservableObject {
         managedRoots.removeAll { $0 == root }
         expandedDirectories = expandedDirectories.filter { !Self.contains($0, in: root) }
         bookmarks[root] = nil
-        for scoped in scopedURLs.filter({ $0.standardizedFileURL.path == root.path }) {
-            scopedURLs.remove(scoped)
+        for (path, scoped) in scopedURLs.filter({ $0.key.path == root.path }) {
+            scopedURLs[path] = nil
             scoped.stopAccessingSecurityScopedResource()
         }
         clearTree()
@@ -535,6 +536,37 @@ final class BrowserStore: ObservableObject {
     }
 
     var selectedFileURLs: [URL] { orderedEntries.filter { selectedURLs.contains($0.url) }.map(\.url) }
+
+    /// 只有磁盘重命名成功才同步工作区；完成时读取最新导航状态，不跳回发起操作的目录。
+    @discardableResult
+    func rename(_ entry: FileEntry, to name: String) async throws -> URL {
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              name != ".", name != "..", !name.contains("/"), !name.contains("\0") else {
+            throw NSError(domain: "FileDeck.FileOperation", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "请输入有效文件名称，不能包含路径分隔符。"])
+        }
+        guard name != entry.name else { return entry.url }
+        let destination = try await Task.detached(priority: .userInitiated) {
+            guard let identity = entry.identity, try FileSystem.identity(at: entry.url) == identity else {
+                throw NSError(domain: "FileDeck.FileOperation", code: 1,
+                              userInfo: [NSLocalizedDescriptionKey: "文件已发生变化，请刷新后重试。"])
+            }
+            let destination = entry.url.deletingLastPathComponent()
+                .appendingPathComponent(name, isDirectory: entry.url.hasDirectoryPath)
+            // 内核排他重命名拒绝覆盖同名文件或链接；验证失败时浏览状态保持原样。
+            guard renamex_np(entry.url.path, destination.path, UInt32(RENAME_EXCL)) == 0 else {
+                let code = errno
+                if code == EEXIST {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(code),
+                                  userInfo: [NSLocalizedDescriptionKey: "已存在同名文件，请使用其他名称。"])
+                }
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+            }
+            return destination
+        }.value
+        completeFileRelocation([(entry.url, destination)])
+        return destination
+    }
 
     @discardableResult
     func copySelectedFiles(to pasteboard: NSPasteboard = .general) -> Bool {
@@ -632,38 +664,64 @@ final class BrowserStore: ObservableObject {
             }.value
             self.isImporting = false
             if !result.failures.isEmpty { self.actionError = "部分文件未能\(move ? "移动" : "复制")：\n" + result.failures.joined(separator: "\n") }
-            if move { self.relocateBrowserPaths(result.moved) }
             // 刷新来源与落点的树缓存，但不抢回用户在操作期间切换到的目录。
-            self.refresh()
-            self.saveWorkspace()
+            if move { self.completeFileRelocation(result.moved) }
+            else { self.refresh(); self.saveWorkspace() }
         }
     }
 
-    /// 目录移动后同步管理引用、历史与展开状态，防止侧栏仍持有已不存在的路径。
-    private func relocateBrowserPaths(_ moved: [(source: URL, destination: URL)]) {
-        guard !moved.isEmpty else { return }
+    /// 重命名与拖动移动共用同一次状态提交，旧路径缓存和在途恢复不能再次带回已失效的位置。
+    private func completeFileRelocation(_ moved: [(source: URL, destination: URL)]) {
+        guard !moved.isEmpty else { refresh(); return }
         func relocated(_ url: URL) -> URL {
             guard let change = moved.first(where: { Self.contains(url, in: $0.source) }) else { return url }
             let suffix = String(url.path.dropFirst(change.source.path.count))
             return URL(fileURLWithPath: change.destination.path + suffix, isDirectory: url.hasDirectoryPath)
         }
-        for root in managedRoots where relocated(root) != root {
-            bookmarks[root] = nil
-            rememberBookmark(for: relocated(root))
-            retainAccess(to: relocated(root))
+        let loadedDirectories = Set(treeChildren.keys).union(treeLoading).map(relocated)
+        let previousBookmarks = bookmarks
+        // 目标路径可能已有失效的管理引用。先保留未迁移项，再让真实迁移对象覆盖同路径旧书签。
+        bookmarks = previousBookmarks.filter { relocated($0.key) == $0.key }
+        for (original, bookmark) in previousBookmarks where relocated(original) != original {
+            let destination = relocated(original)
+            // rememberBookmark 失败会清除此键，因此不会把失效目标书签误当成刷新成功。
+            rememberBookmark(for: destination)
+            // 暂时无法生成新书签时保留源对象旧数据，而不是目标路径下已失效对象的书签。
+            if bookmarks[destination] == nil { bookmarks[destination] = bookmark }
         }
-        managedRoots = managedRoots.map { Self.directoryURL(relocated($0)) }
+        var relocatedScopes = scopedURLs.filter { relocated($0.key) == $0.key }
+        for (path, scoped) in scopedURLs where relocated(path) != path {
+            let destination = relocated(path)
+            // 保留真实迁移对象最初获得的令牌，仅释放被替代的旧目标授权，不能依赖字典遍历顺序。
+            if let replaced = relocatedScopes.updateValue(scoped, forKey: destination) {
+                replaced.stopAccessingSecurityScopedResource()
+            }
+        }
+        scopedURLs = relocatedScopes
+        var seenRoots: Set<URL> = []
+        managedRoots = managedRoots.map { Self.directoryURL(relocated($0)) }.filter { seenRoots.insert($0).inserted }
         currentDirectory = currentDirectory.map { Self.directoryURL(relocated($0)) }
         rootURL = rootURL.map { Self.directoryURL(relocated($0)) }
         history = history.map { Self.directoryURL(relocated($0)) }
         expandedDirectories = Set(expandedDirectories.map { Self.directoryURL(relocated($0)) })
-        navigationRoots = navigationRoots.reduce(into: [:]) { result, pair in
-            result[Self.directoryURL(relocated(pair.key))] = Self.directoryURL(relocated(pair.value))
+        let previousNavigationRoots = navigationRoots
+        navigationRoots = previousNavigationRoots.filter { relocated($0.key) == $0.key }
+        for (directory, root) in previousNavigationRoots where relocated(directory) != directory {
+            // 历史中的失效目标路径可能与新路径重合，实际迁移子树的根归属应优先于旧目标的导航记录。
+            navigationRoots[Self.directoryURL(relocated(directory))] = Self.directoryURL(relocated(root))
         }
         let selection = Set(selectedURLs.map(relocated))
         setSelection(selection, primary: selectedURL.map(relocated))
         selectionAnchor = selectionAnchor.map(relocated)
         activePreviewSnapshotID = nil
+        currentRestoreID = nil
+        if activeFileDrag?.files.contains(where: { relocated($0.url) != $0.url }) == true { activeFileDrag = nil }
+        // 先作废旧请求，再按新路径加载树；直接 refresh 会重新枚举缓存中的旧目录名称。
+        clearTree()
+        loadDirectory()
+        for url in Set(loadedDirectories).union(managedRoots) { loadChildren(of: url) }
+        if let rootURL { loadChildren(of: rootURL) }
+        saveWorkspace()
     }
 
     func openSelectedWithDefaultApp() {
@@ -894,8 +952,9 @@ final class BrowserStore: ObservableObject {
     }
 
     private func retainAccess(to url: URL) {
-        guard !scopedURLs.contains(url) else { return }
-        if url.startAccessingSecurityScopedResource() { scopedURLs.insert(url) }
+        let path = url.standardizedFileURL
+        guard scopedURLs[path] == nil else { return }
+        if url.startAccessingSecurityScopedResource() { scopedURLs[path] = url }
     }
 
     /// Foundation 的目录 URL 是否带尾斜杠会影响 Hashable；所有目录状态统一构造，

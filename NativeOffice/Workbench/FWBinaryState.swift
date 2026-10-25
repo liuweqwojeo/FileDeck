@@ -42,8 +42,9 @@ final class FWBinaryState {
         data = try await Task.detached(priority: .userInitiated) { try operation(snapshot) }.value
     }
 
+    @discardableResult
     func save(to destination: URL?, overwrite: Bool, adoptDestination: Bool = true,
-              encode: @escaping @Sendable (Data) throws -> Data = { $0 }) async throws {
+              encode: @escaping @Sendable (Data) throws -> Data = { $0 }) async throws -> (source: Data, encoded: Data) {
         try requireIdle()
         guard let target = destination ?? path else { throw DocumentIOError.saveLocationRequired }
         let snapshot = data
@@ -53,13 +54,17 @@ final class FWBinaryState {
         onChange?()
         defer { work = nil; onChange?() }
         let saved = try await Task.detached(priority: .userInitiated) {
-            try SafeFileIO.save(encode(snapshot), previous: previous, to: target, overwriteExternalChanges: overwrite)
+            let encoded = try encode(snapshot)
+            let fileState = try SafeFileIO.save(encoded, previous: previous, to: target, overwriteExternalChanges: overwrite)
+            return (state: fileState, data: encoded)
         }.value
         // 导出副本不改变当前路径；明确导出覆盖当前源文件时更新指纹，避免下一次保存误报自身写入冲突。
         if adoptDestination || replacesSource {
-            fileState = saved
+            fileState = saved.state
             savedData = snapshot
         }
+        // 图片编码可能有损且输出包含编码器元数据；把实际落盘结果交给调用方复用，避免无修改时重复编码。
+        return (source: snapshot, encoded: saved.data)
     }
 
     func reload(discardChanges: Bool, validate: @escaping @Sendable (Data) throws -> Void) async throws {

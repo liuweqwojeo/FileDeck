@@ -260,11 +260,12 @@ enum ImageOperations {
         return try result(from: context)
     }
 
-    static func export(_ image: CGImage, format: ImageExportFormat) throws -> Data {
+    /// 像素已按显示方向归一；保留可迁移的拍摄/描述信息，输出编码器负责实际色彩配置。
+    static func export(_ image: CGImage, format: ImageExportFormat, preservingMetadataFrom sourceData: Data? = nil) throws -> Data {
         try validate(width: image.width, height: image.height)
         let type: UTType
         let pixels: CGImage
-        var properties: [CFString: Any] = [:]
+        var properties = try sourceData.map { try normalizedMetadata(from: $0, image: image) } ?? [:]
         switch format {
         case .png:
             type = .png
@@ -290,6 +291,53 @@ enum ImageOperations {
         CGImageDestinationAddImage(destination, pixels, properties as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { throw MediaOperationError.encodingFailed(type.identifier) }
         return data as Data
+    }
+
+    private static func normalizedMetadata(from data: Data, image: CGImage) throws -> [CFString: Any] {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let original = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            throw MediaOperationError.invalidImage
+        }
+        var output: [CFString: Any] = [kCGImagePropertyOrientation: 1]
+        for key in [kCGImagePropertyDPIWidth, kCGImagePropertyDPIHeight, kCGImagePropertyGPSDictionary] {
+            output[key] = original[key]
+        }
+        // TIFF 的编码、色彩和布局字段不能照搬；保留描述及拍摄设备信息，避免旧方向再次旋转像素。
+        let originalTIFF = original[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+        var tiff: [CFString: Any] = [kCGImagePropertyTIFFOrientation: 1]
+        for key in [kCGImagePropertyTIFFDocumentName, kCGImagePropertyTIFFImageDescription,
+                    kCGImagePropertyTIFFMake, kCGImagePropertyTIFFModel, kCGImagePropertyTIFFSoftware,
+                    kCGImagePropertyTIFFDateTime, kCGImagePropertyTIFFArtist, kCGImagePropertyTIFFCopyright] {
+            tiff[key] = originalTIFF[key]
+        }
+        output[kCGImagePropertyTIFFDictionary] = tiff
+        var exif = original[kCGImagePropertyExifDictionary] as? [CFString: Any] ?? [:]
+        // 私有 MakerNote 可能含原始偏移或缩略图；旧像素坐标、颜色和图像标识在变换后不再可靠。
+        for key in [kCGImagePropertyExifMakerNote, kCGImagePropertyExifSubjectArea, kCGImagePropertyExifSubjectLocation,
+                    kCGImagePropertyExifColorSpace, kCGImagePropertyExifGamma, kCGImagePropertyExifComponentsConfiguration,
+                    kCGImagePropertyExifCompressedBitsPerPixel, kCGImagePropertyExifCFAPattern,
+                    kCGImagePropertyExifImageUniqueID, kCGImagePropertyExifOECF, kCGImagePropertyExifSpatialFrequencyResponse] {
+            exif.removeValue(forKey: key)
+        }
+        exif[kCGImagePropertyExifPixelXDimension] = image.width
+        exif[kCGImagePropertyExifPixelYDimension] = image.height
+        output[kCGImagePropertyExifDictionary] = exif
+        if var iptc = original[kCGImagePropertyIPTCDictionary] as? [CFString: Any] {
+            iptc.removeValue(forKey: kCGImagePropertyIPTCImageOrientation)
+            iptc.removeValue(forKey: kCGImagePropertyIPTCImageType)
+            output[kCGImagePropertyIPTCDictionary] = iptc
+        }
+        if let originalPNG = original[kCGImagePropertyPNGDictionary] as? [CFString: Any] {
+            var png: [CFString: Any] = [:]
+            for key in [kCGImagePropertyPNGAuthor, kCGImagePropertyPNGCopyright, kCGImagePropertyPNGCreationTime,
+                        kCGImagePropertyPNGDescription, kCGImagePropertyPNGTitle, kCGImagePropertyPNGSoftware,
+                        kCGImagePropertyPNGComment, kCGImagePropertyPNGSource, kCGImagePropertyPNGDisclaimer,
+                        kCGImagePropertyPNGWarning] {
+                png[key] = originalPNG[key]
+            }
+            output[kCGImagePropertyPNGDictionary] = png
+        }
+        return output
     }
 
     private static func validate(width: Int, height: Int) throws {

@@ -18,10 +18,11 @@ def main():
         subprocess.run(["/usr/bin/swiftc", "-parse-as-library", "-target", "arm64-apple-macos14.0",
                         "-module-cache-path", str(pathlib.Path(directory) / "modules"),
                         *map(str, sources), "-o", str(binary)], cwd=ROOT, check=True)
-        result = subprocess.run([str(binary)], cwd=ROOT, check=True, timeout=60, capture_output=True, text=True)
+        result = subprocess.run([str(binary)], cwd=ROOT, check=False, timeout=60, capture_output=True, text=True)
         print(result.stdout, end="")
         if result.stderr:
             print(result.stderr, end="")
+        result.check_returncode()
         if "PASS: 8 native media/CSV session regressions" not in result.stdout:
             raise RuntimeError("Native regression process exited before its completion marker")
 

@@ -25,6 +25,7 @@ final class FWImageContent: NSViewController, FWNativeContent {
     }
 
     private let state: FWBinaryState
+    private var encodedSnapshot: (source: Data, format: WorkbenchFileKind, output: Data)?
     private var currentKind: WorkbenchFileKind
     private var pixels: CGImage
     private let imageView = NSImageView()
@@ -80,13 +81,13 @@ final class FWImageContent: NSViewController, FWNativeContent {
 
     func save(overwriteExternalChanges: Bool) async throws {
         guard kind != .heic else { throw DocumentSessionError.unsupportedOperation(.save) }
-        try await state.save(to: nil, overwrite: overwriteExternalChanges, encode: Self.encoder(for: kind))
+        try await persist(to: nil, format: kind, overwrite: overwriteExternalChanges)
     }
 
     func saveAs(to destination: URL, overwriteExternalChanges: Bool) async throws {
         try FWMediaUI.requireExtension(destination, allowed: ["png", "jpg", "jpeg"])
         let output: WorkbenchFileKind = destination.pathExtension.lowercased() == "png" ? .png : .jpeg
-        try await state.save(to: destination, overwrite: overwriteExternalChanges, encode: Self.encoder(for: output))
+        try await persist(to: destination, format: output, overwrite: overwriteExternalChanges)
         currentKind = output
         refreshState()
     }
@@ -99,12 +100,13 @@ final class FWImageContent: NSViewController, FWNativeContent {
         guard !replacesSource || format != .pdf else {
             throw MediaOperationError.invalidParameter("转换为 PDF 时请选择新的文件位置。")
         }
-        try await state.save(to: destination, overwrite: overwriteExisting, adoptDestination: false, encode: Self.encoder(for: format))
+        try await persist(to: destination, format: format, overwrite: overwriteExisting, adoptDestination: false)
         if replacesSource { currentKind = format; refreshState() }
     }
 
     func reload(discardChanges: Bool) async throws {
         try await state.reload(discardChanges: discardChanges) { _ = try ImageOperations.read($0) }
+        encodedSnapshot = nil
         pixels = try ImageOperations.read(state.data)
         currentKind = Self.detectKind(state.data)
         history.removeAllActions()
@@ -115,10 +117,24 @@ final class FWImageContent: NSViewController, FWNativeContent {
     func undo() { if state.canEdit { history.undo() } }
     func redo() { if state.canEdit { history.redo() } }
 
+    private func persist(to destination: URL?, format: WorkbenchFileKind, overwrite: Bool, adoptDestination: Bool = true) async throws {
+        let cached = encodedSnapshot
+        let encoder = Self.encoder(for: format)
+        let replacesSource = destination?.standardizedFileURL == path?.standardizedFileURL
+        let saved = try await state.save(to: destination, overwrite: overwrite, adoptDestination: adoptDestination) { data in
+            if let cached, cached.format == format, cached.source == data { return cached.output }
+            return try encoder(data)
+        }
+        // 基于本次保存快照缓存实际写出的字节；保存等待期间的新编辑不能命中这份缓存。
+        // 导出其他格式的副本不替换原路径缓存，随后普通保存仍应使用已落盘的原格式字节。
+        if adoptDestination || replacesSource { encodedSnapshot = (saved.source, format, saved.encoded) }
+    }
+
     @objc private func turnLeft() { perform { try rotate(clockwise: false) } }
     @objc private func turnRight() { perform { try rotate(clockwise: true) } }
     func rotate(clockwise: Bool) throws {
-        try install(ImageOperations.export(ImageOperations.rotate90(pixels, clockwise: clockwise), format: .png), name: "旋转图片")
+        try install(ImageOperations.export(ImageOperations.rotate90(pixels, clockwise: clockwise), format: .png,
+                                           preservingMetadataFrom: state.data), name: "旋转图片")
     }
 
     @objc private func cropImage() {
@@ -129,7 +145,8 @@ final class FWImageContent: NSViewController, FWNativeContent {
             let numbers = values.compactMap(Double.init)
             guard numbers.count == 4 else { throw MediaOperationError.invalidParameter("请输入整数像素坐标与尺寸。") }
             let rect = CGRect(x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3])
-            try install(ImageOperations.export(ImageOperations.crop(pixels, pixelRect: rect), format: .png), name: "裁剪图片")
+            try install(ImageOperations.export(ImageOperations.crop(pixels, pixelRect: rect), format: .png,
+                                               preservingMetadataFrom: state.data), name: "裁剪图片")
         }
     }
 
@@ -141,7 +158,8 @@ final class FWImageContent: NSViewController, FWNativeContent {
             guard let width = Int(values[0]), let height = Int(values[1]) else {
                 throw MediaOperationError.invalidParameter("请输入整数像素尺寸。")
             }
-            try install(ImageOperations.export(ImageOperations.resize(pixels, width: width, height: height), format: .png), name: "调整图片尺寸")
+            try install(ImageOperations.export(ImageOperations.resize(pixels, width: width, height: height), format: .png,
+                                               preservingMetadataFrom: state.data), name: "调整图片尺寸")
         }
     }
 
@@ -184,7 +202,11 @@ final class FWImageContent: NSViewController, FWNativeContent {
     private static func encoder(for format: WorkbenchFileKind) -> @Sendable (Data) throws -> Data {
         { data in
             if format == .pdf { return try PDFOperations.imagesToPDF([data]) }
-            return try ImageOperations.export(ImageOperations.read(data), format: format == .png ? .png : .jpeg(quality: 0.92))
+            // 原始文件和撤销恢复的原始快照保留全部字节；仍由 FWBinaryState 执行冲突检查及原子写入。
+            let type = CGImageSourceCreateWithData(data as CFData, nil).flatMap(CGImageSourceGetType) as String?
+            if type == (format == .png ? UTType.png.identifier : UTType.jpeg.identifier) { return data }
+            return try ImageOperations.export(ImageOperations.read(data), format: format == .png ? .png : .jpeg(quality: 0.92),
+                                              preservingMetadataFrom: data)
         }
     }
 }
