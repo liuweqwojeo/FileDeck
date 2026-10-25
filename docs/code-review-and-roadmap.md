@@ -535,3 +535,9 @@ R4/R5 已按用户要求重新构建为 v0.1.2 构建 7，并安装至 `/Applica
 发布前另外核对 ZIP CRC、解压文件字节/权限/链接及严格签名，GitHub 附件大小与 SHA-256 一致后才公开。旧本机应用副本在发布后移入废纸篓，保留当前构建 7，用户文档和偏好不属于清理范围。需要回退时从[构建 6 Release](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build6)下载旧包及校验文件，正常退出新版后替换并核对构建号 6。
 
 无 SQL、用户配置、Redis/MQ、API 或错误码迁移；临时签名、动态依赖解析与运行兼容性边界见[构建 7 发布说明](release-build7.md)。本轮未重复执行构建 6 的所有物理 JPEG/系统草稿面板操作，不将新门禁的静态结果替代这些运行证据。
+
+### 13.1 构建 7 最终发布与清理
+
+修复提交 `e58d73e` 及标签 `v0.1.2-build7` 已推送，预览 Release 已公开；README 下载指向本次 ZIP 与配套 SHA256SUMS.txt。ZIP 为 793,603,803 字节，SHA-256：`c478d8109873333c0c7f3e5f5c6678cd79aef8b9945ea17e6bb508377a522d9a`。CRC、6,877 项解压清单、普通文件字节/权限、链接目标、严格签名均通过；仅 CEF 根链接的已知权限归一差异有单独记录。解压后的应用再次通过新静态门禁与禁网真实运行，退出 0，GitHub 两个附件大小及摘要一致。
+
+发布后已将 5 个构建 6 旧应用副本移入废纸篓，保留构建 7 及历史 ZIP，不清理用户文档或偏好。日常启动已确认运行 `/Applications/FileDeck.app` 的构建 7。清理及发布证据：`archive-verification.json`、`publication-checks.json`、`release-after.json`、`old-app-cleanup.json`、`normal-launch.json` 和 `extracted-smoke/`，均位于本节上述构建 7 证据目录。构建 6 远程 Release 保留用于回退。
