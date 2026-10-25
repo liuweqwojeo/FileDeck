@@ -8,28 +8,28 @@ FileDeck 是面向 **macOS 14+、Apple Silicon（ARM64）** 的本地文件工�
 
 ## 下载与安装
 
-完整应用从已发布的 [GitHub Releases · v0.1.2 预览版](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build7) 下载：
+完整应用从已发布的 [GitHub Releases · v0.1.2 预览版](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build8) 下载：
 
-- [FileDeck v0.1.2 · 构建 7 · macOS ARM64 下载包](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2-build7/FileDeck-v0.1.2-build7-macOS-arm64.zip)
-- [SHA-256 校验文件](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2-build7/SHA256SUMS.txt)
+- [FileDeck v0.1.2 · 构建 8 · macOS ARM64 下载包](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2-build8/FileDeck-v0.1.2-build8-macOS-arm64.zip)
+- [SHA-256 校验文件](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2-build8/SHA256SUMS.txt)
 
-当前版本为 **v0.1.2（构建号 7）**，安装包对应修复源码提交 [e58d73e](https://github.com/liuweqwojeo/FileDeck/commit/e58d73eef24c146677b7fead9a8d2e794fbc821e)。本版补齐编辑资源源码、依赖锁与产物的一致性检查，并在源应用和最终暂存应用执行统一打包门禁；保留构建 6 的 JPEG 保存保真、WebKit 故障后的内存草稿恢复及目录改名路径同步。
+当前版本为 **v0.1.2（构建号 8）**，安装包对应修复源码提交 [854d9f6](https://github.com/liuweqwojeo/FileDeck/commit/854d9f6416b393673f846e4f5e0113b23076ab4e)。本版修复 PDF/图片变换的保存大小边界、查找/撤销/重做菜单能力，以及系统另存明确重建已删除原路径的冲突；保留此前的 JPEG 保真、内存草稿恢复、目录路径同步和编辑资源/打包门禁。
 
-本轮通过 23 项编辑资源 Node 测试、155 项 Python 构建工具测试（0 跳过），并从依赖锁安装后只读重建比较资源。真实应用缺脚本、模板或内核时均被新门禁拦截且保留原目标；安装后的构建 7 通过完整清单、签名检查及 Office 三格式与混合工作台禁网运行验收。构建 6 的系统保存面板专项结果保留为历史依据；本轮未重复全部物理面板操作。详见[构建 7 发布说明](docs/release-build7.md)和[验收报告](docs/code-review-and-roadmap.md#13-构建-7-重建与安装验收2026-10-25)。
+本轮通过 146 项 Swift、155 项 Python（0 跳过）、23 项 Node、11 组真实媒体/CSV 回归和完整文档 45 项断言，并从依赖锁安装后只读重建比较资源。系统另存由外部 Accessibility 实际按保存按钮并核对回调及落盘；已安装构建 8 通过完整清单、签名和禁网运行，恢复草稿的真实系统面板取消/保存及独立文件复核均通过。详见[构建 8 发布说明](docs/release-build8.md)和[验收报告](docs/code-review-and-roadmap.md#15-系统另存确认修复与构建-8-验收2026-10-25)。
 
-当前 ZIP 安装包为 **793,603,803 字节，约 793.60 MB（756.84 MiB）**，解压后的 `FileDeck.app` 文件总量约 **1.367 GB**；两者分别表示下载体积和应用文件总量，实际磁盘占用会因文件系统而异。
+当前 ZIP 安装包为 **793,612,924 字节，约 793.61 MB（756.85 MiB）**，解压后的 `FileDeck.app` 文件总量约 **1.367 GB**；两者分别表示下载体积和应用文件总量，实际磁盘占用会因文件系统而异。
 
-构建 7 ZIP 的 SHA-256：`c478d8109873333c0c7f3e5f5c6678cd79aef8b9945ea17e6bb508377a522d9a`。将 ZIP 和 `SHA256SUMS.txt` 下载到同一目录，在该目录执行：
+构建 8 ZIP 的 SHA-256：`65dd899f1db7be446863c46314b83fa872e7c4ea8e09224d147b4aa203fedb20`。将 ZIP 和 `SHA256SUMS.txt` 下载到同一目录，在该目录执行：
 
 ```bash
 shasum -a 256 -c SHA256SUMS.txt
 ```
 
-确认输出 `FileDeck-v0.1.2-build7-macOS-arm64.zip: OK` 后，用 macOS 内置归档工具解压，将其中的整个 `FileDeck.app` 拖入“应用程序”后打开。升级前保存文档并正常退出旧版；需要回退时从[构建 6 Release](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build6)下载旧包及配套校验文件，退出新版后替换。同包附有安装说明、第三方许可证及源码获取入口。
+确认输出 `FileDeck-v0.1.2-build8-macOS-arm64.zip: OK` 后，用 macOS 内置归档工具解压，将其中的整个 `FileDeck.app` 拖入“应用程序”后打开。升级前保存文档并正常退出旧版；需要回退时从[构建 7 Release](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build7)下载旧包及配套校验文件，退出新版后替换。同包附有安装说明、第三方许可证及源码获取入口。
 
 当前为开发预览版，使用临时签名，尚未完成 Developer ID 签名与 Apple 公证。如果系统阻止打开，请先确认下载来源和校验值，再参考 [Apple 官方打开说明](https://support.apple.com/zh-cn/102445)。
 
-此包保留现有编辑器、语言、拼写字典、文档模板和插件。打包时对完全相同的静态资源使用包内相对链接去重，并无损压缩离线帮助和拼写字典，按需读取且不创建完整解压缓存。压缩实现与历史体积对比见 [离线资源压缩说明](docs/onlyoffice-build.md#离线帮助与拼写字典压缩)；本版更新、验证结果及升级回退方法见 [v0.1.2 发布说明](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build7)。
+此包保留现有编辑器、语言、拼写字典、文档模板和插件。打包时对完全相同的静态资源使用包内相对链接去重，并无损压缩离线帮助和拼写字典，按需读取且不创建完整解压缓存。压缩实现与历史体积对比见 [离线资源压缩说明](docs/onlyoffice-build.md#离线帮助与拼写字典压缩)；本版更新、验证结果及升级回退方法见 [v0.1.2 发布说明](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build8)。
 
 ## 功能介绍
 

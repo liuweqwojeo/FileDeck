@@ -4,7 +4,7 @@
 
 ## 构建 8 本机验收
 
-R6/R7 与系统另存修复已重建为 v0.1.2 构建 8，2026-10-25 17:06 安装至 `/Applications/FileDeck.app`。完整清单、静态门禁、严格签名、禁网 Office/混合工作台及真实恢复草稿面板取消/保存均通过。系统另存专项与完整文档 45 项断言、146 项 Swift、155 项 Python、23 项 Node 和 11 组原生媒体回归通过，见[第 15 节](code-review-and-roadmap.md#15-系统另存确认修复与构建-8-验收2026-10-25)及[构建 8 说明](release-build8.md)。公开状态以 README 与 GitHub Release 最终登记为准。
+R6/R7 与系统另存修复已重建为 v0.1.2 构建 8，2026-10-25 17:06 安装至 `/Applications/FileDeck.app`。完整清单、静态门禁、严格签名、禁网 Office/混合工作台及真实恢复草稿面板取消/保存均通过。系统另存专项与完整文档 45 项断言、146 项 Swift、155 项 Python、23 项 Node 和 11 组原生媒体回归通过，见[第 15 节](code-review-and-roadmap.md#15-系统另存确认修复与构建-8-验收2026-10-25)及[构建 8 说明](release-build8.md)。修复源码 `854d9f6` 及标签 [v0.1.2-build8](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build8) 已推送并公开发布，README 下载与校验值已更新。最终 ZIP 解压运行、静态门禁及远程附件大小/摘要通过，4 个构建 7 旧应用副本已移入废纸篓；正常运行的日常安装包为构建 8。
 
 ## R6/R7 源码修复（构建 8 内容）
 

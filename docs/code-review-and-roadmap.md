@@ -612,3 +612,11 @@ python3 -B scripts/onlyoffice/build.py --phase app --configuration Debug --jobs 
 证据目录：`build/releases/v0.1.2-build8/`，含 `source-inputs.json`、`build-result.json`、`installation.json`、`recovery-panel-ax.json` 及阶段日志；安装运行报告为 `installed-smoke/fw-office-smoke-中文 路径-8i_kt4rc/verification.json`，独立检查全部恢复字段通过。安装静态报告：`build/onlyoffice/build8-installed-verification.json`。
 
 构建 8 的 ZIP、远程附件及清理结果随最终发布登记；此前构建 7 Release 保留用于回退。未新增 SQL、配置、Redis/MQ 或对外 API 迁移，临时签名、压力及 WebKit 恢复边界见[构建 8 发布说明](release-build8.md)。
+
+### 15.3 构建 8 最终发布与清理
+
+修复提交 `854d9f6` 与标签 `v0.1.2-build8` 已推送，预览 Release 已公开，README 下载及校验值已更新。最终 ZIP 为 793,612,924 字节，SHA-256：`65dd899f1db7be446863c46314b83fa872e7c4ea8e09224d147b4aa203fedb20`；CRC、6,877 项解压清单及文件字节/权限/链接核对通过，仅保留已知 CEF 根链接权限归一差异。解压包再次通过静态门禁、严格签名及禁网运行，退出 0。远程两附件大小和 SHA-256 匹配。
+
+4 个构建 7 旧应用副本已移入废纸篓：上一安装包、上一打包应用、构建 7 分发目录及最终解压目录中的应用。构建 8、历史 ZIP、用户文档与偏好保留，远程构建 7 Release 可用于回退。日常运行确认是 `/Applications/FileDeck.app` 的构建 8。最终证据为上述构建 8 目录下 `archive-verification.json`、`publication-checks.json`、`release-after.json`、`old-app-cleanup.json`、`normal-launch.json` 及 `extracted-smoke/`。
+
+收尾复核保存/外部冲突影响范围、仓库约定、外部 AX 助手的目标约束和发布摘要；复用既有安全保存与系统面板，未引入 URL/完成回调注入或第二套保存流程。完整文档、媒体、Swift/Node/Python、原生编译、安装及最终分发回归覆盖本次路径，无遗留必须修复项。
