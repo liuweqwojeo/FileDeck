@@ -26,6 +26,9 @@ struct ContentView: View {
     private var browsable: Bool { store.currentDirectory != nil && store.directoryError == nil && !store.isLoading }
     private var hasFilter: Bool { !store.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.typeFilter != .all }
     private var gridView: Bool { store.gridView }
+    private var minimumContentSize: NSSize {
+        store.startupPhase == .ready ? WorkspaceWindowLayout.workbenchMinimum : WorkspaceWindowLayout.welcomeMinimum
+    }
     private var displayedEntries: [FileEntry] {
         store.orderedEntries
     }
@@ -41,6 +44,9 @@ struct ContentView: View {
                 workbench
             }
         }
+        // NSHostingView 会按根视图重新计算窗口最小值；视图与窗口使用同一规则，防止阶段切换后被覆盖。
+        .frame(minWidth: minimumContentSize.width, minHeight: minimumContentSize.height)
+        .background(WorkspaceWindowConfiguration(ready: store.startupPhase == .ready))
         .tint(WorkspacePalette.accent)
         .foregroundStyle(WorkspacePalette.primary)
         .onChange(of: store.showHidden) { _, _ in store.refresh() }

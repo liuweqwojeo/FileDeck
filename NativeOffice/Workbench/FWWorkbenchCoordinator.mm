@@ -157,9 +157,8 @@ static char FWCoordinatorKey;
         [browserView.topAnchor constraintEqualToAnchor:parent.topAnchor],
         [browserView.bottomAnchor constraintEqualToAnchor:parent.bottomAnchor]
     ]];
-    owner.view.window.minSize = NSMakeSize(1040, 660);
     owner.view.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
-    [owner.view.window setContentSize:NSMakeSize(1600, 1000)];
+    // ContentView 挂载后统一设置欢迎页默认尺寸与分阶段最小值，避免覆盖用户缩放。
     [self updateEditorState];
 }
 

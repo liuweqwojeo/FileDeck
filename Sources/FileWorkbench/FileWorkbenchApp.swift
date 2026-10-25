@@ -10,10 +10,9 @@ struct FileWorkbenchApp: App {
     var body: some Scene {
         Window("FileDeck", id: "main") {
             ContentView(store: browser)
-                .frame(minWidth: 1040, minHeight: 660)
                 .preferredColorScheme(.light)
         }
-        .defaultSize(width: 1600, height: 1000)
+        .defaultSize(width: WorkspaceWindowLayout.welcomeSize.width, height: WorkspaceWindowLayout.welcomeSize.height)
         .windowStyle(.titleBar)
         .commands {
             CommandGroup(replacing: .newItem) {
