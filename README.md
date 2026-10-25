@@ -8,18 +8,24 @@ FileDeck 是面向 **macOS 14+、Apple Silicon（ARM64）** 的本地文件工�
 
 ## 下载与安装
 
-完整应用从 [GitHub Releases · v0.1.2](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2) 下载：
+完整应用从已发布的 [GitHub Releases · v0.1.2 预览版](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2) 下载：
 
-- [FileDeck 0.1.2 · macOS ARM64 下载包](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2/FileDeck-v0.1.2-macOS-arm64.zip)
+- [FileDeck v0.1.2 · 构建 5 · macOS ARM64 下载包](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2/FileDeck-v0.1.2-macOS-arm64.zip)
 - [SHA-256 校验文件](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2/SHA256SUMS.txt)
 
-当前版本为 **v0.1.2（构建号 4）**，对应修复提交 [086a9c6](https://github.com/liuweqwojeo/FileDeck/commit/086a9c61ffa55d5b492dac322cb8d9ff658391ce)。本版修复文件夹拖出时选中更新的时序风险，避免在拖动准备期间同步刷新界面，并防止旧拖动的延迟任务覆盖新选择；保留 Finder 拖入拖出、Option 拖动复制及 ⌘C／⌘V。
+当前版本为 **v0.1.2（构建号 5）**，安装包对应源码提交 [15485a0](https://github.com/liuweqwojeo/FileDeck/commit/15485a0eb4d90960232d65d286f51fff06084dc1)。本版更新欢迎页布局：默认窗口为 1280×720，宽窗左右分栏、窄窗纵向排列，随窗口大小自适应且没有滚动状态；16:9 仅为欢迎页默认设计比例，窗口可自由调整，进入工作台后使用独立的布局规则。保留工作区恢复、目录选择与授权逻辑，以及此前的文件夹拖出时序修复、Finder 双向拖放、Option 拖动复制及 ⌘C／⌘V。
 
-同一代码的修复构建已通过 24 次未预选文件夹拖出及 18 项交互回归。最初一次拖出未落盘尚未稳定复现，原因未唯一确定；本轮 42 项实测均通过，验证范围与限制见发布说明。
+欢迎页源码已通过 137 项 Swift 测试、8 项原生源码同步测试及 32 项原生欢迎页运行检查。构建 5 的最终 ZIP 已通过 CRC、解压内容与深度严格签名核验，解压副本在禁止网络的环境中通过 DOCX／XLSX／PPTX 编辑、保存及重开等运行检查。此前拖放修复构建的 24 次未预选文件夹拖出及 18 项交互回归均通过；最初一次拖出未落盘的原因仍未唯一确定，完整验证范围与限制见发布说明和[欢迎页验收报告](docs/welcome-ui-acceptance.md)。
 
-当前 ZIP 安装包约 **793.3 MB（756.52 MiB）**，解压后的 `FileDeck.app` 文件总量约 **1.367 GB**；两者分别表示下载体积和应用文件总量，实际磁盘占用会因文件系统而异。
+当前 ZIP 安装包为 **793,561,833 字节，约 793.56 MB（756.80 MiB）**，解压后的 `FileDeck.app` 文件总量约 **1.367 GB**；两者分别表示下载体积和应用文件总量，实际磁盘占用会因文件系统而异。
 
-支持 macOS 14+、Apple Silicon。用 macOS 内置归档工具解压，将其中的 `FileDeck.app` 拖入“应用程序”后打开；同包附有安装说明、第三方许可证及源码获取入口。
+构建 5 ZIP 的 SHA-256：`84ffe3d1ec7d0e0177b9be57baa256000d661fa1494d67b70d64d612eaed0f01`。将 ZIP 和 `SHA256SUMS.txt` 下载到同一目录，在该目录执行：
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt
+```
+
+确认输出 `FileDeck-v0.1.2-macOS-arm64.zip: OK` 后，用 macOS 内置归档工具解压，将其中的整个 `FileDeck.app` 拖入“应用程序”后打开。升级前正常退出旧版并保留旧应用副本；需要回退时退出新版并换回旧副本。同包附有安装说明、第三方许可证及源码获取入口。
 
 当前为开发预览版，使用临时签名，尚未完成 Developer ID 签名与 Apple 公证。如果系统阻止打开，请先确认下载来源和校验值，再参考 [Apple 官方打开说明](https://support.apple.com/zh-cn/102445)。
 
