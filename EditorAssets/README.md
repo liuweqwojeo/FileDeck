@@ -11,6 +11,14 @@ npm run build
 
 依赖版本与完整性摘要固定在 package-lock.json。需要 Node.js 22.12 或更新版本构建；不影响应用的 macOS 14 运行要求。
 
+## 构建一致性门禁
+
+`manifest.json` 使用 schema 2，记录全部 `src/` 文件、`build.mjs`、`package.json`、依赖锁及五份运行资源的 SHA-256。普通原生构建与所有打包入口都会核对源码输入、依赖锁和输出；修改输入后遗漏资源重建会失败。新增、删除输入或资源以及旧 schema 1 清单也不能通过。
+
+发布前使用 `npm ci --ignore-scripts --no-audit --no-fund` 从锁安装依赖，再执行 `npm run verify`。校验模式在临时目录重建并逐字节比较，不会覆盖已提交资源；失败时先执行 `npm run build`，检查并提交实际资源差异，再重新验证。`bash scripts/build-app.sh release`（包括 `--package-only`）自动执行这两项发布检查。
+
+应用内资源也必须与当前检出一致。更改编辑资源后应先运行正常原生构建以同步 Xcode 资源，随后才能重打包；仅在仓库重建 JS，不会自动更新已构建 `.app`。已发布构建 6 的 schema 1 包仍可正常运行，但不能直接通过新版门禁，需要重新构建；检查历史包时使用对应版本的源码和校验脚本。
+
 真实 macOS WebKit 验收从项目根目录执行（若刚完成上面的命令，先用 `cd ..` 返回根目录）。验收在独立辅助窗口中运行，完成后自动关闭：
 
 ```sh

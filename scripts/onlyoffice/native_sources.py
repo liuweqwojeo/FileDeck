@@ -150,8 +150,22 @@ def editor_inputs(origin):
     if not isinstance(metadata, dict):
         raise RuntimeError("编辑资源 manifest 必须是对象。")
     files = metadata.get("files")
-    if metadata.get("schema") != 1 or not isinstance(files, dict) or not REQUIRED_EDITOR_RESOURCES.issubset(files):
+    if metadata.get("schema") != 2 or not isinstance(files, dict) or not REQUIRED_EDITOR_RESOURCES.issubset(files):
         raise RuntimeError("编辑资源 manifest 不完整，必须包含编辑器、许可证和第三方声明。")
+    # 仅校验输出摘要无法发现旧 bundle；同时绑定源码、构建规则及完整依赖锁。
+    root = origin.parents[1]
+    assets = root / "EditorAssets"
+    names = {"build.mjs", "package.json", "package-lock.json", "src/index.mjs", "src/index.html", "src/editor.css"}
+    names.update("src/" + name for name in directory_files(assets / "src"))
+    inputs = {}
+    for name in sorted(names):
+        path = assets / name
+        require_plain_path(path)
+        if not path.is_file():
+            raise RuntimeError("缺少编辑器构建输入，请恢复源码后重建：" + str(path))
+        inputs["EditorAssets/" + name] = digest(path.read_bytes())
+    if metadata.get("inputs") != inputs or metadata.get("dependenciesLockSHA256") != inputs["EditorAssets/package-lock.json"]:
+        raise RuntimeError("编辑资源构建输入已过期（源码、构建脚本或依赖锁不一致），请执行 npm --prefix EditorAssets run build。")
     for name, value in files.items():
         relative_name(name)
         if name == "manifest.json" or not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
@@ -161,6 +175,9 @@ def editor_inputs(origin):
     if actual != set(expected):
         raise RuntimeError("编辑资源目录与显式清单不一致，缺失：%s；未登记：%s" %
                            (sorted(set(expected) - actual), sorted(actual - set(expected))))
+    for name, checksum in files.items():
+        if digest((origin / name).read_bytes()) != checksum:
+            raise RuntimeError("编辑资源与 manifest 摘要不一致：" + name)
     return {name: origin / name for name in expected}, expected
 
 

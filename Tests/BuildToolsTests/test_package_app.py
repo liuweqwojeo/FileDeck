@@ -18,11 +18,19 @@ import compress_dictionaries as dictionary_compressor
 
 
 class PackagingBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        # 这些既有用例只隔离测试复制/压缩/发布事务；完整门禁由下方集成用例覆盖。
+        gate = patch.object(packager, "verify_bundle", return_value={"staticChecksPassed": True, "buildIdentity": {}})
+        gate.start()
+        self.addCleanup(gate.stop)
+
     def fixture(self, root):
         source = root / "source.app"
         contents = source / "Contents"
         (contents / "MacOS").mkdir(parents=True)
         (contents / "Resources").mkdir()
+        (contents / "Resources/FileWorkbenchEditors").mkdir()
+        (contents / "Resources/FileWorkbenchEditors/manifest.json").write_text("{}")
         (contents / "Frameworks/Chromium Embedded Framework.framework").mkdir(parents=True)
         for name in ("ascdocumentscore", "hunspell"):
             binary = contents / "Frameworks" / (name + ".framework") / name
@@ -57,6 +65,8 @@ class PackagingBoundaryTests(unittest.TestCase):
                 contents = source / "Contents"
                 (contents / "MacOS").mkdir(parents=True)
                 (contents / "Resources").mkdir()
+                (contents / "Resources/FileWorkbenchEditors").mkdir()
+                (contents / "Resources/FileWorkbenchEditors/manifest.json").write_text("{}")
                 (contents / "Frameworks/Chromium Embedded Framework.framework").mkdir(parents=True)
                 (contents / "Info.plist").write_bytes(plistlib.dumps({"CFBundleExecutable": executable}))
                 (contents / "MacOS" / executable).write_bytes(b"native executable fixture")
@@ -264,3 +274,104 @@ class PackagingBoundaryTests(unittest.TestCase):
                 packager.main()
             self.assertEqual(json.loads((root / "build/filedeck-resource-optimization.json").read_text()), report)
             self.assertFalse(list((root / "build").glob(".resource-report-*")))
+
+
+class PackagingGateTests(unittest.TestCase):
+    """只替代系统工具输出，实际调用统一校验器和打包事务，绝不 mock 门禁结果。"""
+    def setUp(self):
+        from editor_fixtures import make_bundle
+        from test_verify_bundle import FixtureTools
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.source, self.destination = self.root / 'source.app', self.root / 'published.app'
+        make_bundle(self.root, self.source)
+        (self.root / 'Resources/FileDeck.icns').write_bytes(b'fixture icon')
+        self.destination.mkdir()
+        (self.destination / 'original').write_bytes(b'keep existing app')
+        self.tools = FixtureTools()
+
+    def package(self, mutate=None):
+        import verify_bundle as checker
+        def commands(arguments, **kwargs):
+            if arguments[0] == '/usr/bin/ditto':
+                shutil.copytree(arguments[1], arguments[2], symlinks=True)
+                if mutate: mutate(Path(arguments[2]))
+            return subprocess.CompletedProcess(arguments, 0, '', '')
+        with patch.object(packager, 'ROOT', self.root), \
+             patch.object(packager.subprocess, 'run', side_effect=commands):
+            # 默认参数已绑定原 runner，显式传入合成系统工具；检查实现保持真实。
+            real = checker.verify_bundle
+            with patch.object(packager, 'verify_bundle', side_effect=lambda app, **kw: real(app, runner=self.tools, **kw)):
+                return packager.package_app(self.source, self.destination)
+
+    def assert_preserved(self):
+        self.assertEqual((self.destination / 'original').read_bytes(), b'keep existing app')
+        self.assertFalse((self.root / 'previous-apps').exists())
+        self.assertFalse(list(self.root.glob('.file-workbench-package-*')))
+
+    def test_missing_editor_template_or_core_is_rejected_before_copy(self):
+        paths = ['Contents/Resources/FileWorkbenchEditors/editor.js',
+                 'Contents/Resources/converter/empty/en-US/new.docx',
+                 'Contents/Frameworks/ascdocumentscore.framework/ascdocumentscore']
+        for name in paths:
+            with self.subTest(path=name):
+                path = self.source / name
+                data, mode = path.read_bytes(), path.stat().st_mode
+                path.unlink()
+                with self.assertRaisesRegex(RuntimeError, '打包校验失败'):
+                    self.package()
+                self.assert_preserved()
+                path.write_bytes(data)
+                path.chmod(mode)
+
+    def test_staged_copy_damage_does_not_replace_original(self):
+        for name in ['Contents/Resources/FileWorkbenchEditors/index.html',
+                     'Contents/Resources/converter/empty/en-US/new.xlsx',
+                     'Contents/Frameworks/ascdocumentscore.framework/ascdocumentscore']:
+            with self.subTest(path=name), self.assertRaisesRegex(RuntimeError, '打包校验失败'):
+                self.package(lambda app: (app / name).unlink())
+            self.assert_preserved()
+
+    def test_stale_inputs_wrong_identity_and_architecture_are_rejected(self):
+        source = self.root / 'EditorAssets/src/index.mjs'
+        original = source.read_bytes()
+        source.write_bytes(original + b'changed')
+        with self.assertRaisesRegex(RuntimeError, '构建输入已过期'):
+            self.package()
+        source.write_bytes(original)
+        self.tools.architectures[str(self.source / 'Contents/MacOS/FileDeck')] = 'x86_64'
+        with self.assertRaisesRegex(RuntimeError, 'missingARM64'):
+            self.package()
+        self.tools.architectures.clear()
+        plist = self.source / 'Contents/Info.plist'
+        metadata = plistlib.loads(plist.read_bytes())
+        metadata['CFBundleIdentifier'] = 'org.onlyoffice.unmodified'
+        plist.write_bytes(plistlib.dumps(metadata))
+        with self.assertRaisesRegex(RuntimeError, 'invalidBuildIdentity'):
+            self.package()
+        self.assert_preserved()
+
+    def test_resource_lost_during_optimization_is_rejected_after_signing(self):
+        optimize = packager.optimize_resources
+
+        def lose_template(app):
+            report = optimize(app)
+            (app / 'Contents/Resources/converter/empty/en-US/new.pptx').unlink()
+            return report
+
+        with patch.object(packager, 'optimize_resources', side_effect=lose_template), \
+                self.assertRaisesRegex(RuntimeError, 'missingResource'):
+            self.package()
+        self.assert_preserved()
+
+    def test_complete_package_validates_source_and_staging_then_publishes(self):
+        previous, report = self.package()
+        self.assertEqual((previous / 'original').read_bytes(), b'keep existing app')
+        self.assertTrue(report['bundleValidation']['staticChecksPassed'])
+        self.assertEqual(report['bundleValidation']['buildIdentity']['CFBundleVersion'], '6')
+        self.assertTrue((self.destination / 'Contents/Resources/FileWorkbenchEditors/editor.js').is_file())
+        signed = [call[-1] for call in self.tools.calls if call[0]=='/usr/bin/codesign']
+        self.assertEqual(len(signed), 2)
+        self.assertEqual(signed[0], str(self.source))
+        self.assertIn('.file-workbench-package-', signed[1])

@@ -36,6 +36,11 @@ if [[ "$BROWSER_ONLY" == true ]]; then
     codesign --force --sign - "$APP_DIR"
     echo "已生成浏览验证应用: $APP_DIR"
 else
+    if [[ "$CONFIGURATION" == release ]]; then
+        # 发布构建从锁文件安装工具并只读重建比较；不能自动覆盖资源以掩盖遗漏提交。
+        npm --prefix EditorAssets ci --ignore-scripts --no-audit --no-fund
+        npm --prefix EditorAssets run verify
+    fi
     case "$CONFIGURATION" in
         debug) NATIVE_CONFIGURATION=Debug ;;
         release) NATIVE_CONFIGURATION=Release ;;

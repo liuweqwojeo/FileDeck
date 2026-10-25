@@ -9,6 +9,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "onlyoffice"))
 from native_sources import sync_sources
 import native_sources as native
+from editor_fixtures import make_editors, update_editors
 
 
 class NativeSourcesTests(unittest.TestCase):
@@ -66,12 +67,10 @@ class WorkbenchNativeSourcesTests(unittest.TestCase):
         self.editors.mkdir(parents=True)
         for name in native.REQUIRED_EDITOR_RESOURCES:
             (self.editors / name).write_text("fixture " + name + "\n")
-        self.update_resource_manifest()
+        make_editors(self.root)
 
     def update_resource_manifest(self):
-        files = {name: native.digest((self.editors / name).read_bytes())
-                 for name in native.REQUIRED_EDITOR_RESOURCES}
-        (self.editors / "manifest.json").write_text(json.dumps({"schema": 1, "files": files}))
+        update_editors(self.root)
 
     def prepare(self):
         native.prepare_native_sources(self.root, self.source, self.build)
@@ -147,3 +146,39 @@ class WorkbenchNativeSourcesTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "符号链接"):
             native.plan_sync({"nested/file.swift": origin}, target, self.root / "generated.json")
         self.assertEqual(list(other.iterdir()), [])
+
+    def test_changed_build_inputs_and_lock_digest_fail_before_any_sync(self):
+        for name in ('src/index.mjs', 'src/index.html', 'src/editor.css', 'package.json', 'package-lock.json', 'build.mjs'):
+            with self.subTest(name=name):
+                path = self.root / 'EditorAssets' / name
+                original = path.read_bytes()
+                path.write_bytes(original + b'changed')
+                with self.assertRaisesRegex(RuntimeError, '构建输入已过期'):
+                    self.prepare()
+                self.assertFalse(self.destination.exists())
+                path.write_bytes(original)
+        manifest = self.editors / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        data['dependenciesLockSHA256'] = '0' * 64
+        manifest.write_text(json.dumps(data))
+        with self.assertRaisesRegex(RuntimeError, '依赖锁'):
+            self.prepare()
+        self.assertFalse(self.destination.exists())
+
+    def test_added_removed_or_linked_inputs_are_rejected(self):
+        extra = self.root / 'EditorAssets/src/new-module.mjs'
+        extra.write_text('new source')
+        with self.assertRaisesRegex(RuntimeError, '构建输入已过期'):
+            self.prepare()
+        extra.unlink()
+        required = self.root / 'EditorAssets/src/index.mjs'
+        original = required.read_bytes()
+        required.unlink()
+        with self.assertRaisesRegex(RuntimeError, '缺少编辑器构建输入'):
+            self.prepare()
+        external = self.root / 'outside.mjs'
+        external.write_bytes(original)
+        required.symlink_to(external)
+        with self.assertRaisesRegex(RuntimeError, '符号链接'):
+            self.prepare()
+        self.assertFalse(self.destination.exists())

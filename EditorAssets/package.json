@@ -8,7 +8,8 @@
   },
   "scripts": {
     "build": "node build.mjs",
-    "test": "npm run build && node --test tests/*.test.mjs"
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "verify": "node build.mjs --check"
   },
   "dependencies": {
     "@codemirror/autocomplete": "6.20.4",

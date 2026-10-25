@@ -1,7 +1,19 @@
 {
-  "schema": 1,
+  "schema": 2,
   "target": "Safari 17 / macOS 14",
   "dependenciesLockSHA256": "2c9d4bd52f7d18e6113ccb1220500a79d1ab14e75fd6d4fb60a694b5e01ca328",
+  "inputs": {
+    "EditorAssets/build.mjs": "5fb16ee3edde688e98dfa5d57366d1d3e5895b963bcb85df251e796e607b0193",
+    "EditorAssets/package.json": "48d7de034469408a5c33b4adccab6721062b46eaa70545087f4229382afbef0b",
+    "EditorAssets/package-lock.json": "2c9d4bd52f7d18e6113ccb1220500a79d1ab14e75fd6d4fb60a694b5e01ca328",
+    "EditorAssets/src/editor.css": "7d478f7a78ff3198b1b81e536a59c4814aeee94bf9740b0ccacbc70d609b169c",
+    "EditorAssets/src/index.html": "651224353c590528f3e1a5956d0481712f68528320d8ecffbc3a16f0dd361751",
+    "EditorAssets/src/index.mjs": "16dbc98e1f72430a0f7248de40694e7138e0afe2d99bbeb04c226486bbabf4a5",
+    "EditorAssets/src/json-format.mjs": "b5281007babe035e7e38e8186656312ddff59f0daf888c537d2bc82531f96edb",
+    "EditorAssets/src/line-endings.mjs": "68713946178ac89c7b0f8440f25610482fda70a4bbd92ee168f05c721fd874a8",
+    "EditorAssets/src/markdown.mjs": "2393335dc6fa6e5d17e97991fea7841a8fcff9b8dfb28e8a05b42c7fc036643d",
+    "EditorAssets/src/workbench.mjs": "1843f3481a4b99a78099d48b894d16f783e8a971a35e09ef9975212315a6b55b"
+  },
   "files": {
     "editor.js": "5acf59bbdac0046282e9e34f8c791970446ee4538522153b32971f41a9729e0c",
     "editor.js.LEGAL.txt": "56957f10208bf202c69f67c8de1b90ea606f0058c643a142f26f9761b7e53fef",

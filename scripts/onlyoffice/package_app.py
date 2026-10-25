@@ -2,6 +2,7 @@
 """发布完整原生工作台 bundle；暂存并验签后替换入口，保留已有应用供回退。"""
 
 import argparse
+import hashlib
 from datetime import datetime
 import json
 import os
@@ -14,6 +15,15 @@ import tempfile
 
 from common import ROOT
 from optimize_resources import optimize_resources
+from verify_bundle import verify_bundle
+
+
+def require_valid_bundle(application):
+    """普通构建与 package-only 共用此门禁；失败时不得触及现有发布入口。"""
+    report = verify_bundle(application, editor_origin=ROOT / "Resources/Editors")
+    if not report["staticChecksPassed"]:
+        raise RuntimeError("工作台打包校验失败：" + json.dumps(report["errors"], ensure_ascii=False))
+    return report
 
 
 def _require_offline_readers(application):
@@ -50,6 +60,7 @@ def package_app(source, destination, version=None, build_number=None, compress_o
     icon = ROOT / "Resources/FileDeck.icns"
     if not icon.is_file():
         raise RuntimeError("缺少 FileDeck 应用图标：" + str(icon))
+    require_valid_bundle(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
     # 仅清理本次暂存目录；压缩、签名或发布失败均不留下完整应用副本。
     with tempfile.TemporaryDirectory(prefix=".file-workbench-package-", dir=destination.parent) as staging:
@@ -95,6 +106,16 @@ def package_app(source, destination, version=None, build_number=None, compress_o
             }
         subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", str(staged_app)], check=True)
         subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(staged_app)], check=True)
+        # 必须校验最终暂存内容，源包合格不能代替压缩、去重和复制后的完整性检查。
+        validation = require_valid_bundle(staged_app)
+        optimization["bundleValidation"] = {
+            "staticChecksPassed": True, "runtimeVerified": False,
+            "buildIdentity": validation["buildIdentity"],
+            "editorManifestSHA256": hashlib.sha256(
+                (staged_app / "Contents/Resources/FileWorkbenchEditors/manifest.json").read_bytes()).hexdigest(),
+            "executableSHA256": hashlib.sha256(
+                (staged_app / "Contents/MacOS/FileDeck").read_bytes()).hexdigest(),
+        }
         # ditto 保留源目录时间；刷新包根目录时间，让 macOS 识别同路径更新后的图标。
         os.utime(staged_app, None)
         previous = None

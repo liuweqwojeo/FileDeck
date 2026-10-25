@@ -3,7 +3,7 @@
 审查日期：2026-10-25（Asia/Shanghai）  
 代码基线：`main`，提交 `00a4d5e`；开始审查时工作区干净。  
 范围：Swift 浏览及文件操作、原生文档宿主、文本/CSV/PDF/图片编辑、本地 JavaScript 资源、ONLYOFFICE 集成和构建发布脚本。  
-交付性质：审查与后续任务清单，并跟踪优先问题修复。**R1、R2、R3 已修复、安装至本机并通过真实界面验收**；源码阶段见第 9 节，安装阶段见第 10 节，构建 6 发布、旧应用清理及当前回退方案见第 11 节。其余风险和功能候选仍待处理。
+交付性质：审查与后续任务清单，并跟踪优先问题修复。**R1、R2、R3 已修复并发布构建 6；R4、R5 已完成后续源码修复与回归。** 前三项见第 9–11 节，编辑资源和打包门禁见第 12 节。R6/R7、性能优化及功能候选仍待处理。
 
 ## 1. 结论与优先级
 
@@ -66,7 +66,7 @@
 
 ### R4 · P2 · 编辑器源码与打包资源缺少一致性门禁
 
-**状态：已复现校验缺口；没有证据表明当前提交中的 bundle 已经过期。**
+**当前状态：已补齐输入/输出摘要及只读重建比较，并补回归，见第 12 节。以下保留审查时的校验缺口。**
 
 - 触发：修改 `EditorAssets/src` 或依赖锁后，遗漏手工运行编辑资源构建，直接构建原生应用。
 - 原因：默认构建只调用原生构建/打包；资源 manifest 有输出摘要和依赖锁摘要，但没有源码输入摘要，原生校验也未检查依赖锁摘要。
@@ -81,7 +81,7 @@
 
 ### R5 · P2 · 打包入口没有统一执行完整工作台内容校验
 
-**状态：代码确认，属于发布门禁缺口；没有据此判定已发布包损坏。**
+**当前状态：打包入口已统一检查源应用与最终暂存应用，失败保留原发布入口；回归及真实应用副本验证见第 12 节。以下保留审查时的门禁缺口。**
 
 - 来源检查只要求指定可执行文件存在及 CEF 目录存在。打包后运行签名校验，随后替换目标应用。
 - `--package-only` 跳过原生构建中的部分架构和编辑资源验证。
@@ -472,3 +472,66 @@ python3 -B -m unittest discover -s Tests/BuildToolsTests -v
 第 10 节构建 4 备份路径保留为历史依据。当前回退顺序：从[原 v0.1.2 Release](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2) 下载构建 5 ZIP 与校验文件；校验、保存文档并正常退出构建 6；解压替换应用，启动后核对构建号 5。回退不撤销已保存文件及目录改名，无 SQL、配置或中间件回滚。
 
 完整升级及风险说明见[构建 6 发布说明](release-build6.md)。GitHub 附件大小及 SHA-256 与最终 ZIP 一致；本机发布记录位于 `build/releases/v0.1.2-build6/release-after.json`。
+
+## 12. 编辑资源一致性与打包门禁修复（2026-10-25）
+
+本节对应 R4/R5 的后续工作区源码修改，不改变第 11 节已发布构建 6 的下载、校验值及验收结论。本轮没有重新安装或发布应用，无 SQL、用户配置、API 或中间件迁移。
+
+后续进展：第 12 节为源码修复阶段记录；按用户进一步授权执行的构建 7 重建、安装和发布见第 13 节。
+
+### 12.1 编辑资源一致性
+
+- `EditorAssets/build.mjs` 生成 schema 2：覆盖全部 `src/` 输入、构建脚本、package.json、package-lock.json 及五份运行资源摘要；构建前后核对输入快照，变化时拒绝登记产物。
+- `native_sources.editor_inputs` 校验准确输入集合、依赖锁摘要、输出清单和文件字节；只改源码/锁/构建规则、增删输入、错误清单、遗漏资源或链接输入均失败，且原生同步前即拒绝。
+- `npm --prefix EditorAssets run verify` 在临时目录重建并逐字节比较，失败也不覆盖已提交资源。发布入口 `bash scripts/build-app.sh release` 先执行锁定依赖安装和只读比较，`release --package-only` 同样执行。
+- 普通开发构建依靠 Python 摘要门禁，仍能消费已提交且与源码一致的离线资源。Node/npm 是资源构建及发布检查工具，不是应用运行依赖。
+
+### 12.2 统一打包检查
+
+`package_app.py` 在复制前验证源应用，在压缩、去重、重新签名后验证最终暂存应用，二者共用 `verify_bundle`。检查 Office SDK、模板、CEF/内核/Hunspell/辅助程序 ARM64、依赖与包内链接、工作台标识/版本/构建号、本地编辑资源输入及输出摘要和严格签名。最终暂存检查失败时不移走原发布应用，异常回滚继续沿用原事务。
+
+资源优化报告新增 `bundleValidation`，记录检查结果、构建身份、编辑 manifest 和主程序 SHA-256；`runtimeVerified=false`，静态门禁不代替实际文档运行验收。
+
+### 12.3 回归与验证依据
+
+最终结果：**Python 构建工具 155 项通过、0 跳过；编辑资源 Node 测试 23 项通过；只读重建比较通过；真实应用副本正向打包与三类缺资源反例均通过预期断言。** `git diff --check` 和构建入口 shell 语法检查通过。
+
+- Python 覆盖源码/锁/构建规则变更、输入增删及链接、旧/错误 manifest、输出篡改；验证失败发生在同步或发布之前。
+- 真实 shell 入口配合隔离工具探针，验证 release 的 `--package-only` 先安装锁定依赖并只读比较，比较失败不执行打包。
+- 打包集成回归仅替代系统工具输出，实际执行统一检查器；删除源包/暂存包的编辑资源、Office 模板或内核，复制/优化过程中丢资源，以及错误身份/架构均被拦截，原应用字节保持不变。既有复制、压缩、签名失败及替换回滚测试继续通过。
+- 编辑资源 Node 回归在隔离副本修改源码、锁、构建脚本、package.json 和产物，确认 `--check` 拒绝且不回写资源。
+- 本机真实应用副本使用真实 `otool/lipo/codesign/ditto` 验证：旧 schema 1 包被拒绝；分别删除编辑脚本、模板、内核均失败且原目标保留；更新资源并重新签名后，源包和最终暂存检查通过、正常打包成功。副本及替换目标只存在于临时验收目录，完成后清理。
+
+本机日志位于 `build/priority-gates/`，真实检查汇总为 `real-package-validation.json`。此轮 JavaScript/CSS/HTML 运行资源及许可文件字节与此前一致，仅清单升级；没有重跑 WebKit/Office GUI，也不将静态通过计为运行通过。
+
+可重跑：
+
+```bash
+npm --prefix EditorAssets test
+npm --prefix EditorAssets run verify
+python3 -B -m unittest discover -s Tests/BuildToolsTests -v
+```
+
+### 12.4 清单升级与使用边界
+
+旧 schema 1 应用仍可正常运行，但不能直接通过新门禁。更改编辑输入后先 `npm --prefix EditorAssets run build`，检查并纳入源资源差异，再执行正常原生构建，使新 manifest 与资源复制进应用；之后才能使用 `--package-only`。校验历史应用时，应使用相应源码版本的校验器。
+
+`npm run verify` 使用当前已安装依赖；正式发布入口先 `npm ci --ignore-scripts --no-audit --no-fund`，防止本地 node_modules 偏离锁文件。缺依赖、安装失败或资源不一致会直接终止发布构建。动态库相对路径完整解析、任意 Office 资源语义和文档兼容性仍属于独立验证范围。
+
+## 13. 构建 7 重建与安装验收（2026-10-25）
+
+R4/R5 已按用户要求重新构建为 v0.1.2 构建 7，并安装至 `/Applications/FileDeck.app`；本节更新第 12 节仅完成源码修复的阶段状态。发布使用独立标签 `v0.1.2-build7`，最终公开下载和校验值以 README 及该 Release 登记为准。
+
+- 从 package-lock.json 重新安装依赖后，只读重建比较、23 项编辑资源 Node 测试和 155 项 Python 构建工具测试全部通过，0 跳过。
+- 使用 Debug 配置重建原生应用，资源清单已同步为 schema 2，ARM64 和严格签名检查通过；打包明确指定版本 0.1.2、构建 7，并启用既有无损帮助/词典压缩。
+- 源应用和最终暂存应用均通过统一门禁；真实副本中分别删除编辑脚本、Office 模板或内核，打包均失败且原目标保留；完整副本正常打包通过。旧 schema 1 源包也被明确拒绝。
+- 2026-10-25 16:24 安装完成，5,649 个普通文件、124 个符号链接与构建清单一致，安装后再执行新静态检查通过。
+- 安装后真实离线运行验收通过：DOCX/XLSX/PPTX 编辑、保存、重开及混合文本/PDF、菜单保存、关闭/退出保护，进程退出 0。使用独立 profile 与工作区 suite，不使用正式用户文档作为样本。
+- 主程序 SHA-256：`3843e38c137fd68a16d6b2b72c1876f62d6677d09b6f795899e3cbd70341ebe9`。
+- 编辑资源 manifest SHA-256：`b20c89827accf83bc812d45d67e6683925d8d9fcfaed4f9a7b80ad172d8bfe13`。
+
+本机证据位于 `build/releases/v0.1.2-build7/`：`build-result.json`、`source-inputs.json`、`installation.json`、`real-package-validation.json`、各阶段日志及 `installed-smoke/fw-office-smoke-中文 路径-3spgzhxv/verification.json`。安装后的静态报告为 `build/onlyoffice/build7-installed-verification.json`。144 项源码文件摘要在构建、验收及提交前保持一致；准确提交随包内 SOURCE-CODE.md 提供。
+
+发布前另外核对 ZIP CRC、解压文件字节/权限/链接及严格签名，GitHub 附件大小与 SHA-256 一致后才公开。旧本机应用副本在发布后移入废纸篓，保留当前构建 7，用户文档和偏好不属于清理范围。需要回退时从[构建 6 Release](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build6)下载旧包及校验文件，正常退出新版后替换并核对构建号 6。
+
+无 SQL、用户配置、Redis/MQ、API 或错误码迁移；临时签名、动态依赖解析与运行兼容性边界见[构建 7 发布说明](release-build7.md)。本轮未重复执行构建 6 的所有物理 JPEG/系统草稿面板操作，不将新门禁的静态结果替代这些运行证据。

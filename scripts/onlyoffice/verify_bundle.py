@@ -16,7 +16,8 @@ import zipfile
 from xml.parsers.expat import ExpatError
 
 sys.dont_write_bytecode = True
-from common import BUILD
+from common import BUILD, ROOT
+from native_sources import verify_editor_bundle
 
 
 # 32/64 位 Mach-O 以及两种宽度的 universal header，均包含大小端形式。
@@ -30,6 +31,7 @@ REQUIRED_BINARIES = {
     "converter": "Contents/Resources/converter/x2t",
     "cef": CEF + "/Chromium Embedded Framework",
     "core": "Contents/Frameworks/ascdocumentscore.framework/ascdocumentscore",
+    "hunspell": "Contents/Frameworks/hunspell.framework/hunspell",
 }
 # 路径依据固定版 main.mm、deploy_desktop.py 和 Xcode copy 阶段；不是扫描本机安装软件。
 REQUIRED_FILES = (
@@ -52,7 +54,8 @@ HELPERS = ("editors_helper", "editors_helper (GPU)", "editors_helper (Renderer)"
 LIMITATIONS = [
     "静态检查不替代断网启动、DOCX/XLSX/PPTX 新建、修改、保存和重新打开验收。",
     "@rpath、@loader_path、@executable_path 和其他相对安装名仅记录；未模拟 dyld 搜索链。",
-    "未验证 dlopen、外部进程调用、JavaScript 远程请求、资源内容完整性或文档格式兼容性。",
+    "未验证 dlopen、外部进程调用、JavaScript 远程请求、任意 Office 资源语义或文档格式兼容性。",
+    "本地编辑资源必须与当前检出源码一致；历史应用应使用其对应源码版本的校验器。",
     "检查脚本使用 Python/otool/lipo/codesign，不表示应用运行时依赖这些构建或检查工具。",
 ]
 
@@ -183,7 +186,7 @@ def bundle_executable(root, bundle_relative, report):
         return None
 
 
-def verify_bundle(application, runner=run_command):
+def verify_bundle(application, runner=run_command, editor_origin=ROOT / "Resources/Editors"):
     report = {"schemaVersion": 1, "checkedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
               "application": str(Path(application).absolute()), "scope": "single-app-static-check",
               "status": "failed", "staticChecksPassed": False, "runtimeVerified": False,
@@ -232,6 +235,24 @@ def verify_bundle(application, runner=run_command):
         required_path(root, relative, report)
     for relative in REQUIRED_DIRECTORIES:
         required_path(root, relative, report, directory=True)
+    if not unsafe_links:
+        try:
+            verify_editor_bundle(root / "Contents/Resources/FileWorkbenchEditors", origin=editor_origin)
+            report["editorResourcesVerified"] = True
+        except (OSError, RuntimeError, ValueError) as error:
+            report["editorResourcesVerified"] = False
+            add_error(report, "editorResourcesInvalid", "Contents/Resources/FileWorkbenchEditors", str(error))
+    try:
+        with inside_file(root, "Contents/Info.plist").open("rb") as stream:
+            identity = plistlib.load(stream)
+        if identity.get("CFBundleIdentifier") != "local.fileworkbench.desktop" or any(
+                not isinstance(identity.get(key), str) or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", identity[key])
+                for key in ("CFBundleShortVersionString", "CFBundleVersion")):
+            raise ValueError("必须为 FileDeck 工作台标识，并具有有效版本及构建号。")
+        report["buildIdentity"] = {key: identity[key] for key in
+                                   ("CFBundleIdentifier", "CFBundleShortVersionString", "CFBundleVersion")}
+    except (OSError, RuntimeError, ValueError, AttributeError, plistlib.InvalidFileException, ExpatError) as error:
+        add_error(report, "invalidBuildIdentity", "Contents/Info.plist", str(error))
     binaries = dict(REQUIRED_BINARIES)
     main_binary = bundle_executable(root, "", report)
     if main_binary:

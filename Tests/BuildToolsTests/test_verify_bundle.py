@@ -13,6 +13,7 @@ from unittest.mock import patch
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "onlyoffice"))
 import verify_bundle as checker
+from editor_fixtures import make_editors
 
 
 class FixtureTools:
@@ -50,6 +51,7 @@ class BundleVerificationTests(unittest.TestCase):
         self.directory = Path(self.temporary.name).resolve()
         self.app = self.directory / "中文 空格.app"
         self.tools = FixtureTools()
+        self.editor_origin = make_editors(self.directory, self.app)
         self.write_plist(self.app, "主程序")
         self.main = self.app / "Contents/MacOS/主程序"
         self.binary(self.main)
@@ -80,10 +82,11 @@ class BundleVerificationTests(unittest.TestCase):
     def write_plist(bundle, name):
         (bundle / "Contents").mkdir(parents=True, exist_ok=True)
         with (bundle / "Contents/Info.plist").open("wb") as stream:
-            plistlib.dump({"CFBundleExecutable": name}, stream)
+            plistlib.dump({"CFBundleExecutable": name, "CFBundleIdentifier": "local.fileworkbench.desktop",
+                         "CFBundleShortVersionString": "0.1.2", "CFBundleVersion": "6"}, stream)
 
     def verify(self):
-        return checker.verify_bundle(self.app, runner=self.tools)
+        return checker.verify_bundle(self.app, runner=self.tools, editor_origin=self.editor_origin)
 
     @staticmethod
     def codes(report):
@@ -99,7 +102,7 @@ class BundleVerificationTests(unittest.TestCase):
         self.assertFalse(report["offlineEditingVerified"])
         self.assertFalse(report["dynamicResolutionVerified"])
         self.assertEqual({item["role"] for item in report["requiredArchitectures"]},
-                         {"main", "converter", "cef", "core", *checker.HELPERS})
+                         {"main", "converter", "cef", "core", "hunspell", *checker.HELPERS})
         self.assertIn(["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", str(self.app)],
                       self.tools.calls)
         after = {str(p.relative_to(self.app)): (p.read_bytes(), p.stat().st_mtime_ns)
@@ -119,6 +122,17 @@ class BundleVerificationTests(unittest.TestCase):
         self.assertTrue(all(f"Contents/Resources/opaque-{i}" in detected for i in range(8)))
         self.assertNotIn("Contents/Resources/script.dylib", detected)
         self.assertTrue(all(str(outside) not in command for command in self.tools.calls))
+
+    def test_local_editor_manifest_and_contents_are_required(self):
+        resource = self.app / "Contents/Resources/FileWorkbenchEditors/editor.js"
+        resource.unlink()
+        self.assertIn("editorResourcesInvalid", self.codes(self.verify()))
+        resource.write_bytes((self.editor_origin / "editor.js").read_bytes())
+        manifest = resource.parent / "manifest.json"
+        metadata = json.loads(manifest.read_text())
+        metadata["schema"] = 1
+        manifest.write_text(json.dumps(metadata))
+        self.assertIn("editorResourcesInvalid", self.codes(self.verify()))
 
     def test_external_absolute_dependencies_are_rejected_and_raw_output_preserved(self):
         references = ["/opt/homebrew/lib/libssl.3.dylib", "/usr/local/lib/a.dylib",
