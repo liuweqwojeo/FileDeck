@@ -1,10 +1,67 @@
 import AppKit
+import Combine
 import XCTest
 @testable import FileWorkbench
 
 /// 使用真实临时文件验证拖放的数据边界与导航状态，避免误操作用户目录。
 @MainActor
 final class FileDragDropTests: XCTestCase {
+    func testUnselectedFolderProviderDoesNotPublishDuringNativeDragPreparation() async throws {
+        try await fixture { root, target, store in
+            let folder = root.appendingPathComponent("Unselected", isDirectory: true)
+            let marker = root.appendingPathComponent("selected.txt")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+            try Data("nested".utf8).write(to: folder.appendingPathComponent("content.txt"))
+            try Data("keep".utf8).write(to: marker)
+            store.refresh()
+            try await self.settled(store)
+            store.selectedURL = marker
+            var publications = 0
+            let observation = store.objectWillChange.sink { publications += 1 }
+            let provider = WorkspaceFileDrag.provider(url: folder, store: store, selection: true)
+            // 原生 List 尚在准备拖动项时不能同步触发视图更新；选中提示在回调返回后同步。
+            XCTAssertEqual(publications, 0)
+            XCTAssertEqual(store.selectedURL, marker)
+            XCTAssertTrue(provider.hasItemConformingToTypeIdentifier("public.file-url"))
+            await self.nextMainQueueTurn()
+            XCTAssertEqual(store.selectedURL, folder)
+            withExtendedLifetime(observation) {}
+            let token = store.beginFileDrag(folder, includingSelection: true)
+            store.dropActiveDrag(token: token, into: target, copy: false)
+            try await self.settled(store)
+            XCTAssertEqual(try String(contentsOf: target.appendingPathComponent("Unselected/content.txt")), "nested")
+            XCTAssertEqual(try String(contentsOf: marker), "keep")
+        }
+    }
+
+    func testDeferredDragSelectionPreservesNewerSelectionAndActiveDrag() async throws {
+        try await fixture { root, target, store in
+            let first = root.appendingPathComponent("First", isDirectory: true)
+            let second = root.appendingPathComponent("Second", isDirectory: true)
+            for folder in [first, second] {
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+            }
+            _ = store.beginFileDrag(first, includingSelection: true)
+            store.selectedURL = target
+            await self.nextMainQueueTurn()
+            XCTAssertEqual(store.selectedURL, target)
+            _ = store.beginFileDrag(second, includingSelection: true)
+            let token = store.beginFileDrag(first, includingSelection: true)
+            await self.nextMainQueueTurn()
+            XCTAssertEqual(store.selectedURL, first)
+            store.dropActiveDrag(token: token, into: target, copy: false)
+            try await self.settled(store)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: second.path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: target.appendingPathComponent("First").path))
+        }
+    }
+
+    private func nextMainQueueTurn() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+    }
+
     func testInternalDragMovesFrozenMultipleSelection() async throws {
         try await fixture { root, target, store in
             let first = root.appendingPathComponent("first.txt")

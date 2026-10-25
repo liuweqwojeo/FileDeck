@@ -562,12 +562,22 @@ final class BrowserStore: ObservableObject {
     /// 拖动开始时冻结选择与磁盘身份，异步读取载荷后也不能移动后续选中的其他文件。
     func beginFileDrag(_ url: URL, includingSelection: Bool) -> UUID {
         let urls = includingSelection && selectedURLs.contains(url) ? selectedFileURLs : [url]
-        if includingSelection && !selectedURLs.contains(url) { selectedURL = url }
         let files = urls.map(fileReference)
         // 原生 List 为多选的每一行请求提供器，同一批文件必须共用一个有效令牌。
         if let drag = activeFileDrag, drag.files == files { return drag.id }
         let id = UUID()
         activeFileDrag = (id, files)
+        if includingSelection && !selectedURLs.contains(url) {
+            let previousSelection = selectedURLs
+            let previousPrimary = selectedURL
+            // List 正在同步请求 NSItemProvider；此时发布选择会让 SwiftUI 重建拖动源。
+            // 先冻结载荷，回调返回后再更新提示，并避免旧拖动覆盖用户的新选择。
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.activeFileDrag?.id == id,
+                      self.selectedURLs == previousSelection, self.selectedURL == previousPrimary else { return }
+                self.selectedURL = url
+            }
+        }
         return id
     }
 
