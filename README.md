@@ -8,18 +8,18 @@ FileDeck 是面向 **macOS 14+、Apple Silicon（ARM64）** 的本地文件工�
 
 ## 下载与安装
 
-完整应用从已发布的 [GitHub Releases · v0.1.2 预览版](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2) 下载：
+完整应用从已发布的 [GitHub Releases · v0.1.2 预览版](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build6) 下载：
 
-- [FileDeck v0.1.2 · 构建 5 · macOS ARM64 下载包](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2/FileDeck-v0.1.2-macOS-arm64.zip)
-- [SHA-256 校验文件](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2/SHA256SUMS.txt)
+- [FileDeck v0.1.2 · 构建 6 · macOS ARM64 下载包](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2-build6/FileDeck-v0.1.2-build6-macOS-arm64.zip)
+- [SHA-256 校验文件](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2-build6/SHA256SUMS.txt)
 
-当前版本为 **v0.1.2（构建号 5）**，安装包对应源码提交 [15485a0](https://github.com/liuweqwojeo/FileDeck/commit/15485a0eb4d90960232d65d286f51fff06084dc1)。本版更新欢迎页布局：默认窗口为 1280×720，宽窗左右分栏、窄窗纵向排列，随窗口大小自适应且没有滚动状态；16:9 仅为欢迎页默认设计比例，窗口可自由调整，进入工作台后使用独立的布局规则。保留工作区恢复、目录选择与授权逻辑，以及此前的文件夹拖出时序修复、Finder 双向拖放、Option 拖动复制及 ⌘C／⌘V。
+当前版本为 **v0.1.2（构建号 6）**，安装包对应修复源码提交 [e9e0a12](https://github.com/liuweqwojeo/FileDeck/commit/e9e0a12393b7f2a533122e7b425c66877d2ff15d)。本版修复 JPEG 保存保真、WebKit 故障后的内存草稿恢复，以及目录重命名后的管理根、历史与展开路径同步，保留欢迎页自适应与拖放交互。
 
-欢迎页源码已通过 137 项 Swift 测试、8 项原生源码同步测试及 32 项原生欢迎页运行检查。构建 5 的最终 ZIP 已通过 CRC、解压内容与深度严格签名核验，解压副本在禁止网络的环境中通过 DOCX／XLSX／PPTX 编辑、保存及重开等运行检查。此前拖放修复构建的 24 次未预选文件夹拖出及 18 项交互回归均通过；最初一次拖出未落盘的原因仍未唯一确定，完整验证范围与限制见发布说明和[欢迎页验收报告](docs/welcome-ui-acceptance.md)。
+修复源码已通过 144 项 Swift 测试；最终构建工具 146 项通过、0 跳过。已安装构建 6 通过真实系统草稿另存取消/保存、JPEG 普通保存/系统另存/旋转/重复保存、目录改名及重启恢复，以及 Office 三格式离线编辑、保存和重开。完整结果、故障注入边界与回退步骤见 [构建 6 发布说明](docs/release-build6.md)和[验收报告](docs/code-review-and-roadmap.md#10-本机安装与验收2026-10-25)。
 
-当前 ZIP 安装包为 **793,561,833 字节，约 793.56 MB（756.80 MiB）**，解压后的 `FileDeck.app` 文件总量约 **1.367 GB**；两者分别表示下载体积和应用文件总量，实际磁盘占用会因文件系统而异。
+当前 ZIP 安装包为 **793,603,822 字节，约 793.60 MB（756.84 MiB）**，解压后的 `FileDeck.app` 文件总量约 **1.367 GB**；两者分别表示下载体积和应用文件总量，实际磁盘占用会因文件系统而异。
 
-构建 5 ZIP 的 SHA-256：`84ffe3d1ec7d0e0177b9be57baa256000d661fa1494d67b70d64d612eaed0f01`。将 ZIP 和 `SHA256SUMS.txt` 下载到同一目录，在该目录执行：
+构建 6 ZIP 的 SHA-256：`10747caa0cf8f89251e9e08eefe1c1b1c90f90ac297098220fd7237254a87f0d`。将 ZIP 和 `SHA256SUMS.txt` 下载到同一目录，在该目录执行：
 
 ```bash
 shasum -a 256 -c SHA256SUMS.txt
@@ -29,7 +29,7 @@ shasum -a 256 -c SHA256SUMS.txt
 
 当前为开发预览版，使用临时签名，尚未完成 Developer ID 签名与 Apple 公证。如果系统阻止打开，请先确认下载来源和校验值，再参考 [Apple 官方打开说明](https://support.apple.com/zh-cn/102445)。
 
-此包保留现有编辑器、语言、拼写字典、文档模板和插件。打包时对完全相同的静态资源使用包内相对链接去重，并无损压缩离线帮助和拼写字典，按需读取且不创建完整解压缓存。压缩实现与历史体积对比见 [离线资源压缩说明](docs/onlyoffice-build.md#离线帮助与拼写字典压缩)；本版更新、验证结果及升级回退方法见 [v0.1.2 发布说明](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2)。
+此包保留现有编辑器、语言、拼写字典、文档模板和插件。打包时对完全相同的静态资源使用包内相对链接去重，并无损压缩离线帮助和拼写字典，按需读取且不创建完整解压缓存。压缩实现与历史体积对比见 [离线资源压缩说明](docs/onlyoffice-build.md#离线帮助与拼写字典压缩)；本版更新、验证结果及升级回退方法见 [v0.1.2 发布说明](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build6)。
 
 ## 功能介绍
 
