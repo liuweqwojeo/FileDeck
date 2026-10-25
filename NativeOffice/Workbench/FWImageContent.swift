@@ -11,6 +11,8 @@ final class FWImageContent: NSViewController, FWNativeContent {
     var isModified: Bool { state.isModified }
     var isReadOnly: Bool { state.isReadOnly }
     var isBusy: Bool { state.isBusy }
+    var canUndo: Bool { state.canEdit && !isBusy && history.canUndo }
+    var canRedo: Bool { state.canEdit && !isBusy && history.canRedo }
     var onStateChanged: (() -> Void)?
     var kind: WorkbenchFileKind { currentKind }
     var availableOperations: Set<FileOperation> {
@@ -34,8 +36,8 @@ final class FWImageContent: NSViewController, FWNativeContent {
     private var editButtons: [NSButton] = []
     override var undoManager: UndoManager? { history }
 
-    private init(data: Data, fileState: FileSaveState, pixels: CGImage, kind: WorkbenchFileKind) {
-        state = FWBinaryState(data: data, fileState: fileState)
+    private init(data: Data, fileState: FileSaveState, pixels: CGImage, kind: WorkbenchFileKind) throws {
+        state = try FWBinaryState(data: data, fileState: fileState)
         self.pixels = pixels
         currentKind = kind
         super.init(nibName: nil, bundle: nil)
@@ -114,8 +116,8 @@ final class FWImageContent: NSViewController, FWNativeContent {
     }
 
     func close(discardChanges: Bool) async throws { try state.close(discardChanges: discardChanges) }
-    func undo() { if state.canEdit { history.undo() } }
-    func redo() { if state.canEdit { history.redo() } }
+    func undo() { if canUndo { history.undo() } }
+    func redo() { if canRedo { history.redo() } }
 
     private func persist(to destination: URL?, format: WorkbenchFileKind, overwrite: Bool, adoptDestination: Bool = true) async throws {
         let cached = encodedSnapshot

@@ -52,6 +52,27 @@ enum SafeFileIO {
     // 媒体编辑持有整份文件；限制峰值内存，超限文件仍可走系统只读预览。
     static let maximumMediaBytes = 256 * 1_048_576
 
+    /// 批量媒体按累计压缩字节预算读取；已有编辑缓冲区也占预算，避免先把所有输入载入内存。
+    static func openMediaBatch(urls: [URL], existingBytes: Int = 0,
+                               maximumBytes: Int = maximumMediaBytes) throws -> [Data] {
+        precondition(maximumBytes > 0 && maximumBytes < Int.max && existingBytes >= 0)
+        guard existingBytes <= maximumBytes else { throw DocumentIOError.fileTooLarge(limitBytes: maximumBytes) }
+        var remaining = maximumBytes - existingBytes
+        var result: [Data] = []
+        for url in urls {
+            guard remaining > 0 else { throw DocumentIOError.fileTooLarge(limitBytes: maximumBytes) }
+            let loaded: FileReadResult
+            do { loaded = try open(url: url, maximumBytes: remaining) }
+            catch DocumentIOError.fileTooLarge {
+                // 错误提示统一为整批预算，不能把随每个输入缩小的剩余额度当作产品上限。
+                throw DocumentIOError.fileTooLarge(limitBytes: maximumBytes)
+            }
+            result.append(loaded.data)
+            remaining -= loaded.data.count
+        }
+        return result
+    }
+
     static func open(url: URL, maximumBytes: Int = maximumMediaBytes) throws -> FileReadResult {
         precondition(maximumBytes > 0 && maximumBytes < Int.max)
         let source = url.standardizedFileURL
@@ -78,7 +99,10 @@ enum SafeFileIO {
 
         // 即使明确覆盖，也必须完整核对磁盘文件。外部已增大到编辑上限之外时拒绝覆盖，允许另存新路径。
         let existing = try snapshotIfPresent(resolved, maximumBytes: maximumBytes)
-        if savingOriginal, !overwriteExternalChanges, existing?.fingerprint != previous?.fingerprint {
+        // 明确传入另存目标后允许重建已删除的原路径；普通保存仍报告冲突。
+        // 已存在的外部版本仍比较指纹；新出现的文件由最终快照检查和 RENAME_EXCL 保护。
+        let recreatingChosenSource = destination != nil && savingOriginal && existing == nil
+        if savingOriginal, !overwriteExternalChanges, !recreatingChosenSource, existing?.fingerprint != previous?.fingerprint {
             throw DocumentIOError.externalModification
         }
         if !savingOriginal, existing != nil, !overwriteExternalChanges { throw DocumentIOError.destinationExists }

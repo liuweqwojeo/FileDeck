@@ -461,8 +461,9 @@ static char FWCoordinatorKey;
 }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
     FWWorkbenchCoordinator *coordinator = [FWWorkbenchCoordinator current];
-    if (item.action == @selector(undoSelected:) || item.action == @selector(redoSelected:) || item.action == @selector(findSelected:))
-        return coordinator.selectedDocument != nil && !coordinator.selectedDocument.busy;
+    if (item.action == @selector(undoSelected:)) return coordinator.selectedDocument.canUndo;
+    if (item.action == @selector(redoSelected:)) return coordinator.selectedDocument.canRedo;
+    if (item.action == @selector(findSelected:)) return coordinator.selectedDocument.canFind;
     if (item.action == @selector(exportSelected:)) return coordinator.selectedDocument ? coordinator.selectedDocument.canExport : coordinator.owner.tabsControl.selectedTab != nil;
     return coordinator != nil;
 }

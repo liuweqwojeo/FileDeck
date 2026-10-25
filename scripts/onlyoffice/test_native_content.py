@@ -23,7 +23,7 @@ def main():
         if result.stderr:
             print(result.stderr, end="")
         result.check_returncode()
-        if "PASS: 8 native media/CSV session regressions" not in result.stdout:
+        if "PASS: 11 native media/CSV session regressions" not in result.stdout:
             raise RuntimeError("Native regression process exited before its completion marker")
 
 

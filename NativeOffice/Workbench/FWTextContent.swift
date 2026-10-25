@@ -21,6 +21,9 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
     var loadError: String? { failure?.localizedDescription }
     var isLoading: Bool { loading }
     var isBusy: Bool { operationInFlight || loading || session.isBusy }
+    var canFind: Bool { editorReady && failure == nil && !disposed && !session.isClosed && !isBusy }
+    var canUndo: Bool { canFind && !isReadOnly && editorCanUndo }
+    var canRedo: Bool { canFind && !isReadOnly && editorCanRedo }
     var availableOperations: Set<FileOperation> {
         guard !disposed, !operationInFlight, isEditing else { return [] }
         // 进程故障后只能显式另存最近已同步的草稿，避免把可能缺少最后输入的快照直接覆盖原文。
@@ -40,6 +43,8 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
     private var pageLoaded = false
     private var bridgeReady = false
     private var editorReady = false
+    private var editorCanUndo = false
+    private var editorCanRedo = false
     private var loading = true
     private var operationInFlight = false
     private var failure: Error?
@@ -162,6 +167,9 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
             do {
                 // dirty 只由完整文本会话与真实保存基线计算，不能直接相信页面提供的布尔值。
                 if !isReadOnly { try session.replaceText(text) }
+                // 页面的历史标志只影响命令能力；脏状态仍以 Swift 会话的完整保存基线为准。
+                editorCanUndo = body["canUndo"] as? Bool ?? false
+                editorCanRedo = body["canRedo"] as? Bool ?? false
                 changed()
             } catch { fail(error) }
         } else if type == "error" {
@@ -173,6 +181,8 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
     private func initializeIfReady() {
         guard !disposed, pageLoaded, bridgeReady, !editorReady, failure == nil else { return }
         bridgeReady = false // 防止 ready 与 didFinish 重复建立会话。
+        editorCanUndo = false
+        editorCanRedo = false
         let token = UUID().uuidString
         bridgeSessionID = token
         Task {
@@ -262,6 +272,8 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
     }
 
     private func releaseEditor() {
+        editorCanUndo = false
+        editorCanRedo = false
         bridgeSessionID = UUID().uuidString
         timeoutTask?.cancel()
         timeoutTask = nil
@@ -384,9 +396,9 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
         dispose()
     }
 
-    func undo() { command("undo") }
-    func redo() { command("redo") }
-    func find() { command("search") }
+    func undo() { if canUndo { command("undo") } }
+    func redo() { if canRedo { command("redo") } }
+    func find() { if canFind { command("search") } }
     @objc private func findAction() { find() }
     @objc private func formatJSON() { command("formatJSON") }
 
@@ -408,8 +420,8 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
             status.stringValue = loading ? "正在加载编辑器…" : session.encoding.name + (isReadOnly ? " · 只读" : "") + (isModified ? " · 未保存" : "")
             status.toolTip = status.stringValue
         }
-        findButton.isEnabled = editorReady && failure == nil
-        formatButton.isEnabled = editorReady && failure == nil && !isReadOnly
+        findButton.isEnabled = canFind
+        formatButton.isEnabled = canFind && !isReadOnly
         recoverySaveButton.isHidden = failure == nil || !isEditing
         recoverySaveButton.isEnabled = availableOperations.contains(.saveAs)
         recoveryEditorButton.isHidden = failure == nil

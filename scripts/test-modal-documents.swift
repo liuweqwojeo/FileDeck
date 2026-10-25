@@ -36,8 +36,8 @@ final class ModalDocumentTests: NSObject, NSApplicationDelegate {
         writeReport(passed: false, status: "running")
         if !passed { throw Failed.assertion(title) }
     }
-    func wait(_ name: String, _ condition: () -> Bool) async throws {
-        for _ in 0..<250 {
+    func wait(_ name: String, attempts: Int = 250, _ condition: () -> Bool) async throws {
+        for _ in 0..<attempts {
             if condition() { return }
             try await Task.sleep(for: .milliseconds(30))
         }
@@ -106,6 +106,14 @@ final class ModalDocumentTests: NSObject, NSApplicationDelegate {
         window.title = "FileDeck 文档关闭验收（自动关闭）"
         window.isReleasedWhenClosed = false
         let testCase = ProcessInfo.processInfo.environment["FW_MODAL_DOCUMENT_TEST_CASE"]
+        if testCase == "save-panel" {
+            try await deletionAndSaveAs()
+            return
+        }
+        if testCase == "menu-capabilities" {
+            try await menuCapabilities()
+            return
+        }
         if testCase == "webkit-recovery" {
             try await webKitRecovery()
             try await webKitFailureAfterWrite()
@@ -119,8 +127,11 @@ final class ModalDocumentTests: NSObject, NSApplicationDelegate {
         trace("YAML 彩色预览")
         try await yamlPreview()
         if testCase == "yaml-preview" || testCase == "structured-preview" { return }
-        trace("删除与另存为")
-        try await deletionAndSaveAs()
+        // 系统远程保存面板确认可在无人值守环境阻塞；独立选择其余场景，不把本分组报告成完整面板验收。
+        if testCase != "non-panel" {
+            trace("删除与另存为")
+            try await deletionAndSaveAs()
+        }
         trace("取消与保存")
         try await cancelAndSave()
         trace("真实权限失败")
@@ -132,6 +143,46 @@ final class ModalDocumentTests: NSObject, NSApplicationDelegate {
         trace("WebKit 故障草稿恢复")
         try await webKitRecovery()
         try await webKitFailureAfterWrite()
+        try await menuCapabilities()
+    }
+
+    /// 使用真实 WK 历史、宿主门面和标准 responder 菜单校验，避免只断言布尔值的静态接线。
+    func menuCapabilities() async throws {
+        let source = output.appendingPathComponent("菜单能力.txt")
+        try Data("磁盘基线".utf8).write(to: source)
+        let host = try await open(source)
+        let undoItem = NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "")
+        let redoItem = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "")
+        let findItem = NSMenuItem(title: "Find", action: Selector(("performFindPanelAction:")), keyEquivalent: "")
+        try check("只读文本预览可查找且没有撤销重做", host.canFind && !host.canUndo && !host.canRedo
+                  && host.validateUserInterfaceItem(findItem) && !host.validateUserInterfaceItem(undoItem)
+                  && !host.validateUserInterfaceItem(redoItem))
+        let editor = try await edit(host, text: "编辑后的菜单草稿")
+        try await wait("菜单收到真实撤销能力") { host.canUndo }
+        try check("真实输入启用撤销", host.validateUserInterfaceItem(undoItem) && !host.validateUserInterfaceItem(redoItem))
+        host.undo()
+        try await wait("撤销后启用重做") { !host.modified && host.canRedo && !host.canUndo }
+        try check("菜单撤销恢复真实正文", try await js(editor, "return window.workbench.getText()") as? String == "磁盘基线")
+        host.redo()
+        try await wait("重做恢复草稿") { host.modified && host.canUndo && !host.canRedo }
+        guard let content = host.children.first as? FWTextContent else { throw Failed.assertion("缺少文本内容") }
+        let forwardState = content.onStateChanged
+        var busyDisabledCommands = false
+        content.onStateChanged = {
+            forwardState?()
+            if host.busy {
+                busyDisabledCommands = !host.canFind && !host.canUndo && !host.canRedo
+                host.undo()
+            }
+        }
+        try await content.reload(discardChanges: true)
+        try await wait("重新读取后编辑器就绪") { !host.busy && host.canFind }
+        try check("载入禁用命令且重新读取清除旧历史", busyDisabledCommands && !host.canUndo && !host.canRedo && !host.modified)
+        content.onStateChanged = forwardState
+        content.webViewWebContentProcessDidTerminate(editor)
+        try check("WK 故障禁用查找撤销重做", !host.canFind && !host.canUndo && !host.canRedo
+                  && !host.validateUserInterfaceItem(findItem))
+        try check("关闭后所有编辑命令保持禁用", await close(host) && !host.canFind && !host.canUndo && !host.canRedo)
     }
 
     /// 注入公开的进程终止委托回调；正文仍经真实 WK 输入/桥接，恢复与另存均操作真实对象和文件。
@@ -381,20 +432,21 @@ final class ModalDocumentTests: NSObject, NSApplicationDelegate {
         try await Task.sleep(for: .milliseconds(200))
         try check("系统另存面板确认前不自动重建已删除路径", !FileManager.default.fileExists(atPath: url.path)
                   && host.modified && host.lastSavedURL == nil)
-        // 保留产品展示前配置的目录与原文件名，通过面板自己的 Return 确认明确选择该路径。
-        // 这允许重新创建用户刚刚确认的原路径；不注入 URL、不绕过系统面板，也不伪造完成回调。
-        panel.makeKeyAndOrderFront(nil)
-        for type in [NSEvent.EventType.keyDown, .keyUp] {
-            guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [],
-                                              timestamp: ProcessInfo.processInfo.systemUptime,
-                                              windowNumber: panel.windowNumber, context: nil,
-                                              characters: "\r", charactersIgnoringModifiers: "\r",
-                                              isARepeat: false, keyCode: 36) else {
-                throw Failed.assertion("无法创建系统面板确认事件")
-            }
-            NSApp.postEvent(event, atStart: false)
+        // 远程面板必须由外部操作者确认；本进程投递键盘事件或同步调用 ok 都可能阻塞。
+        // 进度文件只报告实际面板，不接受 URL/结果回传；生产保存仍等待系统完成回调。
+        guard panel.directoryURL?.standardizedFileURL == output.standardizedFileURL,
+              panel.nameFieldStringValue == url.lastPathComponent,
+              let token = ProcessInfo.processInfo.environment["FW_MODAL_DOCUMENT_TEST_TOKEN"] else {
+            throw Failed.assertion("系统面板默认目标或测试令牌不匹配")
         }
-        trace("已向系统另存面板投递 Return 确认")
+        let checkpoint: [String: Any] = ["schemaVersion": 1, "token": token, "phase": "awaiting-save",
+                                         "pid": ProcessInfo.processInfo.processIdentifier, "directory": output.path,
+                                         "expectedFileName": url.lastPathComponent, "expectedPath": url.path,
+                                         "panelTitle": panel.title, "panelWindowNumber": panel.windowNumber]
+        try JSONSerialization.data(withJSONObject: checkpoint, options: [.prettyPrinted, .sortedKeys])
+            .write(to: output.appendingPathComponent("save-panel-checkpoint.json"), options: .atomic)
+        trace("等待外部确认真实系统保存按钮")
+        try await wait("系统另存完成回调", attempts: 1_000) { host.sessionState == "CLOSED" || !host.busy }
         let saved = await saving.value
         try check("删除后明确确认系统默认路径才真实另存并关闭", saved && host.sessionState == "CLOSED"
                   && panel.url?.standardizedFileURL == url.standardizedFileURL
@@ -449,6 +501,7 @@ final class ModalDocumentTests: NSObject, NSApplicationDelegate {
     }
     func writeReport(passed: Bool, status: String) {
         let report: [String: Any] = ["passed": passed, "status": status, "checks": checks,
+                                   "selection": ProcessInfo.processInfo.environment["FW_MODAL_DOCUMENT_TEST_CASE"] ?? "full",
                                    "realWebKit": true, "realFilesystem": true, "realNativeDialogs": true]
         try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
             .write(to: output.appendingPathComponent("report.json"))

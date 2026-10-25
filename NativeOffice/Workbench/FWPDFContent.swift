@@ -12,6 +12,9 @@ final class FWPDFContent: NSViewController, FWNativeContent {
     var isModified: Bool { state.isModified }
     var isReadOnly: Bool { state.isReadOnly }
     var isBusy: Bool { state.isBusy }
+    var canFind: Bool { !state.isClosed && !isBusy }
+    var canUndo: Bool { state.canEdit && !isBusy && history.canUndo }
+    var canRedo: Bool { state.canEdit && !isBusy && history.canRedo }
     var onStateChanged: (() -> Void)?
     var availableOperations: Set<FileOperation> {
         guard !state.isClosed else { return [] }
@@ -30,28 +33,28 @@ final class FWPDFContent: NSViewController, FWNativeContent {
     private var editButtons: [NSButton] = []
     override var undoManager: UndoManager? { history }
 
-    private init(data: Data, fileState: FileSaveState?) {
-        state = FWBinaryState(data: data, fileState: fileState)
+    private init(data: Data, fileState: FileSaveState?, maximumBytes: Int) throws {
+        state = try FWBinaryState(data: data, fileState: fileState, maximumBytes: maximumBytes)
         super.init(nibName: nil, bundle: nil)
         history.levelsOfUndo = 12
         state.onChange = { [weak self] in self?.refreshState() }
     }
     required init?(coder: NSCoder) { fatalError("请使用 open(url:)") }
 
-    static func open(url: URL) async throws -> FWPDFContent {
+    static func open(url: URL, maximumBytes: Int = SafeFileIO.maximumMediaBytes) async throws -> FWPDFContent {
         let loaded = try await Task.detached(priority: .userInitiated) {
-            let result = try SafeFileIO.open(url: url)
+            let result = try SafeFileIO.open(url: url, maximumBytes: maximumBytes)
             _ = try PDFOperations.read(result.data)
             return result
         }.value
-        return FWPDFContent(data: loaded.data, fileState: loaded.state)
+        return try FWPDFContent(data: loaded.data, fileState: loaded.state, maximumBytes: maximumBytes)
     }
 
-    static func createFromImages(urls: [URL]) async throws -> FWPDFContent {
+    static func createFromImages(urls: [URL], maximumBytes: Int = SafeFileIO.maximumMediaBytes) async throws -> FWPDFContent {
         let data = try await Task.detached(priority: .userInitiated) {
-            try PDFOperations.imagesToPDF(urls.map { try SafeFileIO.open(url: $0).data })
+            try PDFOperations.imagesToPDF(SafeFileIO.openMediaBatch(urls: urls, maximumBytes: maximumBytes))
         }.value
-        return FWPDFContent(data: data, fileState: nil)
+        return try FWPDFContent(data: data, fileState: nil, maximumBytes: maximumBytes)
     }
 
     override func loadView() {
@@ -90,8 +93,8 @@ final class FWPDFContent: NSViewController, FWNativeContent {
         if isViewLoaded { refreshPDF() }
     }
     func close(discardChanges: Bool) async throws { try state.close(discardChanges: discardChanges) }
-    func undo() { if state.canEdit { history.undo() } }
-    func redo() { if state.canEdit { history.redo() } }
+    func undo() { if canUndo { history.undo() } }
+    func redo() { if canRedo { history.redo() } }
 
     /// 供工具栏和会话回归共用；页码始终使用从 0 开始的 PDF 模型索引。
     func rotate(pageIndexes: [Int]) throws {
@@ -148,18 +151,33 @@ final class FWPDFContent: NSViewController, FWNativeContent {
     }
     @objc private func mergeFiles() {
         guard !isBusy, let urls = FWMediaUI.files(title: "选择要追加的 PDF", types: [.pdf]) else { return }
-        runTransform(name: "合并 PDF") { data in
-            try PDFOperations.merge([data] + urls.map { try SafeFileIO.open(url: $0).data })
-        }
+        Task { do { try await merge(urls: urls) } catch { FWMediaUI.show(error, in: view.window) } }
     }
     @objc private func appendImages() {
         guard !isBusy, let urls = FWMediaUI.files(title: "每张图片追加为一页", types: [.png, .jpeg, .heic, .heif]) else { return }
-        runTransform(name: "添加图片页") { data in
-            let generated = try PDFOperations.imagesToPDF(urls.map { try SafeFileIO.open(url: $0).data })
+        Task { do { try await appendImages(urls: urls) } catch { FWMediaUI.show(error, in: view.window) } }
+    }
+
+    /// 合并/追加在同一事务内检查累计输入和输出；失败不注册撤销，也不替换展示文档。
+    func merge(urls: [URL]) async throws {
+        let limit = state.maximumBytes
+        try await transform(name: "合并 PDF") { data in
+            let inputs = try SafeFileIO.openMediaBatch(urls: urls, existingBytes: data.count, maximumBytes: limit)
+            return try PDFOperations.merge([data] + inputs)
+        }
+    }
+    func appendImages(urls: [URL]) async throws {
+        let limit = state.maximumBytes
+        try await transform(name: "添加图片页") { data in
+            let inputs = try SafeFileIO.openMediaBatch(urls: urls, existingBytes: data.count, maximumBytes: limit)
+            let generated = try PDFOperations.imagesToPDF(inputs)
+            guard generated.count <= limit else { throw DocumentIOError.fileTooLarge(limitBytes: limit) }
             return try PDFOperations.merge([data, generated])
         }
     }
     func find() {
+        guard canFind else { return }
+        _ = view
         guard let values = FWMediaUI.fields(title: "查找 PDF 文字", labels: ["查找内容"], values: [""]), !values[0].isEmpty,
               let selection = pdfView.document?.findString(values[0], withOptions: .caseInsensitive).first else { return }
         pdfView.setCurrentSelection(selection, animate: true)
@@ -183,15 +201,11 @@ final class FWPDFContent: NSViewController, FWNativeContent {
         }
         history.setActionName(name)
     }
-    private func runTransform(name: String, operation: @escaping @Sendable (Data) throws -> Data) {
-        Task { @MainActor in
-            do {
-                let previous = state.data
-                try await state.transform(operation)
-                registerUndo(previous, name: name)
-                if isViewLoaded { refreshPDF() }
-            } catch { FWMediaUI.show(error, in: view.window) }
-        }
+    private func transform(name: String, operation: @escaping @Sendable (Data) throws -> Data) async throws {
+        let previous = state.data
+        try await state.transform(operation)
+        registerUndo(previous, name: name)
+        if isViewLoaded { refreshPDF() }
     }
     private func refreshPDF() {
         let previousPage = currentPageIndex

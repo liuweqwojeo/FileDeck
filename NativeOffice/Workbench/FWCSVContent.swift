@@ -9,6 +9,8 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
     var path: URL? { document.sourceURL }
     var isReadOnly: Bool { document.isReadOnly }
     var isBusy: Bool { work != nil }
+    var canUndo: Bool { canEdit && !isBusy && history.canUndo }
+    var canRedo: Bool { canEdit && !isBusy && history.canRedo }
     var isModified: Bool { !document.text.utf8.elementsEqual(savedText.utf8) || selectedEncoding != savedEncoding }
     var onStateChanged: (() -> Void)?
     var availableOperations: Set<FileOperation> {
@@ -158,8 +160,8 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
         guard !isModified || discardChanges else { throw DocumentSessionError.unsavedChanges }
         closed = true; refreshState()
     }
-    func undo() { if canEdit { history.undo() } }
-    func redo() { if canEdit { history.redo() } }
+    func undo() { if canUndo { history.undo() } }
+    func redo() { if canRedo { history.redo() } }
 
     private func persist(to destination: URL?, overwrite: Bool) async throws {
         try requireIdle()

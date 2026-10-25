@@ -30,10 +30,159 @@ struct MediaContentRegression {
         try await newPDF(directory: directory, imagePath: imagePath)
         try await quickLookReadOnly(directory: directory)
         try await mountedViews(imagePath: imagePath, pdfPath: pdfPath, directory: directory)
-        print("PASS: 8 native media/CSV session regressions (real files, no Office runtime)")
+        try await binaryOutputLimits(directory: directory)
+        try await pdfOutputLimits(pdfPath, imagePath: imagePath, directory: directory)
+        try await commandCapabilities(imagePath: imagePath, pdfPath: pdfPath, directory: directory)
+        print("PASS: 11 native media/CSV session regressions (real files, no Office runtime)")
     }
     static func expect(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {
         if try !condition() { throw NSError(domain: "NativeMediaRegression", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
+    }
+
+    @MainActor static func binaryOutputLimits(directory: URL) async throws {
+        let path = directory.appendingPathComponent("binary-limit")
+        let baseline = Data([1, 2, 3, 4])
+        try baseline.write(to: path)
+        let loaded = try SafeFileIO.open(url: path, maximumBytes: 8)
+        let state = try FWBinaryState(data: loaded.data, fileState: loaded.state, maximumBytes: 8)
+        let oversized = Data(repeating: 9, count: 9)
+        do { _ = try FWBinaryState(data: oversized, maximumBytes: 8); throw failure("Oversized initial buffer accepted") }
+        catch DocumentIOError.fileTooLarge(limitBytes: 8) { }
+        for dirty in [false, true] {
+            let expected = dirty ? Data([5, 6, 7, 8]) : baseline
+            try state.replace(expected)
+            do { try state.replace(oversized); throw failure("Oversized replacement accepted") }
+            catch DocumentIOError.fileTooLarge(limitBytes: 8) { }
+            do { try await state.transform { _ in oversized }; throw failure("Oversized async result accepted") }
+            catch DocumentIOError.fileTooLarge(limitBytes: 8) { }
+            try expect(state.data == expected && state.path == path && state.isModified == dirty,
+                       "Rejected results must preserve buffer, path and saved baseline")
+            try expect(!state.isBusy && state.canEdit, "Rejected transform must leave the state usable")
+        }
+        do {
+            try await state.save(to: nil, overwrite: false, encode: { _ in oversized })
+            throw failure("Oversized encoded output accepted")
+        } catch DocumentIOError.fileTooLarge(limitBytes: 8) { }
+        try expect(Data(contentsOf: path) == baseline && state.isModified && !state.isBusy,
+                   "Rejected encoding must preserve disk and dirty state")
+        let exact = Data(repeating: 7, count: 8)
+        try await state.transform { _ in exact }
+        try await state.save(to: nil, overwrite: false)
+        try expect(Data(contentsOf: path) == exact && !state.isModified, "Exact output limit must remain saveable")
+    }
+
+    @MainActor static func pdfOutputLimits(_ source: URL, imagePath: URL, directory: URL) async throws {
+        // 小阈值触发真实 PDF 序列化的超限分支，避免用几百 MiB 的分配代替状态语义回归。
+        let baseline = try Data(contentsOf: source)
+        let rotated = try PDFOperations.rotate(baseline, pageIndexes: [0])
+        let limit = max(baseline.count, rotated.count) + 512
+        let content = try await FWPDFContent.open(url: source, maximumBytes: limit)
+        try mutation(content) { try content.rotate(pageIndexes: [0]) }
+        content.undo()
+        try expect(!content.isModified && content.canRedo && !content.canUndo, "PDF initial redo branch")
+        for dirty in [false, true] {
+            if dirty { content.redo() }
+            let before = directory.appendingPathComponent("before-limit-\(dirty).pdf")
+            try await content.export(to: before, format: .pdf)
+            do {
+                try content.addTextAnnotation(pageIndex: 0, bounds: CGRect(x: 5, y: 5, width: 20, height: 20),
+                                              text: String(repeating: "oversized annotation", count: 4_000))
+                throw failure("Oversized PDF installation accepted")
+            } catch DocumentIOError.fileTooLarge { }
+            do { try await content.merge(urls: [source]); throw failure("Oversized PDF merge accepted") }
+            catch DocumentIOError.fileTooLarge { }
+            do { try await content.appendImages(urls: [imagePath, imagePath]); throw failure("Oversized PDF append accepted") }
+            catch DocumentIOError.fileTooLarge { }
+            let after = directory.appendingPathComponent("after-limit-\(dirty).pdf")
+            try await content.export(to: after, format: .pdf)
+            try expect(Data(contentsOf: after) == Data(contentsOf: before), "Rejected PDF edits must preserve every buffer byte")
+            try expect(content.isModified == dirty && content.canUndo == dirty && content.canRedo == !dirty && !content.isBusy,
+                       "Rejected PDF edits must preserve undo/redo branch and dirty state")
+        }
+        content.undo()
+        try expect(!content.isModified, "Undo after rejected edits must still reach original baseline")
+        try await content.save()
+        try expect(Data(contentsOf: source) == baseline, "PDF failed transformations must not change source")
+        try await content.close()
+        do {
+            _ = try await FWPDFContent.createFromImages(urls: [imagePath], maximumBytes: 1)
+            throw failure("Oversized initial image batch accepted")
+        } catch DocumentIOError.fileTooLarge { }
+
+        let normal = try await FWPDFContent.open(url: source)
+        normal.undoManager?.groupsByEvent = false
+        normal.undoManager?.beginUndoGrouping()
+        try await normal.merge(urls: [source])
+        normal.undoManager?.endUndoGrouping()
+        let merged = directory.appendingPathComponent("正常合并.pdf")
+        try await normal.export(to: merged, format: .pdf)
+        let pages = try PDFOperations.read(baseline).pageCount
+        try expect(PDFOperations.read(Data(contentsOf: merged)).pageCount == pages * 2 && normal.canUndo,
+                   "Normal PDF batch must merge all pages and create undo")
+        normal.undo()
+        try expect(!normal.isModified && normal.canRedo, "Normal merge undo must restore baseline")
+        normal.undoManager?.beginUndoGrouping()
+        try await normal.appendImages(urls: [imagePath])
+        normal.undoManager?.endUndoGrouping()
+        let appended = directory.appendingPathComponent("正常追加.pdf")
+        try await normal.export(to: appended, format: .pdf)
+        try expect(PDFOperations.read(Data(contentsOf: appended)).pageCount == pages + 1 && normal.canUndo,
+                   "Normal image batch must append a page and create undo")
+        normal.undo()
+        try expect(!normal.isModified, "Normal image append undo must restore baseline")
+        try await normal.close()
+    }
+
+    @MainActor static func commandCapabilities(imagePath: URL, pdfPath: URL, directory: URL) async throws {
+        let csvPath = directory.appendingPathComponent("commands.csv")
+        try Data("a,b\n".utf8).write(to: csvPath)
+        let csv = try await FWCSVContent.open(url: csvPath)
+        let image = try await FWImageContent.open(url: imagePath)
+        let pdf = try await FWPDFContent.open(url: pdfPath)
+        let preview = try await FWQuickLookContent.open(url: imagePath)
+        try expect(!csv.canFind && !image.canFind && !preview.canFind && !preview.canUndo && !preview.canRedo,
+                   "CSV, image and Quick Look must not advertise unimplemented find")
+        try expect(pdf.canFind, "PDF text find must be available without editing")
+        for content: any FWNativeContent in [csv, image, pdf] {
+            try expect(!content.canUndo && !content.canRedo, "Empty history must disable undo and redo")
+            try mutation(content.controller) {
+                if let csv = content as? FWCSVContent { try csv.setCell("changed", row: 0, column: 0) }
+                if let image = content as? FWImageContent { try image.rotate(clockwise: true) }
+                if let pdf = content as? FWPDFContent { try pdf.rotate(pageIndexes: [0]) }
+            }
+            try expect(content.canUndo && !content.canRedo, "A committed edit must enable only undo")
+            content.undo()
+            try expect(!content.canUndo && content.canRedo && !content.isModified, "Undo must expose redo and restore baseline")
+            content.redo()
+            var busyWasDisabled = false
+            content.onStateChanged = {
+                if content.isBusy {
+                    busyWasDisabled = !content.canFind && !content.canUndo && !content.canRedo
+                    content.undo() // 禁用期间的直接调用也不得消耗历史。
+                }
+            }
+            try await content.save()
+            content.onStateChanged = nil
+            try expect(busyWasDisabled && content.canUndo, "Busy commands must be disabled without consuming history")
+            try await content.reload(discardChanges: true)
+            try expect(!content.canUndo && !content.canRedo, "Reload must clear menu history capabilities")
+            try await content.close(discardChanges: true)
+            try expect(!content.canFind && !content.canUndo && !content.canRedo, "Closed content must disable all commands")
+        }
+        for source in [pdfPath, imagePath, csvPath] {
+            let readonlyPath = directory.appendingPathComponent("readonly-commands." + source.pathExtension)
+            try Data(contentsOf: source).write(to: readonlyPath)
+            try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: readonlyPath.path)
+            let readonly: any FWNativeContent
+            switch source.pathExtension {
+            case "pdf": readonly = try await FWPDFContent.open(url: readonlyPath)
+            case "csv": readonly = try await FWCSVContent.open(url: readonlyPath)
+            default: readonly = try await FWImageContent.open(url: readonlyPath)
+            }
+            try expect(readonly.isReadOnly && readonly.canFind == (source.pathExtension == "pdf") && !readonly.canUndo && !readonly.canRedo,
+                       "Read-only media and CSV must advertise only supported non-mutating commands")
+            try await readonly.close()
+        }
     }
     @MainActor static func mutation(_ content: NSViewController, _ body: () throws -> Void) rethrows {
         content.undoManager?.groupsByEvent = false

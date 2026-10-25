@@ -8,12 +8,16 @@ final class FWBinaryState {
     private(set) var data: Data
     private var savedData: Data
     private var fileState: FileSaveState?
+    let maximumBytes: Int
     private var work: Work?
     private(set) var isClosed = false
     var onChange: (() -> Void)?
 
-    init(data: Data, fileState: FileSaveState? = nil) {
+    init(data: Data, fileState: FileSaveState? = nil, maximumBytes: Int = SafeFileIO.maximumMediaBytes) throws {
+        precondition(maximumBytes > 0 && maximumBytes < Int.max)
+        guard data.count <= maximumBytes else { throw DocumentIOError.fileTooLarge(limitBytes: maximumBytes) }
         self.data = data
+        self.maximumBytes = maximumBytes
         savedData = fileState == nil ? Data() : data
         self.fileState = fileState
     }
@@ -28,6 +32,7 @@ final class FWBinaryState {
         try requireOpen()
         guard work == nil || work == .saving else { throw DocumentSessionError.busy }
         if isReadOnly, let path { throw DocumentIOError.readOnly(path) }
+        try validateSize(data)
         self.data = data
         onChange?()
     }
@@ -39,7 +44,10 @@ final class FWBinaryState {
         work = .transforming
         onChange?()
         defer { work = nil; onChange?() }
-        data = try await Task.detached(priority: .userInitiated) { try operation(snapshot) }.value
+        let result = try await Task.detached(priority: .userInitiated) { try operation(snapshot) }.value
+        // 先校验再提交，失败时不推进内容/保存基线，也不触发控制器注册新的撤销项。
+        try validateSize(result)
+        data = result
     }
 
     @discardableResult
@@ -50,12 +58,14 @@ final class FWBinaryState {
         let snapshot = data
         let previous = adoptDestination ? fileState : nil
         let replacesSource = target.standardizedFileURL == path?.standardizedFileURL
+        let maximumBytes = self.maximumBytes
         work = .saving
         onChange?()
         defer { work = nil; onChange?() }
         let saved = try await Task.detached(priority: .userInitiated) {
             let encoded = try encode(snapshot)
-            let fileState = try SafeFileIO.save(encoded, previous: previous, to: target, overwriteExternalChanges: overwrite)
+            let fileState = try SafeFileIO.save(encoded, previous: previous, to: target, maximumBytes: maximumBytes,
+                                              overwriteExternalChanges: overwrite)
             return (state: fileState, data: encoded)
         }.value
         // 导出副本不改变当前路径；明确导出覆盖当前源文件时更新指纹，避免下一次保存误报自身写入冲突。
@@ -74,8 +84,9 @@ final class FWBinaryState {
         work = .reloading
         onChange?()
         defer { work = nil; onChange?() }
+        let maximumBytes = self.maximumBytes
         let loaded = try await Task.detached(priority: .userInitiated) {
-            let result = try SafeFileIO.open(url: path)
+            let result = try SafeFileIO.open(url: path, maximumBytes: maximumBytes)
             try validate(result.data)
             return result
         }.value
@@ -100,6 +111,10 @@ final class FWBinaryState {
     private func requireOpen() throws {
         guard !isClosed else { throw DocumentSessionError.closed }
     }
+
+    private func validateSize(_ data: Data) throws {
+        guard data.count <= maximumBytes else { throw DocumentIOError.fileTooLarge(limitBytes: maximumBytes) }
+    }
 }
 
 @MainActor
@@ -107,6 +122,9 @@ enum FWMediaUI {
     static func show(_ error: Error, in window: NSWindow?) {
         if error is CancellationError { return }
         let alert = NSAlert(error: error)
+        if case DocumentIOError.fileTooLarge = error {
+            alert.informativeText += "\n请减少本次合并或追加的文件，拆分处理后重试。原编辑内容保持不变。"
+        }
         if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
     }
 

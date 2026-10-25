@@ -3,7 +3,7 @@
 审查日期：2026-10-25（Asia/Shanghai）  
 代码基线：`main`，提交 `00a4d5e`；开始审查时工作区干净。  
 范围：Swift 浏览及文件操作、原生文档宿主、文本/CSV/PDF/图片编辑、本地 JavaScript 资源、ONLYOFFICE 集成和构建发布脚本。  
-交付性质：审查与后续任务清单，并跟踪优先问题修复。**R1、R2、R3 已修复并发布构建 6；R4、R5 已完成后续源码修复与回归。** 前三项见第 9–11 节，编辑资源和打包门禁见第 12 节。R6/R7、性能优化及功能候选仍待处理。
+交付性质：审查与后续任务清单，并跟踪优先问题修复。**R1–R3 已发布构建 6，R4/R5 已发布构建 7；R6/R7 和系统另存修复已完成构建 8 本机验收。** 前三项见第 9–11 节，编辑资源和打包门禁见第 12–13 节，媒体边界和菜单能力见第 14 节，构建 8 的系统面板、安装及公开状态见第 15 节。性能优化及功能候选仍待处理。
 
 ## 1. 结论与优先级
 
@@ -96,7 +96,7 @@
 
 ### R6 · P2 · PDF 变换可能产生当前保存层无法保存的结果
 
-**状态：边界风险，未执行超过 256 MiB 的大文件实验。**
+**当前状态：已补齐编辑缓冲区输入/结果上限、批量累计读取预算及回归，见第 14 节。使用小阈值覆盖真实序列化和状态事务；尚未执行超过 256 MiB 的实机压力测试。以下保留审查基线的风险证据。**
 
 - 触发：合并多份各自低于 256 MiB 的 PDF，或追加多张图片后，输出超过 256 MiB。
 - 原因：每份输入有大小上限，`FWBinaryState.transform/replace` 接收结果时没有输出上限检查；PDF 序列化只检查非空。后续保存层统一拒绝大于 256 MiB 的数据。
@@ -109,7 +109,7 @@
 
 ### R7 · P2 · 查找菜单没有按文档实际能力启用
 
-**状态：代码确认。**
+**当前状态：已按文档能力启用查找、撤销、重做，并补真实 WebKit/媒体会话回归，见第 14 节。CSV 查找仍未实现，菜单现为禁用。以下保留审查基线的证据。**
 
 - CSV 没有实现 `find()`，沿用协议的空实现；菜单只检查“有原生文档且不忙”，仍显示可用。
 - 图片及其他未实现查找的原生内容也应按能力处理；撤销/重做的菜单启用条件同样较粗。
@@ -541,3 +541,74 @@ R4/R5 已按用户要求重新构建为 v0.1.2 构建 7，并安装至 `/Applica
 修复提交 `e58d73e` 及标签 `v0.1.2-build7` 已推送，预览 Release 已公开；README 下载指向本次 ZIP 与配套 SHA256SUMS.txt。ZIP 为 793,603,803 字节，SHA-256：`c478d8109873333c0c7f3e5f5c6678cd79aef8b9945ea17e6bb508377a522d9a`。CRC、6,877 项解压清单、普通文件字节/权限、链接目标、严格签名均通过；仅 CEF 根链接的已知权限归一差异有单独记录。解压后的应用再次通过新静态门禁与禁网真实运行，退出 0，GitHub 两个附件大小及摘要一致。
 
 发布后已将 5 个构建 6 旧应用副本移入废纸篓，保留构建 7 及历史 ZIP，不清理用户文档或偏好。日常启动已确认运行 `/Applications/FileDeck.app` 的构建 7。清理及发布证据：`archive-verification.json`、`publication-checks.json`、`release-after.json`、`old-app-cleanup.json`、`normal-launch.json` 和 `extracted-smoke/`，均位于本节上述构建 7 证据目录。构建 6 远程 Release 保留用于回退。
+
+## 14. 媒体变换边界与菜单能力修复（2026-10-25）
+
+### 14.1 R6：拒绝无法保存的编辑结果
+
+`FWBinaryState` 的初始化、同步替换、异步变换结果、重新读取和编码保存使用同一上限，默认仍为 `SafeFileIO.maximumMediaBytes`（256 MiB）。变换先生成候选结果，大小合法才提交到编辑缓冲区；超限或处理失败不推进数据、路径和保存基线，控制器也不注册新撤销项。保存编码结果仍经同一上限的安全写入，不能绕过既有原子保存及外部冲突检查。
+
+PDF 合并、追加图片、新建图片 PDF 改用 `SafeFileIO.openMediaBatch` 按剩余预算逐份读取，累计包括当前 PDF 缓冲区；超限时停止读取后续文件。这是保守的输入预算，即使合并后可能压缩到较小体积，也不会先读入超预算的一批输入。追加图片还检查中间 PDF 大小，再由缓冲区检查最终合并结果。超限对话框建议减少输入、拆分处理，原编辑内容保留。
+
+回归使用可注入的小阈值与真实文件/PDF 序列化，覆盖：超限初始化/同步替换/异步变换/保存编码、恰好到达上限仍可保存、干净和已修改会话、保留原字节与撤销/重做分支、正常合并/追加及撤销，以及累计输入超过预算后不再访问后续文件。原 256 MiB 阈值没有提高。
+
+**边界：**累计预算约束压缩输入字节与最终编辑缓冲区；PDFKit/ImageIO 解码、序列化、旧快照和撤销历史仍可能同时占用内存，不是进程总内存硬上限。本轮未执行超过 256 MiB 的真实压力测试，也未实施 O3 的历史字节预算或后台图像性能改造。
+
+### 14.2 R7：按实际能力启用菜单
+
+`FWNativeContent` 增加 `canFind/canUndo/canRedo`，默认关闭未实现的命令。CSV、图片和 PDF 的撤销/重做来自真实 UndoManager；文本来自现有 CodeMirror change/state 消息的历史标志，重新读取或重建编辑器时清空旧历史标志。Swift 会话仍独立计算脏状态，不信任页面的 dirty 布尔值。
+
+`FWDocumentHost` 同时检查宿主操作状态与内容能力，标准 responder 校验和 Objective-C++ 协调器菜单消费同一状态；直接命令调用也检查能力，避免禁用期间消耗撤销历史。只读文本/PDF 可查找；CSV、图片、Quick Look 未实现的查找禁用。加载、保存、故障和关闭时禁用相应命令，重新读取后按新历史恢复。
+
+真实回归覆盖 CSV/图片/PDF 的空历史、编辑、撤销、重做、保存忙碌、重新读取和关闭，并核对三种只读文件及 Quick Look。WebKit 专项通过真实输入/撤销/重做验证宿主和 responder 菜单，不以硬编码能力值替代真实编辑历史。CSV 搜索定位及未命中反馈仍作为 F7 功能候选，不在本次实现。
+
+### 14.3 验证与当前交付边界
+
+- Swift 全量 145 项通过；累计输入预算的 3 项保存层测试另行定向通过。
+- Python 构建工具 155 项通过、0 跳过。
+- 原生媒体/CSV 11 组真实会话回归通过，包含原有 JPEG 保真与保存期间继续编辑场景。
+- 真实 WebKit 菜单专项 6 项断言通过，报告：`build/modal-document-tests/run.6ENvSn/fixtures/report.json`。
+- 不含系统远程另存面板确认的文档分组 42 项断言通过，包含上述菜单场景，覆盖结构化预览、保存/关闭保护和草稿恢复；报告：`build/modal-document-tests/run.7Pacqw/fixtures/report.json`。两组有重叠，不合计为 48 项独立场景。
+- 完整原生 Debug 集成编译、ARM64 和严格签名检查通过，日志：`build/r6-r7-native-build.log`，包含 Swift 导出属性与 Objective-C++ 菜单调用的真实编译。
+
+完整 `test-modal-documents.sh` 曾在“已删除文件→系统另存面板→投递 Return 确认”处超时，进程退出 1、报告 passed=false：`build/modal-document-tests/run.G7uXBt/fixtures/report.json`。面板出现及确认前保护已通过，但没有获得远程系统面板完成回调；不能计为系统另存成功。其余分组通过不替代这项端到端验收，也不把构建 6 的历史面板结果当作本轮通过。
+
+上述为源码阶段历史结果；系统确认及明确另存的根因现已修复，完整回归和构建 8 实机面板验收见第 15 节，原失败报告保留。
+
+本轮日志前缀为 `build/r6-r7-`，重跑入口：
+
+```sh
+CLANG_MODULE_CACHE_PATH="$PWD/.build/ModuleCache" SWIFTPM_MODULECACHE_OVERRIDE="$PWD/.build/ModuleCache" swift test --disable-sandbox --cache-path "$PWD/.build/cache"
+python3 -B -m unittest discover -s Tests/BuildToolsTests -v
+python3 -B scripts/onlyoffice/test_native_content.py
+FW_MODAL_DOCUMENT_TEST_CASE=menu-capabilities bash scripts/test-modal-documents.sh
+FW_MODAL_DOCUMENT_TEST_CASE=non-panel bash scripts/test-modal-documents.sh
+python3 -B scripts/onlyoffice/build.py --phase app --configuration Debug --jobs 4
+```
+
+源码修复和文档留在当前工作区；本轮未提交、推送或发布，不替换 `/Applications/FileDeck.app` 与 README 的构建 7 下载入口。下一次发布需要对新安装包补齐系统另存面板确认及最终离线验收。无 SQL、用户配置、Redis/MQ 或对外 API 迁移。
+
+收尾按 simplify Standard / bugfix 检查影响范围、仓库约定、代码质量及批量读取效率；复用既有保存上限、错误类型和历史桥接，没有引入第二套保存流程或修改编辑资源产物。未发现需要继续扩大的清理项；最终媒体、菜单与保存保护回归及原生集成编译覆盖本次改动路径。
+
+## 15. 系统另存确认修复与构建 8 验收（2026-10-25）
+
+### 15.1 根因与修复
+
+问题包含两个环节：本进程投递的 Return 不能可靠确认远程系统保存面板，内部调用 `NSSavePanel.ok` 同样发生阻塞；改用外部真实 AXPress 后，又确认保存层将“明确另存到已删除原路径”误判为普通原路径冲突。
+
+`SafeFileIO.save` 现在仅在调用方明确传入目的地、目标是原路径且该文件仍不存在时允许重建；普通保存仍报冲突。已存在的外部版本、符号链接变化、写入期间竞态检查和排他重命名保护保留。新增真实 I/O 回归同时覆盖普通保存拒绝、明确重建成功、成功后指纹推进和外部版本保护。
+
+原生回归通过 `SystemSavePanelDriver.swift` 外部按系统保存按钮；助手核对本次随机令牌、PID/应用/可执行文件、面板标题及临时文件名，错误令牌必须失败。测试只报告 checkpoint，不接受回传 URL 或完成结果；真实产品流程必须收到系统回调并核对落盘。无 Accessibility 权限时明确失败，不静默跳过。该助手未接入产品日常构建。
+
+### 15.2 重建与本机验证
+
+- 系统另存专项 3 项断言通过：`build/modal-document-tests/run.j0v7SW/fixtures/report.json`；完整文档回归 45 项断言通过：`build/modal-document-tests/run.wdRbhZ/fixtures/report.json`。包含真实系统另存确认、取消保护、权限/外部冲突、草稿恢复和菜单状态，两个报告有重叠。
+- 从锁安装依赖及资源只读重建比较通过；23 项 Node、155 项 Python（0 跳过）、146 项 Swift 和 11 组原生媒体/CSV 会话回归通过。
+- 145 个源码/资源/脚本输入冻结后完成原生 Debug 重建；ARM64、签名、源包及暂存包门禁通过，打包明确版本 0.1.2、构建号 8。
+- 2026-10-25 17:06 正常退出旧版后安装，5,649 个普通文件和 124 个符号链接与构建清单一致；安装后再次执行静态门禁通过。
+- 安装副本禁网完成 DOCX/XLSX/PPTX 编辑、保存、重开、混合文本/PDF、窗口关闭/退出保护，退出 0。真实恢复草稿面板由外部 AX 实际取消一次、保存一次，来源原字节、完整草稿、选择 URL/实际保存路径、脏状态及对象释放均通过。
+- 主程序 SHA-256：`b1ded42612999ead526ee400666ada649cbf534c0f3f581a4c3da9677a9dab6b`；编辑资源 manifest：`b20c89827accf83bc812d45d67e6683925d8d9fcfaed4f9a7b80ad172d8bfe13`。
+
+证据目录：`build/releases/v0.1.2-build8/`，含 `source-inputs.json`、`build-result.json`、`installation.json`、`recovery-panel-ax.json` 及阶段日志；安装运行报告为 `installed-smoke/fw-office-smoke-中文 路径-8i_kt4rc/verification.json`，独立检查全部恢复字段通过。安装静态报告：`build/onlyoffice/build8-installed-verification.json`。
+
+构建 8 的 ZIP、远程附件及清理结果随最终发布登记；此前构建 7 Release 保留用于回退。未新增 SQL、配置、Redis/MQ 或对外 API 迁移，临时签名、压力及 WebKit 恢复边界见[构建 8 发布说明](release-build8.md)。

@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 /// Objective-C++ 只接触此门面；面板与异步保存始终捕获创建它们的文档，不能再次查询当前标签。
 @MainActor
 @objc(FWDocumentHost)
-public final class FWDocumentHost: NSViewController {
+public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations {
     private let content: any FWNativeContent
     private let notice: String?
     private var actionBusy = false { didSet { stateDidChange?() } }
@@ -22,6 +22,9 @@ public final class FWDocumentHost: NSViewController {
     @objc public var canSave: Bool { !busy && content.availableOperations.contains(.save) }
     @objc public var canSaveAs: Bool { !busy && content.availableOperations.contains(.saveAs) }
     @objc public var canExport: Bool { !busy && content.availableOperations.contains(.export) }
+    @objc public var canFind: Bool { !closed && !busy && content.canFind }
+    @objc public var canUndo: Bool { !closed && !busy && content.canUndo }
+    @objc public var canRedo: Bool { !closed && !busy && content.canRedo }
     @objc public var isEditing: Bool { (content as? FWTextContent)?.isEditing ?? !content.isReadOnly }
     @objc public var canBeginEditing: Bool { !busy && !closed && (content as? FWTextContent)?.canBeginEditing == true }
     @objc public var statusText: String { lastError ?? (content as? FWTextContent)?.statusText ?? (readOnly ? "只读" : modified ? "未保存" : "已保存") }
@@ -407,9 +410,19 @@ public final class FWDocumentHost: NSViewController {
         _ = await alert("操作未完成", detail: (error as NSError).localizedDescription, buttons: ["知道了"])
     }
 
-    @objc public func undo() { content.undo() }
-    @objc public func redo() { content.redo() }
-    @objc public func find() { content.find() }
+    @objc public func undo() { if canUndo { content.undo() } }
+    @objc public func redo() { if canRedo { content.redo() } }
+    @objc public func find() { if canFind { content.find() } }
+
+    // 标准 responder 命令也走同一能力判断，防止快捷键绕过协调器菜单的启用状态。
+    public func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        switch item.action {
+        case #selector(undoFromResponder(_:)): return canUndo
+        case #selector(redoFromResponder(_:)): return canRedo
+        case #selector(findFromResponder(_:)): return canFind
+        default: return item.action.map { responds(to: $0) } ?? false
+        }
+    }
 
     @objc(smokeReplaceText:completion:)
     public func smokeReplaceText(_ text: String, completion: @escaping (NSError?) -> Void) {

@@ -8,6 +8,9 @@ protocol FWNativeContent: DocumentSession {
     var kind: WorkbenchFileKind { get }
     var onStateChanged: (() -> Void)? { get set }
     func reload(discardChanges: Bool) async throws
+    var canFind: Bool { get }
+    var canUndo: Bool { get }
+    var canRedo: Bool { get }
     func undo()
     func redo()
     func find()
@@ -19,6 +22,10 @@ protocol FWNativeContent: DocumentSession {
 }
 
 extension FWNativeContent {
+    // 未实现的命令默认不可用，不能仅因标签存在就把空实现显示为可点击菜单。
+    var canFind: Bool { false }
+    var canUndo: Bool { false }
+    var canRedo: Bool { false }
     func undo() {}
     func redo() {}
     func find() {}
