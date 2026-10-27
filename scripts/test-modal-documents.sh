@@ -20,7 +20,7 @@ Path(sys.argv[1]).write_bytes(plistlib.dumps({
     "CFBundlePackageType": "APPL", "NSPrincipalClass": "NSApplication", "LSMinimumSystemVersion": "14.0"
 }))
 PY
-for name in DocumentSession TextDocumentSession DocumentIO SafeFileIO FileCapabilities FileSystem CSVDocument MediaOperations TextPreviewLoader; do
+for name in DraftRecoveryStore DocumentSession TextDocumentSession DocumentIO SafeFileIO FileCapabilities FileSystem CSVDocument MediaOperations TextPreviewLoader; do
     cp "$PROJECT_DIR/Sources/FileWorkbench/$name.swift" "$RUN_DIR/sources/"
 done
 for name in FWNativeContent FWDocumentHost FWTextContent FWCSVContent FWPDFContent FWImageContent FWQuickLookContent FWBinaryState; do
@@ -55,6 +55,7 @@ import sys
 import time
 binary, directory, driver = map(Path, sys.argv[1:])
 process = subprocess.Popen([str(binary), str(directory)], start_new_session=True)
+(directory.parent / "process.pid").write_text(str(process.pid) + "\n")
 deadline = time.monotonic() + 100
 pressed = False
 try:

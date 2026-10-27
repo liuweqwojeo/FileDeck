@@ -63,12 +63,14 @@ enum TextPreviewLoader {
         "kt", "kts", "swift", "m", "mm", "h", "hpp", "c", "cc", "cpp", "cs", "go",
         "rs", "sql", "graphql", "gql", "proto", "dart", "r", "lua", "pl", "ex", "exs",
         "erl", "hrl", "clj", "cljs", "edn", "scala", "sbt", "gradle", "tex", "bib",
-        "ipynb", "gitignore", "gitattributes", "editorconfig", "dockerignore", "lock"
+        "ipynb", "gitignore", "gitattributes", "editorconfig", "dockerignore", "lock",
+        "sass", "mts", "cts", "cxx", "c++", "hh", "hxx", "h++", "pyw", "pyi", "phtml", "pm", "groovy", "jl",
+        "ps1", "psm1", "psd1", "fs", "fsx", "fsi", "vb", "cljc"
     ]
 
     static func isTextFile(_ url: URL) -> Bool {
         let name = url.lastPathComponent.lowercased()
-        if ["readme", "license", "licence", "notice", "makefile", "dockerfile", "gemfile", "podfile"].contains(name) {
+        if ["readme", "license", "licence", "notice", "makefile", "dockerfile", "gemfile", "podfile", "rakefile", "jenkinsfile"].contains(name) {
             return true
         }
         if name.hasPrefix(".env") || [".gitignore", ".gitattributes", ".editorconfig", ".dockerignore"].contains(name) {

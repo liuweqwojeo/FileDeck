@@ -10,7 +10,7 @@ final class FWImageContent: NSViewController, FWNativeContent {
     var path: URL? { state.path }
     var isModified: Bool { state.isModified }
     var isReadOnly: Bool { state.isReadOnly }
-    var isBusy: Bool { state.isBusy }
+    var isBusy: Bool { state.isBusy || processing }
     var canUndo: Bool { state.canEdit && !isBusy && history.canUndo }
     var canRedo: Bool { state.canEdit && !isBusy && history.canRedo }
     var onStateChanged: (() -> Void)?
@@ -18,7 +18,7 @@ final class FWImageContent: NSViewController, FWNativeContent {
     var availableOperations: Set<FileOperation> {
         guard !state.isClosed else { return [] }
         var result: Set<FileOperation> = [.open]
-        if state.canEdit { result.insert(.edit) }
+        if state.canEdit && !processing { result.insert(.edit) }
         if !isBusy {
             result.formUnion([.saveAs, .export])
             if !isReadOnly && kind != .heic { result.insert(.save) }
@@ -30,33 +30,55 @@ final class FWImageContent: NSViewController, FWNativeContent {
     private var encodedSnapshot: (source: Data, format: WorkbenchFileKind, output: Data)?
     private var currentKind: WorkbenchFileKind
     private var pixels: CGImage
+    private var pixelStorageBytes: Int
+    private var processing = false
     private let imageView = NSImageView()
     private let status = NSTextField(labelWithString: "")
-    private let history = UndoManager()
+    private let history: FWMediaHistory
     private var editButtons: [NSButton] = []
-    override var undoManager: UndoManager? { history }
+    override var undoManager: UndoManager? { history.manager }
 
-    private init(data: Data, fileState: FileSaveState, pixels: CGImage, kind: WorkbenchFileKind) throws {
-        state = try FWBinaryState(data: data, fileState: fileState)
+    private struct Snapshot: Sendable {
+        let data: Data
+        let pixels: CGImage
+        let pixelStorageBytes: Int
+        var historyBytes: Int { data.count + pixelStorageBytes }
+    }
+
+    private init(data: Data, fileState: FileSaveState?, pixels: CGImage, kind: WorkbenchFileKind,
+                 maximumBytes: Int, historyMaximumBytes: Int) throws {
+        state = try FWBinaryState(data: data, fileState: fileState, maximumBytes: maximumBytes)
+        history = FWMediaHistory(maximumBytes: historyMaximumBytes)
         self.pixels = pixels
+        pixelStorageBytes = pixels.bytesPerRow * pixels.height
         currentKind = kind
         super.init(nibName: nil, bundle: nil)
-        history.levelsOfUndo = 12
         state.onChange = { [weak self] in self?.refreshState() }
     }
     required init?(coder: NSCoder) { fatalError("请使用 open(url:)") }
 
-    static func open(url: URL) async throws -> FWImageContent {
+    var recoveryCapture: DraftRecoveryCapture? {
+        guard !state.isClosed, isModified else { return nil }
+        return DraftRecoveryCapture(kind: kind, originalURL: path, title: contentTitle, body: .binary(state.data))
+    }
+    static func recover(_ draft: DraftRecoveryDocument) async throws -> FWImageContent {
+        let data = draft.data
+        let pixels = try await Task.detached(priority: .userInitiated) { try ImageOperations.read(data) }.value
+        let content = try FWImageContent(data: data, fileState: nil, pixels: pixels, kind: Self.detectKind(data),
+            maximumBytes: SafeFileIO.maximumMediaBytes, historyMaximumBytes: FWMediaHistory.defaultMaximumBytes)
+        content.state.markRecovered()
+        return content
+    }
+
+    static func open(url: URL, maximumBytes: Int = SafeFileIO.maximumMediaBytes,
+                     historyMaximumBytes: Int = FWMediaHistory.defaultMaximumBytes) async throws -> FWImageContent {
         let loaded = try await Task.detached(priority: .userInitiated) {
-            let result = try SafeFileIO.open(url: url)
-            _ = try ImageOperations.read(result.data)
-            return result
+            let result = try SafeFileIO.open(url: url, maximumBytes: maximumBytes)
+            return (result, try ImageOperations.read(result.data), Self.detectKind(result.data))
         }.value
-        let source = CGImageSourceCreateWithData(loaded.data as CFData, nil)!
-        let type = CGImageSourceGetType(source) as String?
-        let kind: WorkbenchFileKind = type == UTType.png.identifier ? .png
-            : (type == UTType.jpeg.identifier ? .jpeg : .heic)
-        return try FWImageContent(data: loaded.data, fileState: loaded.state, pixels: ImageOperations.read(loaded.data), kind: kind)
+        // SDK 将不可变 CGImage 声明为 Sendable；只把像素传回主 actor，NSImage/视图仍在主线程创建。
+        return try FWImageContent(data: loaded.0.data, fileState: loaded.0.state, pixels: loaded.1, kind: loaded.2,
+                                  maximumBytes: maximumBytes, historyMaximumBytes: historyMaximumBytes)
     }
 
     override func loadView() {
@@ -107,21 +129,29 @@ final class FWImageContent: NSViewController, FWNativeContent {
     }
 
     func reload(discardChanges: Bool) async throws {
-        try await state.reload(discardChanges: discardChanges) { _ = try ImageOperations.read($0) }
+        guard !processing else { throw DocumentSessionError.busy }
+        processing = true
+        defer { processing = false; refreshState() }
+        pixels = try await state.reload(discardChanges: discardChanges) { try ImageOperations.read($0) }
+        pixelStorageBytes = pixels.bytesPerRow * pixels.height
         encodedSnapshot = nil
-        pixels = try ImageOperations.read(state.data)
         currentKind = Self.detectKind(state.data)
-        history.removeAllActions()
+        history.removeAll()
         if isViewLoaded { refreshImage() }
+        refreshState()
     }
 
-    func close(discardChanges: Bool) async throws { try state.close(discardChanges: discardChanges) }
+    func close(discardChanges: Bool) async throws {
+        guard !processing else { throw DocumentSessionError.busy }
+        try state.close(discardChanges: discardChanges); history.removeAll()
+    }
     func undo() { if canUndo { history.undo() } }
     func redo() { if canRedo { history.redo() } }
 
     private func persist(to destination: URL?, format: WorkbenchFileKind, overwrite: Bool, adoptDestination: Bool = true) async throws {
+        guard !processing else { throw DocumentSessionError.busy }
         let cached = encodedSnapshot
-        let encoder = Self.encoder(for: format)
+        let encoder = Self.encoder(for: format, pixels: pixels)
         let replacesSource = destination?.standardizedFileURL == path?.standardizedFileURL
         let saved = try await state.save(to: destination, overwrite: overwrite, adoptDestination: adoptDestination) { data in
             if let cached, cached.format == format, cached.source == data { return cached.output }
@@ -132,49 +162,73 @@ final class FWImageContent: NSViewController, FWNativeContent {
         if adoptDestination || replacesSource { encodedSnapshot = (saved.source, format, saved.encoded) }
     }
 
-    @objc private func turnLeft() { perform { try rotate(clockwise: false) } }
-    @objc private func turnRight() { perform { try rotate(clockwise: true) } }
-    func rotate(clockwise: Bool) throws {
-        try install(ImageOperations.export(ImageOperations.rotate90(pixels, clockwise: clockwise), format: .png,
-                                           preservingMetadataFrom: state.data), name: "旋转图片")
+    @objc private func turnLeft() { performAsync { try await self.rotate(clockwise: false) } }
+    @objc private func turnRight() { performAsync { try await self.rotate(clockwise: true) } }
+    func rotate(clockwise: Bool) async throws {
+        try await transform(name: "旋转图片") { try ImageOperations.rotate90($0, clockwise: clockwise) }
+    }
+    func crop(pixelRect: CGRect) async throws {
+        try await transform(name: "裁剪图片", preservesBacking: true) { try ImageOperations.crop($0, pixelRect: pixelRect) }
+    }
+    func resize(width: Int, height: Int) async throws {
+        try await transform(name: "调整图片尺寸") { try ImageOperations.resize($0, width: width, height: height) }
     }
 
     @objc private func cropImage() {
-        guard state.canEdit,
+        guard state.canEdit, !processing,
               let values = FWMediaUI.fields(title: "裁剪图片（左上角为原点）", labels: ["X", "Y", "宽度（像素）", "高度（像素）"],
                                             values: ["0", "0", "\(pixels.width)", "\(pixels.height)"]) else { return }
-        perform {
+        performAsync {
             let numbers = values.compactMap(Double.init)
             guard numbers.count == 4 else { throw MediaOperationError.invalidParameter("请输入整数像素坐标与尺寸。") }
             let rect = CGRect(x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3])
-            try install(ImageOperations.export(ImageOperations.crop(pixels, pixelRect: rect), format: .png,
-                                               preservingMetadataFrom: state.data), name: "裁剪图片")
+            try await self.crop(pixelRect: rect)
         }
     }
 
     @objc private func resizeImage() {
-        guard state.canEdit,
+        guard state.canEdit, !processing,
               let values = FWMediaUI.fields(title: "调整图片尺寸", labels: ["宽度（像素）", "高度（像素）"],
                                             values: ["\(pixels.width)", "\(pixels.height)"]) else { return }
-        perform {
+        performAsync {
             guard let width = Int(values[0]), let height = Int(values[1]) else {
                 throw MediaOperationError.invalidParameter("请输入整数像素尺寸。")
             }
-            try install(ImageOperations.export(ImageOperations.resize(pixels, width: width, height: height), format: .png,
-                                               preservingMetadataFrom: state.data), name: "调整图片尺寸")
+            try await self.resize(width: width, height: height)
         }
     }
 
-    private func install(_ data: Data, name: String) throws {
-        let image = try ImageOperations.read(data)
-        let previous = state.data
-        try state.replace(data)
-        history.registerUndo(withTarget: self) { target in
-            MainActor.assumeIsolated { target.perform { try target.install(previous, name: name) } }
-        }
-        history.setActionName(name)
-        pixels = image
+    private func install(_ snapshot: Snapshot, name: String) throws {
+        let previous = Snapshot(data: state.data, pixels: pixels, pixelStorageBytes: pixelStorageBytes)
+        try state.replace(snapshot.data)
+        pixels = snapshot.pixels
+        pixelStorageBytes = snapshot.pixelStorageBytes
+        registerUndo(previous, name: name)
         if isViewLoaded { refreshImage() }
+        refreshState()
+    }
+    private func registerUndo(_ snapshot: Snapshot, name: String) {
+        history.register(bytes: snapshot.historyBytes, name: name) { [weak self] in
+            self?.perform { try self?.install(snapshot, name: name) }
+        }
+    }
+    private func transform(name: String, preservesBacking: Bool = false, operation: @escaping @Sendable (CGImage) throws -> CGImage) async throws {
+        guard !processing else { throw DocumentSessionError.busy }
+        // 一直占用到像素和撤销项安装完毕，避免底层字节先完成时新动作读到旧显示像素。
+        processing = true
+        defer { processing = false; refreshState() }
+        let previous = Snapshot(data: state.data, pixels: pixels, pixelStorageBytes: pixelStorageBytes)
+        let image = try await state.transformWithResult(allowDuringSave: true) { data in
+            let output = try operation(previous.pixels)
+            return (try ImageOperations.export(output, format: .png, preservingMetadataFrom: data), output)
+        }
+        pixels = image
+        // CGImage 裁剪可能共享原像素 backing，不能按裁剪后的小尺寸低估撤销保留量。
+        pixelStorageBytes = preservesBacking ? max(previous.pixelStorageBytes, image.bytesPerRow * image.height)
+            : image.bytesPerRow * image.height
+        registerUndo(previous, name: name)
+        if isViewLoaded { refreshImage() }
+        refreshState()
     }
 
     private func refreshImage() {
@@ -185,7 +239,7 @@ final class FWImageContent: NSViewController, FWNativeContent {
     }
 
     private func refreshState() {
-        for button in editButtons { button.isEnabled = state.canEdit }
+        for button in editButtons { button.isEnabled = state.canEdit && !processing }
         status.stringValue = "\(pixels.width) × \(pixels.height) 像素 · \(kind.rawValue.uppercased())"
             + (kind == .heic ? " · 修改后请另存为 PNG/JPEG" : "") + (isBusy ? " · 正在处理…" : "")
         onStateChanged?()
@@ -195,19 +249,23 @@ final class FWImageContent: NSViewController, FWNativeContent {
         do { try operation() } catch { FWMediaUI.show(error, in: view.window) }
     }
 
-    private static func detectKind(_ data: Data) -> WorkbenchFileKind {
+    private func performAsync(_ operation: @escaping @MainActor () async throws -> Void) {
+        Task { do { try await operation() } catch { FWMediaUI.show(error, in: view.window) } }
+    }
+
+    nonisolated private static func detectKind(_ data: Data) -> WorkbenchFileKind {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return .heic }
         let type = CGImageSourceGetType(source) as String?
         return type == UTType.png.identifier ? .png : (type == UTType.jpeg.identifier ? .jpeg : .heic)
     }
 
-    private static func encoder(for format: WorkbenchFileKind) -> @Sendable (Data) throws -> Data {
+    private static func encoder(for format: WorkbenchFileKind, pixels: CGImage) -> @Sendable (Data) throws -> Data {
         { data in
-            if format == .pdf { return try PDFOperations.imagesToPDF([data]) }
+            if format == .pdf { return try PDFOperations.imageToPDF(pixels) }
             // 原始文件和撤销恢复的原始快照保留全部字节；仍由 FWBinaryState 执行冲突检查及原子写入。
             let type = CGImageSourceCreateWithData(data as CFData, nil).flatMap(CGImageSourceGetType) as String?
             if type == (format == .png ? UTType.png.identifier : UTType.jpeg.identifier) { return data }
-            return try ImageOperations.export(ImageOperations.read(data), format: format == .png ? .png : .jpeg(quality: 0.92),
+            return try ImageOperations.export(pixels, format: format == .png ? .png : .jpeg(quality: 0.92),
                                               preservingMetadataFrom: data)
         }
     }

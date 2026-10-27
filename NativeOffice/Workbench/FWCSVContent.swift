@@ -11,7 +11,7 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
     var isBusy: Bool { work != nil }
     var canUndo: Bool { canEdit && !isBusy && history.canUndo }
     var canRedo: Bool { canEdit && !isBusy && history.canRedo }
-    var isModified: Bool { !document.text.utf8.elementsEqual(savedText.utf8) || selectedEncoding != savedEncoding }
+    var isModified: Bool { recoveredUnsaved || textModified || selectedEncoding != savedEncoding }
     var onStateChanged: (() -> Void)?
     var availableOperations: Set<FileOperation> {
         guard !closed, work != .reloading else { return [] }
@@ -21,10 +21,16 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
         return result
     }
     private enum Work { case saving, reloading }
-    private struct Snapshot { let model: CSVDocument; let text: String; let encoding: TextFileEncoding }
+    private struct Snapshot { let model: CSVDocument; let originalText: String?; let encoding: TextFileEncoding }
     private var document: TextFileDocument
     private var model: CSVDocument
     private var savedText: String
+    // nil 表示正文由当前表格按既有规则生成；未修改原文仍保留可选引号等原始字节。
+    private var originalText: String?
+    private var recoveredUnsaved = false
+    private var textModified = false
+    private var savedSignature: CSVDocument.SerializationSignature?
+    private var revision: UInt64 = 0
     private var savedEncoding: TextFileEncoding
     private var selectedEncoding: TextFileEncoding
     private var work: Work?
@@ -43,12 +49,28 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
         self.document = document
         self.model = model
         savedText = document.text
+        originalText = document.text
+        savedSignature = model.serializationSignature
         savedEncoding = document.encoding
         selectedEncoding = document.encoding
         super.init(nibName: nil, bundle: nil)
         history.levelsOfUndo = 12
     }
     required init?(coder: NSCoder) { fatalError("请使用 open(url:) 或 create()") }
+
+    var recoveryCapture: DraftRecoveryCapture? {
+        guard !closed, isModified else { return nil }
+        return DraftRecoveryCapture(kind: kind, originalURL: path, title: contentTitle,
+                                    body: .csv(model, original: originalText, encoding: selectedEncoding))
+    }
+    static func recover(_ draft: DraftRecoveryDocument) throws -> FWCSVContent {
+        guard let text = String(data: draft.data, encoding: .utf8), let encoding = draft.header.encoding,
+              let raw = draft.header.delimiter, let delimiter = CSVDelimiter(rawValue: raw) else { throw DraftRecoveryError.invalidRecord }
+        let document = DocumentIO.create(text: text, encoding: encoding)
+        let content = try FWCSVContent(document: document, model: CSVDocument(text: text, delimiter: delimiter))
+        content.recoveredUnsaved = true
+        return content
+    }
 
     static func create() throws -> FWCSVContent {
         try FWCSVContent(document: DocumentIO.create(), model: CSVDocument())
@@ -126,6 +148,7 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
         return model.rows[row][column]
     }
     func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool { canEdit }
+    func tableViewSelectionDidChange(_ notification: Notification) { refreshState() }
     func tableView(_ tableView: NSTableView, setObjectValue object: Any?, for tableColumn: NSTableColumn?, row: Int) {
         guard let column = tableColumn.flatMap({ Int($0.identifier.rawValue) }), let text = object as? String else { return }
         perform { try setCell(text, row: row, column: column) }
@@ -135,7 +158,10 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
         guard model.rows.indices.contains(row), model.rows[row].indices.contains(column) else { throw CSVDocumentError.indexOutOfRange }
         // 仅结束编辑而未改动值时，不把原文可选引号规范化成另一份 CSV。
         guard !model.rows[row][column].utf8.elementsEqual(text.utf8) else { return }
-        try mutate(name: "编辑单元格") { try $0.setCell(text, row: row, column: column) }
+        let before = try model.cellSnapshot(row: row, column: column)
+        try installCell(CSVDocument.CellSnapshot(row: row, column: column, value: text,
+                                                 fieldCount: max(before.fieldCount, column + 1)),
+                        originalText: nil, name: "编辑单元格")
     }
     func appendRow() throws { try mutate(name: "添加行") { try $0.appendRow() } }
     func appendColumn() throws { try mutate(name: "添加列") { try $0.appendColumn() } }
@@ -167,18 +193,27 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
         try requireIdle()
         try commitCellEditor()
         let snapshot = document
+        let snapshotModel = model
+        let snapshotOriginal = originalText
+        let snapshotRevision = revision
         let outputEncoding = selectedEncoding
         work = .saving; refreshState()
         defer { work = nil; refreshState() }
         let saved = try await Task.detached(priority: .userInitiated) {
-            try DocumentIO.save(snapshot, to: destination,
+            var output = snapshot
+            output.text = try snapshotOriginal ?? snapshotModel.serialize()
+            return try DocumentIO.save(output, to: destination,
                                 encoding: outputEncoding == snapshot.encoding ? nil : outputEncoding,
                                 overwriteExternalChanges: overwrite)
         }.value
         // 推进磁盘指纹和保存基线，但保留异步写入期间的新单元格与编码选择。
-        let currentText = document.text
-        document = saved; document.text = currentText
+        document = saved
+        recoveredUnsaved = false
         savedText = saved.text; savedEncoding = outputEncoding
+        savedSignature = model.delimiter == snapshotModel.delimiter ? snapshotModel.serializationSignature
+            : (try? CSVDocument(text: savedText, delimiter: model.delimiter))?.serializationSignature
+        if revision == snapshotRevision { textModified = false }
+        else { updateModifiedState() }
     }
     private func reload(discardChanges: Bool, encoding: TextFileEncoding) async throws {
         try requireIdle()
@@ -192,7 +227,9 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
             let document = try DocumentIO.open(url: path, encoding: encoding)
             return (document, try CSVDocument(text: document.text, delimiter: delimiter))
         }.value
-        document = loaded.0; model = loaded.1; savedText = document.text
+        recoveredUnsaved = false
+        document = loaded.0; model = loaded.1; savedText = document.text; originalText = document.text
+        savedSignature = model.serializationSignature; textModified = false; revision &+= 1
         savedEncoding = document.encoding; selectedEncoding = document.encoding
         history.removeAllActions(); refreshTable()
     }
@@ -200,19 +237,55 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
         try requireEditable()
         var next = model
         try operation(&next)
-        let text = try next.serialize()
-        guard !text.utf8.elementsEqual(document.text.utf8) else { return }
-        try install(Snapshot(model: next, text: text, encoding: selectedEncoding), name: name)
+        guard next != model else { return }
+        try install(Snapshot(model: next, originalText: nil, encoding: selectedEncoding), name: name)
     }
     private func install(_ snapshot: Snapshot, name: String) throws {
         try requireEditable()
-        let previous = Snapshot(model: model, text: document.text, encoding: selectedEncoding)
-        model = snapshot.model; document.text = snapshot.text; selectedEncoding = snapshot.encoding
+        let previous = Snapshot(model: model, originalText: originalText, encoding: selectedEncoding)
+        let previousDelimiter = model.delimiter
+        model = snapshot.model; originalText = snapshot.originalText; selectedEncoding = snapshot.encoding
+        if previousDelimiter != model.delimiter {
+            savedSignature = (try? CSVDocument(text: savedText, delimiter: model.delimiter))?.serializationSignature
+        }
+        revision &+= 1
+        updateModifiedState()
         history.registerUndo(withTarget: self) { target in
             MainActor.assumeIsolated { target.perform { try target.install(previous, name: name) } }
         }
         history.setActionName(name)
         refreshTable()
+    }
+
+    /// 单格撤销只保存单元格值与短行字段数，不让每次编辑持有整张表并触发顶层数组复制。
+    private func installCell(_ cell: CSVDocument.CellSnapshot, originalText restoredText: String?, name: String) throws {
+        try requireEditable()
+        let previous = try model.cellSnapshot(row: cell.row, column: cell.column)
+        let previousOriginal = originalText
+        try model.restoreCell(cell)
+        originalText = restoredText
+        revision &+= 1
+        updateModifiedState()
+        history.registerUndo(withTarget: self) { target in
+            MainActor.assumeIsolated { target.perform { try target.installCell(previous, originalText: previousOriginal, name: name) } }
+        }
+        history.setActionName(name)
+        if isViewLoaded {
+            table.reloadData(forRowIndexes: IndexSet(integer: cell.row), columnIndexes: IndexSet(integer: cell.column))
+        }
+        refreshState()
+    }
+
+    private func currentText() throws -> String { try originalText ?? model.serialize() }
+
+    private func updateModifiedState() {
+        if let originalText { textModified = !originalText.utf8.elementsEqual(savedText.utf8) }
+        else if model.serializationSignature != savedSignature { textModified = true }
+        else {
+            // 快速签名只能证明不同；碰撞或用户改回原值时，必须逐字节确认才能清除 dirty。
+            let text = try? model.serialize()
+            textModified = !(text?.utf8.elementsEqual(savedText.utf8) ?? false)
+        }
     }
     private func commitCellEditor() throws {
         if isViewLoaded, let window = view.window, !window.makeFirstResponder(nil) {
@@ -231,22 +304,28 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
     @objc private func addRow() { perform { try commitCellEditor(); try appendRow() } }
     @objc private func addColumn() { perform { try commitCellEditor(); try appendColumn() } }
     @objc private func removeRow() {
-        perform { try commitCellEditor(); try mutate(name: "删除行") { try $0.deleteRow(at: table.selectedRow >= 0 ? table.selectedRow : model.rowCount - 1) } }
+        // 没有明确目标时不猜测最后一行；即使 action 被程序调用也遵守与按钮相同的门禁。
+        let row = table.selectedRow
+        guard canEdit, model.rows.indices.contains(row) else { return }
+        perform { try commitCellEditor(); try mutate(name: "删除行") { try $0.deleteRow(at: row) } }
     }
     @objc private func removeColumn() {
-        perform { try commitCellEditor(); try mutate(name: "删除列") { try $0.deleteColumn(at: table.selectedColumn >= 0 ? table.selectedColumn : model.columnCount - 1) } }
+        let column = table.selectedColumn
+        guard canEdit, column >= 0, column < model.columnCount else { return }
+        perform { try commitCellEditor(); try mutate(name: "删除列") { try $0.deleteColumn(at: column) } }
     }
     @objc private func changeDelimiter() {
         perform {
             try commitCellEditor()
             let delimiter = CSVDelimiter.allCases[delimiterPopup.indexOfSelectedItem]
-            let next = try CSVDocument(text: document.text, delimiter: delimiter)
-            try install(Snapshot(model: next, text: document.text, encoding: selectedEncoding), name: "切换分隔符")
+            let text = try currentText()
+            let next = try CSVDocument(text: text, delimiter: delimiter)
+            try install(Snapshot(model: next, originalText: text, encoding: selectedEncoding), name: "切换分隔符")
         }
         refreshState()
     }
     @objc private func changeEncoding() {
-        perform { try install(Snapshot(model: model, text: document.text, encoding: Self.encodings[encodingPopup.indexOfSelectedItem]), name: "选择保存编码") }
+        perform { try install(Snapshot(model: model, originalText: originalText, encoding: Self.encodings[encodingPopup.indexOfSelectedItem]), name: "选择保存编码") }
         refreshState()
     }
     @objc private func redecode() {
@@ -291,11 +370,22 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
         table.reloadData(); refreshState()
     }
     private func refreshState() {
-        for button in editButtons { button.isEnabled = canEdit }
+        for button in editButtons {
+            button.isEnabled = canEdit
+            if button.action == #selector(removeRow) {
+                button.isEnabled = canEdit && model.rows.indices.contains(table.selectedRow)
+                button.toolTip = button.isEnabled ? "删除第 \(table.selectedRow + 1) 行" : "请先选择要删除的行"
+            } else if button.action == #selector(removeColumn) {
+                button.isEnabled = canEdit && table.selectedColumn >= 0 && table.selectedColumn < model.columnCount
+                button.toolTip = button.isEnabled ? "删除第 \(table.selectedColumn + 1) 列" : "请先选择要删除的列"
+            }
+        }
         delimiterPopup.isEnabled = canEdit; encodingPopup.isEnabled = canEdit
         delimiterPopup.selectItem(at: CSVDelimiter.allCases.firstIndex(of: model.delimiter) ?? 0)
         encodingPopup.selectItem(at: Self.encodings.firstIndex(of: selectedEncoding) ?? 0)
         status.stringValue = "\(model.rowCount) 行 × \(model.columnCount) 列 · \(selectedEncoding.name) · \(model.preferredLineEnding == .crlf ? "CRLF" : model.preferredLineEnding == .cr ? "CR" : "LF")" + (isBusy ? " · 正在处理…" : "")
+        if table.selectedRow >= 0 { status.stringValue += " · 已选第 \(table.selectedRow + 1) 行" }
+        if table.selectedColumn >= 0 { status.stringValue += " · 已选第 \(table.selectedColumn + 1) 列" }
         onStateChanged?()
     }
     private func perform(_ operation: () throws -> Void) {

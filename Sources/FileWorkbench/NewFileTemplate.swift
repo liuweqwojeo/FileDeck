@@ -6,7 +6,10 @@ import CoreGraphics
 enum NewFileTemplate: String, CaseIterable, Identifiable, Sendable {
     case folder, word, spreadsheet, presentation, pdf
     case text, markdown, csv, tsv, rtf, json, yaml, xml, html, css, javascript, typescript
+    case jsx, tsx, vue, svelte, scss, less, sass
     case python, swift, java, sql, shell, toml, ini
+    case c, cpp, cHeader, cppHeader, csharp, go, rust, kotlin, kotlinScript, objectiveC, objectiveCpp
+    case php, ruby, dart, lua, r, perl, scala, groovy, julia, powershell, fsharp, visualBasic, clojure, erlang
     case png, jpeg, svg, custom
 
     var id: String { rawValue }
@@ -33,6 +36,13 @@ enum NewFileTemplate: String, CaseIterable, Identifiable, Sendable {
         case .css: "CSS 样式"
         case .javascript: "JavaScript"
         case .typescript: "TypeScript"
+        case .jsx: "React JSX (.jsx)"
+        case .tsx: "React TSX (.tsx)"
+        case .vue: "Vue 组件 (.vue)"
+        case .svelte: "Svelte 组件 (.svelte)"
+        case .scss: "SCSS 样式"
+        case .less: "Less 样式"
+        case .sass: "Sass 样式"
         case .python: "Python"
         case .swift: "Swift"
         case .java: "Java"
@@ -40,6 +50,31 @@ enum NewFileTemplate: String, CaseIterable, Identifiable, Sendable {
         case .shell: "Shell 脚本"
         case .toml: "TOML"
         case .ini: "INI 配置"
+        case .c: "C 源文件 (.c)"
+        case .cpp: "C++ 源文件 (.cpp)"
+        case .cHeader: "C 头文件 (.h)"
+        case .cppHeader: "C++ 头文件 (.hpp)"
+        case .csharp: "C# (.cs)"
+        case .go: "Go (.go)"
+        case .rust: "Rust (.rs)"
+        case .kotlin: "Kotlin (.kt)"
+        case .kotlinScript: "Kotlin 脚本 (.kts)"
+        case .objectiveC: "Objective-C (.m)"
+        case .objectiveCpp: "Objective-C++ (.mm)"
+        case .php: "PHP"
+        case .ruby: "Ruby (.rb)"
+        case .dart: "Dart"
+        case .lua: "Lua"
+        case .r: "R"
+        case .perl: "Perl (.pl)"
+        case .scala: "Scala"
+        case .groovy: "Groovy"
+        case .julia: "Julia (.jl)"
+        case .powershell: "PowerShell (.ps1)"
+        case .fsharp: "F# (.fs)"
+        case .visualBasic: "Visual Basic (.vb)"
+        case .clojure: "Clojure (.clj)"
+        case .erlang: "Erlang (.erl)"
         case .png: "PNG 图片"
         case .jpeg: "JPEG 图片"
         case .svg: "SVG 图片"
@@ -53,7 +88,10 @@ enum NewFileTemplate: String, CaseIterable, Identifiable, Sendable {
         case .word, .spreadsheet, .presentation, .pdf, .rtf, .csv, .tsv: "办公文档"
         case .png, .jpeg, .svg: "图片"
         case .custom: "其他"
-        default: "文本与代码"
+        case .text, .markdown, .json, .yaml, .xml, .toml, .ini: "文本与配置"
+        case .html, .css, .scss, .less, .sass, .javascript, .typescript, .jsx, .tsx, .vue, .svelte: "Web 与样式"
+        case .python, .php, .ruby, .lua, .r, .perl, .julia, .shell, .powershell, .sql: "脚本与数据"
+        default: "编程语言"
         }
     }
 
@@ -69,6 +107,22 @@ enum NewFileTemplate: String, CaseIterable, Identifiable, Sendable {
         case .typescript: "ts"
         case .python: "py"
         case .shell: "sh"
+        case .cHeader: "h"
+        case .cppHeader: "hpp"
+        case .csharp: "cs"
+        case .rust: "rs"
+        case .kotlin: "kt"
+        case .kotlinScript: "kts"
+        case .objectiveC: "m"
+        case .objectiveCpp: "mm"
+        case .ruby: "rb"
+        case .perl: "pl"
+        case .julia: "jl"
+        case .powershell: "ps1"
+        case .fsharp: "fs"
+        case .visualBasic: "vb"
+        case .clojure: "clj"
+        case .erlang: "erl"
         case .jpeg: "jpg"
         default: rawValue
         }
@@ -104,9 +158,26 @@ enum NewFileTemplate: String, CaseIterable, Identifiable, Sendable {
 
     fileprivate static func matching(extension value: String) -> NewFileTemplate? {
         let value = value.lowercased()
-        if value == "jpeg" { return .jpeg }
-        if value == "yml" { return .yaml }
-        if value == "markdown" { return .markdown }
+        // 同一语言的常用后缀共用模板；保留 JSX/TSX、C/C++ 头文件等不同语法的独立入口。
+        switch value {
+        case "jpeg": return .jpeg
+        case "yml": return .yaml
+        case "markdown", "mdown": return .markdown
+        case "mjs", "cjs": return .javascript
+        case "mts", "cts": return .typescript
+        case "cc", "cxx", "c++": return .cpp
+        case "hh", "hxx", "h++": return .cppHeader
+        case "pyw", "pyi": return .python
+        case "phtml": return .php
+        case "pm": return .perl
+        case "sbt": return .scala
+        case "gradle": return .groovy
+        case "bash", "zsh": return .shell
+        case "psm1", "psd1": return .powershell
+        case "fsx", "fsi": return .fsharp
+        case "cljc": return .clojure
+        default: break
+        }
         return allCases.first { $0.fileExtension == value }
     }
 }
@@ -141,12 +212,16 @@ enum NewFileCreator {
               !name.contains("/"), !name.contains(":"), !name.contains("\0") else {
             throw NewFileCreationError.invalidName
         }
-        let destination = directory.appendingPathComponent(name, isDirectory: template == .folder)
+        // 类型已由用户选择，省略后缀时补齐；显式填写了不兼容的后缀仍拒绝创建。
+        let filename = template.fileExtension.flatMap { ext in
+            URL(fileURLWithPath: name).pathExtension.isEmpty && !name.hasSuffix(".") ? "\(name).\(ext)" : nil
+        } ?? name
+        let destination = directory.appendingPathComponent(filename, isDirectory: template == .folder)
         if let ext = template.fileExtension,
            NewFileTemplate.matching(extension: destination.pathExtension) != template {
             throw NewFileCreationError.incorrectExtension(ext)
         }
-        let data = template == .folder ? Data() : try contents(for: template, named: name, resourceDirectory: resourceDirectory)
+        let data = template == .folder ? Data() : try contents(for: template, named: filename, resourceDirectory: resourceDirectory)
         let directory = directory.standardizedFileURL
         guard directory.isFileURL,
               (try? FileSystem.identity(at: directory)) == expectedDirectoryIdentity else {
@@ -162,7 +237,7 @@ enum NewFileCreator {
         defer { Darwin.close(parent) }
         try validateDirectory(parent, at: directory, expected: expectedDirectoryIdentity)
         if template == .folder {
-            guard mkdirat(parent, name, 0o777) == 0 else { throw systemError() }
+            guard mkdirat(parent, filename, 0o777) == 0 else { throw systemError() }
             return destination
         }
 
@@ -176,7 +251,7 @@ enum NewFileCreator {
         guard fsync(descriptor) == 0 else { throw systemError() }
         try validateDirectory(parent, at: directory, expected: expectedDirectoryIdentity)
         // RENAME_EXCL 在内核中检查冲突，包含同名目录、普通文件和悬空符号链接。
-        guard renameatx_np(parent, temporary, parent, name, UInt32(RENAME_EXCL)) == 0 else { throw systemError() }
+        guard renameatx_np(parent, temporary, parent, filename, UInt32(RENAME_EXCL)) == 0 else { throw systemError() }
         return destination
     }
 
@@ -210,7 +285,10 @@ enum NewFileCreator {
         case .html: return Data("<!doctype html>\n<html lang=\"zh-CN\">\n<head><meta charset=\"UTF-8\"><title>新建网页</title></head>\n<body>\n</body>\n</html>\n".utf8)
         case .svg: return Data("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"800\" height=\"600\" viewBox=\"0 0 800 600\"></svg>\n".utf8)
         case .rtf: return Data("{\\rtf1\\ansi\\deff0 {\\fonttbl {\\f0 Helvetica;}}\\f0\\fs24 }".utf8)
-        case .shell: return Data("#!/bin/sh\n".utf8)
+        case .shell:
+            let ext = URL(fileURLWithPath: name).pathExtension.lowercased()
+            let interpreter = ["bash", "zsh"].contains(ext) ? ext : "sh"
+            return Data("#!/bin/\(interpreter)\n".utf8)
         case .custom:
             let ext = URL(fileURLWithPath: name).pathExtension.lowercased()
             if let known = NewFileTemplate.matching(extension: ext) {

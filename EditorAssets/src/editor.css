@@ -42,3 +42,13 @@ button[aria-pressed="true"] { background: Highlight; color: HighlightText; }
   .fw-yaml-comment { color: #9ca3af; }
   .fw-yaml-anchor { color: #f1bc7b; }
 }
+
+/* CodeMirror 的生成主题晚于静态样式插入，用内容级选择器保持深色表面与选区可辨。 */
+@media (prefers-color-scheme: dark) {
+  header { background: #252527; }
+  button { background: #303033; color: #eee; border-color: #55555b; }
+  button[aria-pressed="true"] { background: #415a7c; color: #fff; }
+  .cm-editor.cm-editor .cm-gutters { background: #252527; color: #a9a9ad; border-color: #3c3c40; }
+  .cm-editor.cm-editor .cm-activeLine, .cm-editor.cm-editor .cm-activeLineGutter { background: #2d3540; }
+  .cm-editor.cm-editor .cm-cursor { border-left-color: #eee; }
+}

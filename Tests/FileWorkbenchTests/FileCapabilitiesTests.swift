@@ -19,6 +19,7 @@ final class FileCapabilitiesTests: XCTestCase {
             ("main.swift", .code, .codeMirror), ("view.tsx", .code, .codeMirror),
             ("main.py", .code, .codeMirror), ("script.sh", .code, .codeMirror),
             ("Makefile", .code, .codeMirror), ("Dockerfile", .code, .codeMirror),
+            ("Rakefile", .code, .codeMirror), ("Jenkinsfile", .code, .codeMirror),
             (".env.local", .code, .codeMirror), (".gitignore", .code, .codeMirror),
             ("README", .text, .codeMirror), ("data.jsonl", .text, .codeMirror),
             ("data.tsv", .text, .codeMirror)

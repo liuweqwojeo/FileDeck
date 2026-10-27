@@ -10,7 +10,6 @@ struct FileWorkbenchApp: App {
     var body: some Scene {
         Window("FileDeck", id: "main") {
             ContentView(store: browser)
-                .preferredColorScheme(.light)
         }
         .defaultSize(width: WorkspaceWindowLayout.welcomeSize.width, height: WorkspaceWindowLayout.welcomeSize.height)
         .windowStyle(.titleBar)

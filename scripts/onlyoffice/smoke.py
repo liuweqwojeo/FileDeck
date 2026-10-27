@@ -238,7 +238,7 @@ def verify_run(directory):
         workbench = native.get("workbench")
         stages = ("passed", "textEditedInWebKit", "nativeSaveRoutedWhileSwitching", "nativeCloseVerified",
                   "pdfNativeTabVerified", "officeRetainedUnsavedChanges", "browserEmbedded",
-                  "editorStillInBrowserWindow", "modalWindowCloseProtected", "modalQuitProtected", "modalDiscardClosed")
+                  "editorStillInBrowserWindow", "modalWindowCloseProtected", "modalQuitProtected", "modalDiscardClosed", "officeSaveAndReturnVerified", "nativeSaveAndReturnVerified")
         if not isinstance(workbench, dict) or not all(workbench.get(stage) is True for stage in stages):
             raise RuntimeError("未完成混合文档、保存路由、模态窗口关闭/退出保护与状态保留验证。")
         path = directory / "mixed.txt"

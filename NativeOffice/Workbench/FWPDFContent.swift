@@ -11,7 +11,7 @@ final class FWPDFContent: NSViewController, FWNativeContent {
     var path: URL? { state.path }
     var isModified: Bool { state.isModified }
     var isReadOnly: Bool { state.isReadOnly }
-    var isBusy: Bool { state.isBusy }
+    var isBusy: Bool { state.isBusy || processing }
     var canFind: Bool { !state.isClosed && !isBusy }
     var canUndo: Bool { state.canEdit && !isBusy && history.canUndo }
     var canRedo: Bool { state.canEdit && !isBusy && history.canRedo }
@@ -19,7 +19,7 @@ final class FWPDFContent: NSViewController, FWNativeContent {
     var availableOperations: Set<FileOperation> {
         guard !state.isClosed else { return [] }
         var result: Set<FileOperation> = [.open]
-        if state.canEdit { result.insert(.edit) }
+        if state.canEdit && !processing { result.insert(.edit) }
         if !isBusy {
             result.formUnion([.saveAs, .export])
             if !isReadOnly { result.insert(.save) }
@@ -27,34 +27,50 @@ final class FWPDFContent: NSViewController, FWNativeContent {
         return result
     }
     private let state: FWBinaryState
+    private var processing = false
     private let pdfView = PDFView()
     private let status = NSTextField(labelWithString: "")
-    private let history = UndoManager()
+    private let history: FWMediaHistory
     private var editButtons: [NSButton] = []
-    override var undoManager: UndoManager? { history }
+    override var undoManager: UndoManager? { history.manager }
 
-    private init(data: Data, fileState: FileSaveState?, maximumBytes: Int) throws {
+    private init(data: Data, fileState: FileSaveState?, maximumBytes: Int, historyMaximumBytes: Int) throws {
         state = try FWBinaryState(data: data, fileState: fileState, maximumBytes: maximumBytes)
+        history = FWMediaHistory(maximumBytes: historyMaximumBytes)
         super.init(nibName: nil, bundle: nil)
-        history.levelsOfUndo = 12
         state.onChange = { [weak self] in self?.refreshState() }
     }
     required init?(coder: NSCoder) { fatalError("请使用 open(url:)") }
 
-    static func open(url: URL, maximumBytes: Int = SafeFileIO.maximumMediaBytes) async throws -> FWPDFContent {
+    var recoveryCapture: DraftRecoveryCapture? {
+        guard !state.isClosed, isModified else { return nil }
+        return DraftRecoveryCapture(kind: kind, originalURL: path, title: contentTitle, body: .binary(state.data))
+    }
+    static func recover(_ draft: DraftRecoveryDocument) async throws -> FWPDFContent {
+        let data = draft.data
+        _ = try await Task.detached(priority: .userInitiated) { try PDFOperations.read(data).pageCount }.value
+        let content = try FWPDFContent(data: data, fileState: nil, maximumBytes: SafeFileIO.maximumMediaBytes,
+                                      historyMaximumBytes: FWMediaHistory.defaultMaximumBytes)
+        content.state.markRecovered()
+        return content
+    }
+
+    static func open(url: URL, maximumBytes: Int = SafeFileIO.maximumMediaBytes,
+                     historyMaximumBytes: Int = FWMediaHistory.defaultMaximumBytes) async throws -> FWPDFContent {
         let loaded = try await Task.detached(priority: .userInitiated) {
             let result = try SafeFileIO.open(url: url, maximumBytes: maximumBytes)
             _ = try PDFOperations.read(result.data)
             return result
         }.value
-        return try FWPDFContent(data: loaded.data, fileState: loaded.state, maximumBytes: maximumBytes)
+        return try FWPDFContent(data: loaded.data, fileState: loaded.state, maximumBytes: maximumBytes, historyMaximumBytes: historyMaximumBytes)
     }
 
-    static func createFromImages(urls: [URL], maximumBytes: Int = SafeFileIO.maximumMediaBytes) async throws -> FWPDFContent {
+    static func createFromImages(urls: [URL], maximumBytes: Int = SafeFileIO.maximumMediaBytes,
+                                 historyMaximumBytes: Int = FWMediaHistory.defaultMaximumBytes) async throws -> FWPDFContent {
         let data = try await Task.detached(priority: .userInitiated) {
             try PDFOperations.imagesToPDF(SafeFileIO.openMediaBatch(urls: urls, maximumBytes: maximumBytes))
         }.value
-        return try FWPDFContent(data: data, fileState: nil, maximumBytes: maximumBytes)
+        return try FWPDFContent(data: data, fileState: nil, maximumBytes: maximumBytes, historyMaximumBytes: historyMaximumBytes)
     }
 
     override func loadView() {
@@ -76,23 +92,32 @@ final class FWPDFContent: NSViewController, FWNativeContent {
     }
 
     func save(overwriteExternalChanges: Bool) async throws {
+        guard !processing else { throw DocumentSessionError.busy }
         try await state.save(to: nil, overwrite: overwriteExternalChanges)
     }
     func saveAs(to destination: URL, overwriteExternalChanges: Bool) async throws {
+        guard !processing else { throw DocumentSessionError.busy }
         try FWMediaUI.requireExtension(destination, allowed: ["pdf"])
         try await state.save(to: destination, overwrite: overwriteExternalChanges)
     }
     func export(to destination: URL, format: WorkbenchFileKind, overwriteExisting: Bool) async throws {
+        guard !processing else { throw DocumentSessionError.busy }
         guard format == .pdf else { throw DocumentSessionError.unsupportedOperation(.export) }
         try FWMediaUI.requireExtension(destination, allowed: ["pdf"])
         try await state.save(to: destination, overwrite: overwriteExisting, adoptDestination: false)
     }
     func reload(discardChanges: Bool) async throws {
+        guard !processing else { throw DocumentSessionError.busy }
+        processing = true
+        defer { processing = false; refreshState() }
         try await state.reload(discardChanges: discardChanges) { _ = try PDFOperations.read($0) }
-        history.removeAllActions()
+        history.removeAll()
         if isViewLoaded { refreshPDF() }
     }
-    func close(discardChanges: Bool) async throws { try state.close(discardChanges: discardChanges) }
+    func close(discardChanges: Bool) async throws {
+        guard !processing else { throw DocumentSessionError.busy }
+        try state.close(discardChanges: discardChanges); history.removeAll()
+    }
     func undo() { if canUndo { history.undo() } }
     func redo() { if canRedo { history.redo() } }
 
@@ -109,6 +134,9 @@ final class FWPDFContent: NSViewController, FWNativeContent {
     func addHighlight(pageIndex: Int, bounds: CGRect) throws {
         try install(PDFOperations.addHighlight(state.data, pageIndex: pageIndex, bounds: bounds), name: "高亮文字")
     }
+    func addHighlights(_ highlights: [PDFOperations.Highlight]) async throws {
+        try await transform(name: "高亮文字") { try PDFOperations.addHighlights($0, highlights: highlights) }
+    }
 
     @objc private func rotateCurrentPage() {
         perform { try rotate(pageIndexes: [currentPageIndex]) }
@@ -118,18 +146,23 @@ final class FWPDFContent: NSViewController, FWNativeContent {
             guard let selection = pdfView.currentSelection, let document = pdfView.document else {
                 throw MediaOperationError.invalidParameter("请先选中要高亮的文字。")
             }
-            var output = state.data
-            var count = 0
+            let source = state.data
+            var highlights: [PDFOperations.Highlight] = []
             for line in selection.selectionsByLine() {
                 for page in line.pages {
                     let bounds = line.bounds(for: page).intersection(page.bounds(for: .cropBox))
                     guard !bounds.isNull, !bounds.isEmpty else { continue }
-                    output = try PDFOperations.addHighlight(output, pageIndex: document.index(for: page), bounds: bounds)
-                    count += 1
+                    highlights.append(.init(pageIndex: document.index(for: page), bounds: bounds))
                 }
             }
-            guard count > 0 else { throw MediaOperationError.invalidParameter("选区没有可高亮的文字。") }
-            try install(output, name: "高亮文字")
+            guard !highlights.isEmpty else { throw MediaOperationError.invalidParameter("选区没有可高亮的文字。") }
+            let captured = highlights
+            Task {
+                do {
+                    guard state.data == source else { throw DocumentSessionError.busy }
+                    try await addHighlights(captured)
+                } catch { FWMediaUI.show(error, in: view.window) }
+            }
         }
     }
     @objc private func addNote() {
@@ -189,6 +222,7 @@ final class FWPDFContent: NSViewController, FWNativeContent {
         return document.index(for: page)
     }
     private func install(_ data: Data, name: String) throws {
+        guard !processing else { throw DocumentSessionError.busy }
         _ = try PDFOperations.read(data)
         let previous = state.data
         try state.replace(data)
@@ -196,12 +230,14 @@ final class FWPDFContent: NSViewController, FWNativeContent {
         if isViewLoaded { refreshPDF() }
     }
     private func registerUndo(_ data: Data, name: String) {
-        history.registerUndo(withTarget: self) { target in
-            MainActor.assumeIsolated { target.perform { try target.install(data, name: name) } }
+        history.register(bytes: data.count, name: name) { [weak self] in
+            self?.perform { try self?.install(data, name: name) }
         }
-        history.setActionName(name)
     }
     private func transform(name: String, operation: @escaping @Sendable (Data) throws -> Data) async throws {
+        guard !processing else { throw DocumentSessionError.busy }
+        processing = true
+        defer { processing = false; refreshState() }
         let previous = state.data
         try await state.transform(operation)
         registerUndo(previous, name: name)

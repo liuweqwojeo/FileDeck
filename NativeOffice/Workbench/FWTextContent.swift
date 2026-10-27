@@ -35,8 +35,6 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
     private var webView: WKWebView!
     private let editorContainer = NSView()
     private let status = NSTextField(labelWithString: "正在加载编辑器…")
-    private let findButton = NSButton(title: "查找与替换", target: nil, action: nil)
-    private let formatButton = NSButton(title: "格式化 JSON", target: nil, action: nil)
     private let recoverySaveButton = NSButton(title: "另存内存草稿…", target: nil, action: nil)
     private let recoveryEditorButton = NSButton(title: "恢复编辑器", target: nil, action: nil)
     private var initialNavigationStarted = false
@@ -51,6 +49,10 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
     private var disposed = false
     private weak var capturedResponder: NSResponder?
     private var bridgeSessionID = UUID().uuidString
+    private var bridgeVersion = 0
+    private var requiredBridgeVersion = 0
+    private var bridgeNeedsSync = false
+    private var bridgeResyncTask: Task<Void, Never>?
     private var timeoutTask: Task<Void, Never>?
     private var indexURL: URL? {
         Bundle.main.resourceURL?.appendingPathComponent("FileWorkbenchEditors/index.html")
@@ -59,6 +61,17 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
     static func open(url: URL, kind: WorkbenchFileKind, preview: Bool = false) async throws -> FWTextContent {
         let session = try await TextDocumentSession.open(url: url)
         return FWTextContent(session: session, kind: kind, editing: !preview)
+    }
+
+    var recoveryCapture: DraftRecoveryCapture? {
+        guard !disposed, !session.isClosed, session.isModified else { return nil }
+        return DraftRecoveryCapture(kind: kind, originalURL: path, title: contentTitle,
+                                    body: .text(session.text, session.encoding, nil))
+    }
+    static func recover(_ draft: DraftRecoveryDocument) throws -> FWTextContent {
+        guard let kind = WorkbenchFileKind(rawValue: draft.header.kind),
+              let text = String(data: draft.data, encoding: .utf8), let encoding = draft.header.encoding else { throw DraftRecoveryError.invalidRecord }
+        return FWTextContent(session: .recover(text: text, encoding: encoding), kind: kind)
     }
 
     static func create(kind: WorkbenchFileKind) -> FWTextContent {
@@ -77,12 +90,6 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
     override func loadView() {
         let root = NSView()
         root.wantsLayer = true
-        root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        findButton.target = self
-        findButton.action = #selector(findAction)
-        formatButton.target = self
-        formatButton.action = #selector(formatJSON)
-        formatButton.isHidden = kind != .json
         recoverySaveButton.target = self
         recoverySaveButton.action = #selector(saveRecoveryDraft)
         recoveryEditorButton.target = self
@@ -90,7 +97,7 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
         recoveryEditorButton.toolTip = "恢复最近已同步的正文；原编辑器的撤销历史无法恢复。"
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let toolbar = NSStackView(views: [status, spacer, recoverySaveButton, recoveryEditorButton, findButton, formatButton])
+        let toolbar = NSStackView(views: [status, spacer, recoverySaveButton, recoveryEditorButton])
         toolbar.orientation = .horizontal
         toolbar.spacing = 10
         toolbar.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
@@ -163,10 +170,32 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
               let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
         if type == "ready" { bridgeReady = true; initializeIfReady(); return }
         guard body["id"] as? String == bridgeSessionID else { return }
-        if type == "change" || type == "state", editorReady, let text = body["text"] as? String {
+        if type == "patch", editorReady {
+            guard let version = body["version"] as? Int, version > bridgeVersion else { return }
+            requiredBridgeVersion = max(requiredBridgeVersion, version)
+            guard !bridgeNeedsSync, body["baseVersion"] as? Int == bridgeVersion, version == bridgeVersion + 1,
+                  let values = body["edits"] as? [[String: Any]], !isReadOnly else {
+                requestBridgeResync(); return
+            }
+            do {
+                let edits = try values.map { value -> TextDocumentSession.Edit in
+                    guard let from = value["from"] as? Int, let to = value["to"] as? Int,
+                          let text = value["text"] as? String else { throw TextDocumentSession.EditError.invalidRange }
+                    return TextDocumentSession.Edit(from: from, to: to, text: text)
+                }
+                try session.applyEdits(edits)
+                bridgeVersion = version
+                editorCanUndo = body["canUndo"] as? Bool ?? false
+                editorCanRedo = body["canRedo"] as? Bool ?? false
+                changed()
+            } catch { requestBridgeResync() }
+        } else if type == "change" || type == "state", editorReady, let text = body["text"] as? String {
+            guard let version = body["version"] as? Int, version >= bridgeVersion else { return }
             do {
                 // dirty 只由完整文本会话与真实保存基线计算，不能直接相信页面提供的布尔值。
                 if !isReadOnly { try session.replaceText(text) }
+                bridgeVersion = version
+                if version >= requiredBridgeVersion { bridgeNeedsSync = false }
                 // 页面的历史标志只影响命令能力；脏状态仍以 Swift 会话的完整保存基线为准。
                 editorCanUndo = body["canUndo"] as? Bool ?? false
                 editorCanRedo = body["canRedo"] as? Bool ?? false
@@ -183,12 +212,13 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
         bridgeReady = false // 防止 ready 与 didFinish 重复建立会话。
         editorCanUndo = false
         editorCanRedo = false
+        resetBridge()
         let token = UUID().uuidString
         bridgeSessionID = token
         Task {
             do {
                 _ = try await javascript("return window.workbench.open(document)", arguments: ["document": [
-                    "id": token, "text": session.text, "language": language, "readOnly": isReadOnly,
+                    "id": token, "text": session.text, "language": language, "readOnly": isReadOnly, "bridgeMode": "patch-v1",
                     "mode": !isEditing && kind == .markdown ? "preview" : "source"
                 ]])
                 guard !disposed, bridgeSessionID == token else { return }
@@ -213,7 +243,8 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
         case .markdown: return "markdown"
         case .json: return "json"
         case .yaml: return "yaml"
-        case .code: return path?.pathExtension.isEmpty == false ? path!.pathExtension : path?.lastPathComponent ?? "text"
+        // 完整文件名保留 Dockerfile、.env.local 等规则，同时让编辑器按真实后缀选择语法。
+        case .code: return path?.lastPathComponent ?? "text"
         default: return "text"
         }
     }
@@ -230,7 +261,9 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
         Task {
             defer { operationInFlight = false; changed() }
             do {
-                _ = try await javascript("return window.workbench.setEditing({id, enabled: true})", arguments: ["id": token])
+                // 显式进入编辑后直接接收键入；只读预览打开时仍把焦点留在工作层容器。
+                webView.window?.makeFirstResponder(webView)
+                _ = try await javascript("window.workbench.setEditing({id, enabled: true}); document.querySelector('.cm-content')?.focus({preventScroll: true}); return true", arguments: ["id": token])
                 guard !disposed, token == bridgeSessionID else { return }
                 isEditing = true
             } catch { if !disposed, token == bridgeSessionID { fail(error) } }
@@ -271,7 +304,13 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
         onSaveRecoveryDraft = nil
     }
 
+    private func resetBridge() {
+        bridgeResyncTask?.cancel(); bridgeResyncTask = nil
+        bridgeVersion = 0; requiredBridgeVersion = 0; bridgeNeedsSync = false
+    }
+
     private func releaseEditor() {
+        resetBridge()
         editorCanUndo = false
         editorCanRedo = false
         bridgeSessionID = UUID().uuidString
@@ -299,9 +338,38 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
     private func synchronizeText() async throws {
         guard editorReady, failure == nil else { throw failure ?? DocumentSessionError.busy }
         let token = bridgeSessionID
-        guard let text = try await javascript("return window.workbench.getText(id)", arguments: ["id": token]) as? String,
-              token == bridgeSessionID else { throw DocumentSessionError.busy }
-        if !isReadOnly { try session.replaceText(text) }
+        // 完整快照是保存/关闭及差量缺口的确认边界；await 期间到达的新版本不能被旧快照覆盖。
+        for _ in 0..<3 {
+            try Task.checkCancellation()
+            guard let snapshot = try await javascript("return window.workbench.getSnapshot(id)", arguments: ["id": token]) as? [String: Any],
+                  let text = snapshot["text"] as? String, let version = snapshot["version"] as? Int, version >= 0,
+                  token == bridgeSessionID else { throw DocumentSessionError.busy }
+            if version >= bridgeVersion {
+                if !isReadOnly { try session.replaceText(text) }
+                bridgeVersion = version
+                editorCanUndo = snapshot["canUndo"] as? Bool ?? false
+                editorCanRedo = snapshot["canRedo"] as? Bool ?? false
+            }
+            if bridgeVersion >= requiredBridgeVersion { bridgeNeedsSync = false; return }
+        }
+        throw DocumentSessionError.busy
+    }
+
+    private func requestBridgeResync() {
+        bridgeNeedsSync = true
+        guard bridgeResyncTask == nil else { return }
+        let token = bridgeSessionID
+        bridgeResyncTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if token == bridgeSessionID { bridgeResyncTask = nil } }
+            do { try await synchronizeText(); changed() }
+            catch {
+                if !disposed, token == bridgeSessionID {
+                    fail(NSError(domain: "FileWorkbench.Editor", code: 7,
+                                 userInfo: [NSLocalizedDescriptionKey: "编辑器同步版本不一致，已保留最近同步草稿，请恢复编辑器或另存草稿。"]), fatal: true)
+                }
+            }
+        }
     }
 
     /// 仅由门面经过显式 Smoke 环境门禁后调用，输入经过真实 contenteditable/CodeMirror 事务。
@@ -396,11 +464,25 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
         dispose()
     }
 
-    func undo() { if canUndo { command("undo") } }
-    func redo() { if canRedo { command("redo") } }
+    func undo() { handleHistoryKey(redo: false) }
+    func redo() { handleHistoryKey(redo: true) }
+    func handleHistoryKey(redo: Bool) {
+        guard canFind else { return }
+        let token = bridgeSessionID
+        Task { _ = try? await javascript("return window.workbench.handleHistoryKey({id, redo})", arguments: ["id": token, "redo": redo]) }
+    }
     func find() { if canFind { command("search") } }
-    @objc private func findAction() { find() }
-    @objc private func formatJSON() { command("formatJSON") }
+    func revealLine(_ line: Int) {
+        guard canFind, line > 0 else { return }
+        let token = bridgeSessionID
+        Task { _ = try? await javascript("return window.workbench.revealLine({id, line})", arguments: ["id": token, "line": line]) }
+    }
+    func selectAll() -> Bool {
+        guard canFind, kind != .markdown || isEditing else { return false }
+        webView.window?.makeFirstResponder(webView)
+        command("selectAll")
+        return true
+    }
 
     private func command(_ name: String) {
         guard editorReady, failure == nil else { return }
@@ -420,8 +502,6 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
             status.stringValue = loading ? "正在加载编辑器…" : session.encoding.name + (isReadOnly ? " · 只读" : "") + (isModified ? " · 未保存" : "")
             status.toolTip = status.stringValue
         }
-        findButton.isEnabled = canFind
-        formatButton.isEnabled = canFind && !isReadOnly
         recoverySaveButton.isHidden = failure == nil || !isEditing
         recoverySaveButton.isEnabled = availableOperations.contains(.saveAs)
         recoveryEditorButton.isHidden = failure == nil
@@ -432,6 +512,7 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
     private func fail(_ error: Error, fatal: Bool = false) {
         guard !disposed else { return }
         if fatal {
+            bridgeResyncTask?.cancel(); bridgeResyncTask = nil
             failure = error
             loading = false
             editorReady = false

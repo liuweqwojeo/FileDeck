@@ -101,11 +101,12 @@ struct FileCapabilityRegistry: Sendable {
     private static let textKinds: Set<WorkbenchFileKind> = [.markdown, .text, .code, .json, .yaml, .csv]
     private static let imageKinds: Set<WorkbenchFileKind> = [.png, .jpeg, .heic]
     private static let sourceExtensions: Set<String> = [
-        "xml", "html", "htm", "css", "scss", "less", "js", "jsx", "ts", "tsx", "mjs", "cjs", "vue", "svelte",
+        "xml", "html", "htm", "css", "scss", "sass", "less", "js", "jsx", "ts", "tsx", "mjs", "cjs", "mts", "cts", "vue", "svelte",
         "toml", "ini", "conf", "config", "properties", "env", "sh", "bash", "zsh", "fish", "py", "rb", "php",
         "java", "kt", "kts", "swift", "m", "mm", "h", "hpp", "c", "cc", "cpp", "cs", "go", "rs", "sql",
         "graphql", "gql", "proto", "dart", "r", "lua", "pl", "ex", "exs", "erl", "hrl", "clj", "cljs",
-        "edn", "scala", "sbt", "gradle", "tex", "bib", "gitignore", "gitattributes", "editorconfig", "dockerignore"
+        "edn", "scala", "sbt", "gradle", "tex", "bib", "gitignore", "gitattributes", "editorconfig", "dockerignore",
+        "cxx", "c++", "hh", "hxx", "h++", "pyw", "pyi", "phtml", "pm", "groovy", "jl", "ps1", "psm1", "psd1", "fs", "fsx", "fsi", "vb", "cljc"
     ]
 
     private static func suggestedEditor(for kind: WorkbenchFileKind) -> FileEditorBackend? {
@@ -161,7 +162,7 @@ struct FileCapabilityRegistry: Sendable {
         }
         if sourceExtensions.contains(ext) { return .code }
         let name = url.lastPathComponent.lowercased()
-        if ["makefile", "dockerfile", "gemfile", "podfile", ".gitignore", ".gitattributes", ".editorconfig", ".dockerignore"].contains(name)
+        if ["makefile", "dockerfile", "gemfile", "podfile", "rakefile", "jenkinsfile", ".gitignore", ".gitattributes", ".editorconfig", ".dockerignore"].contains(name)
             || name == ".env" || name.hasPrefix(".env.") { return .code }
         if ["readme", "license", "licence", "notice"].contains(name) { return .text }
 

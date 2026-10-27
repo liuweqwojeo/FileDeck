@@ -1,0 +1,50 @@
+--- a/macos/ONLYOFFICE.xcodeproj/project.pbxproj
++++ b/macos/ONLYOFFICE.xcodeproj/project.pbxproj
+@@ -28,6 +28,7 @@
+ 		5A02294E2CB9C3260011C6EC /* QuickLookUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5A02294C2CB9C0410011C6EC /* QuickLookUI.framework */; settings = {ATTRIBUTES = (Weak, ); }; };
+ 		5A0229502CCFBF260011C6EC /* file-fods.icns in Resources */ = {isa = PBXBuildFile; fileRef = 5A02294F2CCFBF260011C6EC /* file-fods.icns */; };
+ 		5A0229512CCFBF260011C6EC /* file-fods.icns in Resources */ = {isa = PBXBuildFile; fileRef = 5A02294F2CCFBF260011C6EC /* file-fods.icns */; };
++		C92A163E7D384CDEB913E6A8 /* DirectorySearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3F5E7901CB748AB9FC520A1 /* DirectorySearch.swift */; };
+ 		5A0229522CCFBF260011C6EC /* file-fods.icns in Resources */ = {isa = PBXBuildFile; fileRef = 5A02294F2CCFBF260011C6EC /* file-fods.icns */; };
+ 		5A0229542CCFC01B0011C6EC /* file-dotx.icns in Resources */ = {isa = PBXBuildFile; fileRef = 5A0229532CCFC01B0011C6EC /* file-dotx.icns */; };
+ 		5A0229552CCFC01B0011C6EC /* file-dotx.icns in Resources */ = {isa = PBXBuildFile; fileRef = 5A0229532CCFC01B0011C6EC /* file-dotx.icns */; };
+@@ -517,6 +518,7 @@
+ 		5A02293A2C7770DF0011C6EC /* en-GB */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "en-GB"; path = "en-GB.lproj/Document-Sign.strings"; sourceTree = "<group>"; };
+ 		5A02293B2C7770E00011C6EC /* en-GB */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "en-GB"; path = "en-GB.lproj/Localizable.strings"; sourceTree = "<group>"; };
+ 		5A02293C2C7770E00011C6EC /* en-GB */ = {isa = PBXFileReference; lastKnownFileType = text.plist.stringsdict; name = "en-GB"; path = "en-GB.lproj/Localizable.stringsdict"; sourceTree = "<group>"; };
++		D3F5E7901CB748AB9FC520A1 /* DirectorySearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectorySearch.swift; sourceTree = "<group>"; };
+ 		5A02293D2C7770E00011C6EC /* en-GB */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "en-GB"; path = "en-GB.lproj/Main.strings"; sourceTree = "<group>"; };
+ 		5A02293E2C7770E00011C6EC /* en-GB */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "en-GB"; path = "en-GB.lproj/MoveApplication.strings"; sourceTree = "<group>"; };
+ 		5A02293F2C7770E00011C6EC /* en-GB */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "en-GB"; path = "en-GB.lproj/Presentation-Reporter.strings"; sourceTree = "<group>"; };
+@@ -1865,6 +1867,7 @@
+ 		FCF289712150E65A002FD438 /* Code */ = {
+ 			isa = PBXGroup;
+ 			children = (
++				B89EA431C60F4DA49D031E52 /* FileDeckSearch */,
+ 				FC035A5A24855E1900AF820F /* Enums */,
+ 				FCF289732150E737002FD438 /* Views */,
+ 				FCCC2FD421E5DD5800FB9209 /* TouchBar */,
+@@ -1874,6 +1877,15 @@
+ 				FCA0B3561B9F00780073EDD4 /* Utils */,
+ 			);
+ 			path = Code;
++			sourceTree = "<group>";
++		};
++		B89EA431C60F4DA49D031E52 /* FileDeckSearch */ = {
++			isa = PBXGroup;
++			children = (
++				D3F5E7901CB748AB9FC520A1 /* DirectorySearch.swift */,
++			);
++			name = FileDeckSearch;
++			path = "../FileWorkbenchNative";
+ 			sourceTree = "<group>";
+ 		};
+ 		FCF289722150E6A1002FD438 /* Controllers */ = {
+@@ -2674,6 +2686,7 @@
+ 				FCB4C6BE26DD018B0012C20D /* ASCApplicationManager.mm in Sources */,
+ 				FCB4C6BF26DD018B0012C20D /* ASCSharedSettings.m in Sources */,
+ 				FCB4C6C026DD018B0012C20D /* ASCDownloadCellView.m in Sources */,
++				C92A163E7D384CDEB913E6A8 /* DirectorySearch.swift in Sources */,
+ 				FCB4C6C126DD018B0012C20D /* ASCSavePanelWithFormatController.m in Sources */,
+ 				FCB4C6C226DD018B0012C20D /* ASCCommonViewController.mm in Sources */,
+ 				FCB4C6C326DD018B0012C20D /* AnalyticsEvent.m in Sources */,

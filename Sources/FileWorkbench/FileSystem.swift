@@ -61,9 +61,21 @@ enum FileSystem {
             path.map { lstat($0, &metadata) } ?? -1
         }
         guard result == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
-        return FileIdentity(device: Int64(metadata.st_dev), inode: UInt64(metadata.st_ino),
-                            birthSeconds: Int64(metadata.st_birthtimespec.tv_sec),
-                            birthNanoseconds: Int64(metadata.st_birthtimespec.tv_nsec))
+        return identity(metadata)
+    }
+
+    /// vnode 监听用描述符身份核验 F_GETPATH，不能把同名替换目录误认成被重命名的原对象。
+    static func identity(ofDescriptor descriptor: Int32) throws -> FileIdentity {
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        guard metadata.st_mode & S_IFMT == S_IFDIR else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTDIR)) }
+        return identity(metadata)
+    }
+
+    static func identity(_ metadata: stat) -> FileIdentity {
+        FileIdentity(device: Int64(metadata.st_dev), inode: UInt64(metadata.st_ino),
+                     birthSeconds: Int64(metadata.st_birthtimespec.tv_sec),
+                     birthNanoseconds: Int64(metadata.st_birthtimespec.tv_nsec))
     }
 
     private static let resourceKeys: Set<URLResourceKey> = [

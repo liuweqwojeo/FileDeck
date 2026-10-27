@@ -6,6 +6,7 @@ struct WorkspaceStartupView: View {
     var hasPreviousWorkspace = false
     let chooseFolder: () -> Void
     let skipWelcome: () -> Void
+    var recoverDrafts: (() -> Void)?
 
     var body: some View {
         Group {
@@ -35,7 +36,7 @@ struct WorkspaceStartupView: View {
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                                 .padding(dense ? 24 : 32)
                         }
-                        .background(.white)
+                        .background(WorkspacePalette.surface)
                     } else {
                         HStack(spacing: 0) {
                             WelcomeWorkspaceIllustration(compact: false)
@@ -44,7 +45,7 @@ struct WorkspaceStartupView: View {
                                 .frame(maxWidth: 560)
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                                 .padding(dense ? 28 : 40)
-                                .background(.white)
+                                .background(WorkspacePalette.surface)
                         }
                     }
                 }
@@ -93,6 +94,12 @@ struct WorkspaceStartupView: View {
                     .buttonStyle(.borderless)
                     .controlSize(.large)
                     .frame(maxWidth: .infinity, minHeight: dense ? 28 : 34)
+                if let recoverDrafts {
+                    Button("恢复未保存草稿…", action: recoverDrafts)
+                        .font(.system(size: 13))
+                        .buttonStyle(.borderless)
+                        .frame(maxWidth: .infinity, minHeight: dense ? 28 : 34)
+                }
             }
             .frame(maxWidth: 360)
             .frame(maxWidth: .infinity)
@@ -215,8 +222,8 @@ private struct WelcomeWorkspaceIllustration: View {
             }
             .frame(height: compact ? 170 : 228)
         }
-        .background(.white.opacity(0.94), in: RoundedRectangle(cornerRadius: 12))
-        .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(.white, lineWidth: 1) }
+        .background(WorkspacePalette.surface.opacity(0.94), in: RoundedRectangle(cornerRadius: 12))
+        .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(WorkspacePalette.separator, lineWidth: 1) }
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .shadow(color: WorkspacePalette.accent.opacity(0.07), radius: 16, y: 8)
     }
@@ -241,6 +248,6 @@ private struct WelcomeWorkspaceIllustration: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity)
-        .background(.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 10))
+        .background(WorkspacePalette.surface.opacity(0.8), in: RoundedRectangle(cornerRadius: 10))
     }
 }

@@ -27,13 +27,17 @@ struct MediaContentRegression {
         try await pdfSaveAndUndo(pdfPath, directory: directory, original: pdf)
         try await pdfEditsDuringSave(pdfPath, directory: directory)
         try await csvSaveAndEncoding(directory: directory)
+        try await csvIncrementalUndoAndBaseline(directory: directory)
         try await newPDF(directory: directory, imagePath: imagePath)
         try await quickLookReadOnly(directory: directory)
         try await mountedViews(imagePath: imagePath, pdfPath: pdfPath, directory: directory)
         try await binaryOutputLimits(directory: directory)
         try await pdfOutputLimits(pdfPath, imagePath: imagePath, directory: directory)
         try await commandCapabilities(imagePath: imagePath, pdfPath: pdfPath, directory: directory)
-        print("PASS: 11 native media/CSV session regressions (real files, no Office runtime)")
+        try await imageTransformTransactions(directory: directory)
+        try await pdfBatchHighlights(pdfPath, directory: directory)
+        try await mediaHistoryAndCancellation(imagePath, directory: directory)
+        print("PASS: 15 native media/CSV session regressions (real files, no Office runtime)")
     }
     static func expect(_ condition: @autoclosure () throws -> Bool, _ message: String) throws {
         if try !condition() { throw NSError(domain: "NativeMediaRegression", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
@@ -93,6 +97,10 @@ struct MediaContentRegression {
             catch DocumentIOError.fileTooLarge { }
             do { try await content.appendImages(urls: [imagePath, imagePath]); throw failure("Oversized PDF append accepted") }
             catch DocumentIOError.fileTooLarge { }
+            do {
+                try await content.addHighlights(Array(repeating: .init(pageIndex: 0, bounds: CGRect(x: 5, y: 5, width: 20, height: 10)), count: 100))
+                throw failure("Oversized batch highlight accepted")
+            } catch DocumentIOError.fileTooLarge { }
             let after = directory.appendingPathComponent("after-limit-\(dirty).pdf")
             try await content.export(to: after, format: .pdf)
             try expect(Data(contentsOf: after) == Data(contentsOf: before), "Rejected PDF edits must preserve every buffer byte")
@@ -145,9 +153,9 @@ struct MediaContentRegression {
         try expect(pdf.canFind, "PDF text find must be available without editing")
         for content: any FWNativeContent in [csv, image, pdf] {
             try expect(!content.canUndo && !content.canRedo, "Empty history must disable undo and redo")
-            try mutation(content.controller) {
+            try await mutation(content.controller) {
                 if let csv = content as? FWCSVContent { try csv.setCell("changed", row: 0, column: 0) }
-                if let image = content as? FWImageContent { try image.rotate(clockwise: true) }
+                if let image = content as? FWImageContent { try await image.rotate(clockwise: true) }
                 if let pdf = content as? FWPDFContent { try pdf.rotate(pageIndexes: [0]) }
             }
             try expect(content.canUndo && !content.canRedo, "A committed edit must enable only undo")
@@ -190,12 +198,18 @@ struct MediaContentRegression {
         defer { content.undoManager?.endUndoGrouping() }
         try body()
     }
+    @MainActor static func mutation(_ content: NSViewController, _ body: () async throws -> Void) async rethrows {
+        content.undoManager?.groupsByEvent = false
+        content.undoManager?.beginUndoGrouping()
+        defer { content.undoManager?.endUndoGrouping() }
+        try await body()
+    }
     @MainActor static func imageSaveAndConflict(_ source: URL, directory: URL, original: Data) async throws {
         try await unmodifiedImageSavesPreserveBytes(directory: directory)
         try await editedImagePreservesMetadata(directory: directory)
         let content = try await FWImageContent.open(url: source)
         try expect(!content.isModified && content.kind == .png, "Image initial state")
-        try mutation(content) { try content.rotate(clockwise: true) }
+        try await mutation(content) { try await content.rotate(clockwise: true) }
         try expect(content.isModified, "Image rotation must mark dirty")
         content.undo(); try expect(!content.isModified, "Image undo must restore exact baseline")
         content.redo(); try expect(content.isModified, "Image redo must restore edit")
@@ -206,7 +220,7 @@ struct MediaContentRegression {
         try expect(CGImageSourceGetType(CGImageSourceCreateWithData(saved as CFData, nil)!) as String? == UTType.jpeg.identifier, "JPEG output type")
         try expect(ImageOperations.read(saved).width == 80 && ImageOperations.read(saved).height == 120, "Image rotated dimensions")
         try expect(Data(contentsOf: source) == original, "Image Save As must preserve source")
-        try mutation(content) { try content.rotate(clockwise: false) }
+        try await mutation(content) { try await content.rotate(clockwise: false) }
         try original.write(to: destination)
         do { try await content.save(); throw failure("Image external change unexpectedly overwritten") }
         catch DocumentIOError.externalModification { }
@@ -244,7 +258,7 @@ struct MediaContentRegression {
         try makeMetadataImage(type: .jpeg).write(to: source)
         let content = try await FWImageContent.open(url: source)
         // 原始 120×80 像素携带方向 6，读取为 80×120；用户再右转后应为 120×80。
-        try mutation(content) { try content.rotate(clockwise: true) }
+        try await mutation(content) { try await content.rotate(clockwise: true) }
         try await content.save()
         let saved = try Data(contentsOf: source)
         let metadata = try imageProperties(saved)
@@ -269,16 +283,16 @@ struct MediaContentRegression {
     @MainActor static func imageEditsDuringSave(_ source: URL, directory: URL) async throws {
         let content = try await FWImageContent.open(url: source)
         var changed = false
-        var editError: Error?
+        var editTask: Task<Void, Error>?
         content.onStateChanged = {
             if content.isBusy && !changed {
                 changed = true
-                do { try mutation(content) { try content.rotate(clockwise: true) } } catch { editError = error }
+                editTask = Task { try await mutation(content) { try await content.rotate(clockwise: true) } }
             }
         }
         let destination = directory.appendingPathComponent("快照.png")
         try await content.saveAs(to: destination)
-        if let editError { throw editError }
+        try await editTask?.value
         try expect(changed && content.isModified && !content.isBusy, "Image edits during save must remain dirty")
         try expect(ImageOperations.read(Data(contentsOf: destination)).width == 120, "Image save wrote captured snapshot")
         try await content.save()
@@ -291,15 +305,15 @@ struct MediaContentRegression {
         try original.write(to: source)
         let content = try await FWImageContent.open(url: source)
         var changed = false
-        var editError: Error?
+        var editTask: Task<Void, Error>?
         content.onStateChanged = {
             if content.isBusy && !changed {
                 changed = true
-                do { try mutation(content) { try content.rotate(clockwise: true) } } catch { editError = error }
+                editTask = Task { try await mutation(content) { try await content.rotate(clockwise: true) } }
             }
         }
         try await content.save()
-        if let editError { throw editError }
+        try await editTask?.value
         try expect(changed && content.isModified, "Edits during byte-preserving JPEG save must remain dirty")
         try expect(Data(contentsOf: source) == original, "Byte-preserving save must write its original snapshot")
         try await content.save()
@@ -383,6 +397,70 @@ struct MediaContentRegression {
         try await content.save()
         try expect(DocumentIO.open(url: destination).text.contains("保存期间修改") && !content.isModified, "CSV second save")
     }
+
+    @MainActor static func csvIncrementalUndoAndBaseline(directory: URL) async throws {
+        let path = directory.appendingPathComponent("增量短行.csv")
+        let original = "\"a\";\"b\"\r\n短行\r末行;é\n"
+        _ = try DocumentIO.save(DocumentIO.create(text: original, encoding: .utf16LittleEndian), to: path)
+        let bytes = try Data(contentsOf: path)
+        let content = try await FWCSVContent.open(url: path, encoding: .utf16LittleEndian, delimiter: .semicolon)
+        try mutation(content) { try content.setCell("新增\n\"值\"", row: 1, column: 1) }
+        try mutation(content) { try content.setCell("e\u{301}", row: 2, column: 1) }
+        content.undo()
+        try expect(content.isModified, "Partial cell undo must preserve other edits")
+        content.undo()
+        try expect(!content.isModified, "Cell undo must restore raw optional quotes and ragged field counts")
+        let copy = directory.appendingPathComponent("原文撤销副本.csv")
+        try await content.saveAs(to: copy)
+        try expect(Data(contentsOf: copy) == bytes, "Undo to source must preserve exact encoding and raw bytes")
+        content.redo()
+        try await content.save()
+        let saved = try DocumentIO.open(url: copy)
+        try expect(saved.text == "a;b\r\n短行;\"新增\n\"\"值\"\"\"\r末行;é\n", "Incremental edit must retain legacy canonical serialization")
+        try mutation(content) { try content.setCell("temporary", row: 0, column: 0) }
+        try mutation(content) { try content.setCell("a", row: 0, column: 0) }
+        try expect(!content.isModified, "Manual return to saved bytes must clear dirty without relying on undo position")
+        try mutation(content) { try content.setCell("new", row: 0, column: 0) }
+        let foreign = Data("foreign".utf8)
+        try foreign.write(to: copy)
+        do { try await content.save(); throw failure("Incremental CSV overwrote external version") }
+        catch DocumentIOError.externalModification { }
+        try expect(content.isModified && Data(contentsOf: copy) == foreign, "Lazy serialization failure must keep draft and external file")
+        try await content.save(overwriteExternalChanges: true)
+        try expect(!content.isModified && DocumentIO.open(url: copy).text.hasPrefix("new;b"), "Confirmed overwrite must advance lazy baseline")
+        try expect(Data(contentsOf: path) == bytes, "Save As and incremental edits must preserve original source")
+        try await content.close()
+
+        let quoted = try await FWCSVContent.open(url: path, encoding: .utf16LittleEndian, delimiter: .semicolon)
+        try mutation(quoted) { try quoted.setCell("temporary", row: 0, column: 0) }
+        try mutation(quoted) { try quoted.setCell("a", row: 0, column: 0) }
+        try expect(quoted.isModified, "Equal model signature must not treat canonical output as identical to optionally quoted original")
+        try await quoted.close(discardChanges: true)
+
+        // 挂载表格后交错单格差量与结构快照，防止撤销顺序或局部刷新丢失短行/新列。
+        let mixed = try await FWCSVContent.open(url: path, encoding: .utf16LittleEndian, delimiter: .semicolon)
+        mixed.view.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        mixed.view.layoutSubtreeIfNeeded()
+        func findTable(_ view: NSView) -> NSTableView? {
+            if let table = view as? NSTableView { return table }
+            return view.subviews.lazy.compactMap(findTable).first
+        }
+        guard let table = findTable(mixed.view) else { throw failure("Mounted CSV table missing") }
+        table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+        try mutation(mixed) { try mixed.setCell("delta", row: 1, column: 1) }
+        try expect(table.selectedRow == 1 && mixed.tableView(table, objectValueFor: table.tableColumns[1], row: 1) as? String == "delta", "Cell refresh must preserve selection and expose edited value")
+        try mutation(mixed) { try mixed.appendColumn() }
+        try mutation(mixed) { try mixed.setCell("newcol", row: 1, column: 2) }
+        mixed.undo(); mixed.undo()
+        try expect(table.numberOfColumns == 2 && mixed.isModified, "Structural undo must restore columns without losing earlier delta")
+        mixed.undo()
+        try expect(!mixed.isModified, "Interleaved undo must restore exact raw baseline")
+        mixed.redo(); mixed.redo(); mixed.redo()
+        let mixedCopy = directory.appendingPathComponent("交错撤销.csv")
+        try await mixed.saveAs(to: mixedCopy)
+        try expect(DocumentIO.open(url: mixedCopy).text == "a;b;\r\n短行;delta;newcol\r末行;é;\n" && !mixed.isModified, "Interleaved redo must save all cell and structure changes")
+        try await mixed.close()
+    }
     @MainActor static func newPDF(directory: URL, imagePath: URL) async throws {
         let content = try await FWPDFContent.createFromImages(urls: [imagePath, imagePath])
         try expect(content.path == nil && content.isModified, "New generated PDF is unsaved")
@@ -410,11 +488,193 @@ struct MediaContentRegression {
             try expect(!content.view.subviews.isEmpty, "Native editor must create visible controls")
         }
     }
+
+    @MainActor static func imageTransformTransactions(directory: URL) async throws {
+        let source = directory.appendingPathComponent("独立后台变换源图.png")
+        try makePNG().write(to: source)
+        let original = try Data(contentsOf: source)
+        let content = try await FWImageContent.open(url: source)
+        _ = content.view
+        var sawBusy = false, invalidBusyCommands = false
+        content.onStateChanged = {
+            if content.isBusy {
+                sawBusy = true
+                invalidBusyCommands = invalidBusyCommands || content.canUndo || content.canRedo || content.availableOperations.contains(.edit)
+            }
+        }
+        try await mutation(content) { try await content.rotate(clockwise: true) }
+        try await mutation(content) { try await content.crop(pixelRect: CGRect(x: 1, y: 2, width: 60, height: 100)) }
+        try await mutation(content) { try await content.resize(width: 30, height: 50) }
+        content.undo(); content.undo(); content.undo()
+        try expect(!content.isModified && content.canRedo && !content.canUndo, "Pixel snapshot undo must restore original encoded bytes")
+        do { try await content.crop(pixelRect: CGRect(x: -1, y: 0, width: 10, height: 10)); throw failure("Invalid image crop accepted") }
+        catch MediaOperationError.invalidParameter { }
+        try expect(!content.isModified && content.canRedo && !content.canUndo && !content.isBusy, "Failed worker must retain pixels, baseline and redo")
+        content.redo(); content.redo(); content.redo()
+        content.onStateChanged = nil
+        let target = directory.appendingPathComponent("后台裁剪缩放.png")
+        try await content.saveAs(to: target)
+        let saved = try Data(contentsOf: target)
+        let pixels = try ImageOperations.read(saved)
+        try expect(pixels.width == 30 && pixels.height == 50 && !content.isModified && sawBusy && !invalidBusyCommands,
+                   "Background image transforms must install correct pixels and disable commands until complete")
+        try Data("broken".utf8).write(to: target)
+        do { try await content.reload(discardChanges: false); throw failure("Invalid image reload accepted") }
+        catch MediaOperationError.invalidImage { }
+        try expect(!content.isModified && !content.isBusy && content.canUndo, "Reload decode failure must preserve current frame and history")
+        try saved.write(to: target)
+        try await content.reload(discardChanges: false)
+        try expect(!content.canUndo && !content.canRedo && !content.isModified, "Successful decoded reload resets history and baseline")
+        try expect(Data(contentsOf: source) == original, "Async image edits must preserve source")
+        try await content.close()
+    }
+
+    @MainActor static func pdfBatchHighlights(_ source: URL, directory: URL) async throws {
+        let original = try Data(contentsOf: source)
+        let content = try await FWPDFContent.open(url: source)
+        _ = content.view
+        let marks = (0..<60).map { PDFOperations.Highlight(pageIndex: $0 % 2, bounds: CGRect(x: 5, y: 5 + ($0 % 5) * 12, width: 40, height: 8)) }
+        try await mutation(content) { try await content.addHighlights(marks) }
+        content.undo()
+        try expect(!content.isModified && !content.canUndo && content.canRedo, "One batch must be exactly one undoable transaction")
+        do { try await content.addHighlights(marks + [.init(pageIndex: 999, bounds: marks[0].bounds)]); throw failure("Invalid final highlight accepted") }
+        catch MediaOperationError.invalidParameter { }
+        try expect(!content.isModified && content.canRedo && !content.canUndo && !content.isBusy, "Rejected batch must preserve redo and original bytes")
+        content.redo()
+        let target = directory.appendingPathComponent("批量高亮.pdf")
+        try await content.saveAs(to: target)
+        let document = try PDFOperations.read(Data(contentsOf: target))
+        try expect(document.pageCount == 2 && (0..<2).allSatisfy { document.page(at: $0)?.annotations.count == 30 }, "Batch save must retain every per-line/page highlight")
+        try expect((document.page(at: 0)?.annotations ?? []).allSatisfy { !$0.isReadOnly && $0.quadrilateralPoints?.count == 4 }, "Display read-only flags must not leak to saved annotations")
+        try expect(Data(contentsOf: source) == original && !content.isModified, "Batch Save As preserves source and advances baseline")
+        try await content.close()
+
+        let textPath = directory.appendingPathComponent("真实多行选区.pdf")
+        let textData = try makeTextPDF()
+        try textData.write(to: textPath)
+        let textContent = try await FWPDFContent.open(url: textPath)
+        textContent.view.frame = CGRect(x: 0, y: 0, width: 1000, height: 700)
+        textContent.view.layoutSubtreeIfNeeded()
+        func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
+        guard let pdfView = views(textContent.view).compactMap({ $0 as? PDFView }).first,
+              let selection = pdfView.document?.selectionForEntireDocument,
+              let button = views(textContent.view).compactMap({ $0 as? NSButton }).first(where: { $0.title == "高亮选中文字" }) else {
+            throw failure("Selectable PDF fixture or highlight toolbar missing")
+        }
+        let lines = selection.selectionsByLine().count
+        try expect(lines >= 4, "Fixture must contain real selectable text on multiple lines")
+        pdfView.setCurrentSelection(selection, animate: false)
+        textContent.undoManager?.groupsByEvent = false
+        textContent.undoManager?.beginUndoGrouping()
+        button.performClick(nil)
+        for _ in 0..<500 {
+            if textContent.isModified && !textContent.isBusy { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        textContent.undoManager?.endUndoGrouping()
+        try expect(textContent.isModified && !textContent.isBusy, "Real selection toolbar must complete background highlight")
+        let textCopy = directory.appendingPathComponent("真实选区高亮结果.pdf")
+        try await textContent.export(to: textCopy, format: .pdf)
+        let marked = try PDFOperations.read(Data(contentsOf: textCopy))
+        try expect((0..<marked.pageCount).reduce(0) { $0 + (marked.page(at: $1)?.annotations.count ?? 0) } == lines,
+                   "Toolbar must preserve one highlight per selected text line")
+        textContent.undo()
+        try expect(!textContent.isModified && !textContent.canUndo, "Toolbar multi-line batch must undo to exact baseline in one action")
+        try expect(Data(contentsOf: textPath) == textData, "Toolbar batch must leave source bytes intact")
+        try await textContent.close()
+    }
+
+    @MainActor static func mediaHistoryAndCancellation(_ imagePath: URL, directory: URL) async throws {
+        let history = FWMediaHistory(maximumBytes: 10)
+        history.manager.groupsByEvent = false
+        var value = 0
+        func set(_ new: Int, bytes: Int) {
+            let before = value
+            value = new
+            let grouping = !history.manager.isUndoing && !history.manager.isRedoing
+            if grouping { history.manager.beginUndoGrouping() }
+            history.register(bytes: bytes, name: "测试快照") { set(before, bytes: bytes) }
+            if grouping { history.manager.endUndoGrouping() }
+        }
+        set(1, bytes: 4); set(2, bytes: 4); set(3, bytes: 4)
+        try expect(history.retainedBytes == 8, "History must evict oldest entries before exceeding byte budget")
+        history.undo(); history.undo()
+        try expect(value == 1 && !history.canUndo && history.canRedo && history.retainedBytes <= 10, "Eviction must retain the newest coherent undo/redo path")
+        history.redo(); history.redo()
+        set(4, bytes: 11)
+        try expect(value == 4 && !history.canUndo && !history.canRedo && history.retainedBytes == 0, "Oversized history entry must not allow undo jumping across the new edit")
+        history.removeAll()
+
+        let image = try await FWImageContent.open(url: imagePath, historyMaximumBytes: 4096)
+        try await mutation(image) { try await image.crop(pixelRect: CGRect(x: 0, y: 0, width: 8, height: 8)) }
+        try await mutation(image) { try await image.resize(width: 8, height: 8) }
+        try expect(!image.canUndo, "Cropped snapshots must budget shared original backing, not just cropped dimensions")
+        try await mutation(image) { try await image.rotate(clockwise: true) }
+        try expect(image.canUndo, "A new small owned bitmap should fit the history budget")
+        try await mutation(image) { try await image.resize(width: 100, height: 100) }
+        image.undo()
+        try expect(!image.canRedo && !image.canUndo, "Undo from a large frame must drop an oversized redo snapshot without jumping across edits")
+        try await image.close(discardChanges: true)
+
+        let state = try FWBinaryState(data: Data([1, 2, 3]))
+        let release = DispatchSemaphore(value: 0)
+        let task = Task { try await state.transformWithResult { data in
+            guard !Thread.isMainThread else { throw failure("Transform ran on main thread") }
+            release.wait()
+            return (data + Data([4]), true)
+        } }
+        defer { release.signal() }
+        while !state.isBusy { await Task.yield() }
+        do { try state.replace(Data()); throw failure("Edit during transform accepted") } catch DocumentSessionError.busy { }
+        do { try state.close(discardChanges: true); throw failure("Close during transform accepted") } catch DocumentSessionError.busy { }
+        task.cancel(); release.signal()
+        do { _ = try await task.value; throw failure("Canceled transform committed") } catch is CancellationError { }
+        try expect(state.data == Data([1, 2, 3]) && !state.isBusy, "Canceled worker must leave buffer and busy state intact")
+
+        // 固定保存工作器的等待窗口，确定性覆盖“保存未完成时后台变换已提交”，不依赖编码速度。
+        let path = directory.appendingPathComponent("固定保存竞态.bin")
+        let baseline = Data([1, 2, 3]), changed = Data([4, 5, 6])
+        try baseline.write(to: path)
+        let opened = try SafeFileIO.open(url: path)
+        let concurrent = try FWBinaryState(data: opened.data, fileState: opened.state)
+        let saveGate = DispatchSemaphore(value: 0)
+        let saving = Task { try await concurrent.save(to: nil, overwrite: false) { bytes in saveGate.wait(); return bytes } }
+        defer { saveGate.signal() }
+        while !concurrent.isBusy { await Task.yield() }
+        let _: Bool = try await concurrent.transformWithResult(allowDuringSave: true) { _ in (changed, true) }
+        try expect(concurrent.isBusy && concurrent.data == changed && concurrent.isModified, "Transform must commit newer draft while save retains its snapshot")
+        do { try await concurrent.transform { _ in baseline }; throw failure("Default transform ran during saving") } catch DocumentSessionError.busy { }
+        saveGate.signal(); _ = try await saving.value
+        try expect(Data(contentsOf: path) == baseline && concurrent.data == changed && concurrent.isModified && !concurrent.isBusy,
+                   "Finishing older save must not clear concurrent transform dirty state")
+        try await concurrent.save(to: nil, overwrite: false)
+        try expect(Data(contentsOf: path) == changed && !concurrent.isModified, "Next save must persist transformed buffer")
+    }
     static func makePNG() throws -> Data {
         let context = CGContext(data: nil, width: 120, height: 80, bitsPerComponent: 8, bytesPerRow: 0,
                                 space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         context.setFillColor(CGColor(red: 0.2, green: 0.6, blue: 0.9, alpha: 1)); context.fill(CGRect(x: 0, y: 0, width: 120, height: 80))
         return try ImageOperations.export(context.makeImage()!, format: .png)
+    }
+    @MainActor static func makeTextPDF() throws -> Data {
+        let data = NSMutableData()
+        var box = CGRect(x: 0, y: 0, width: 400, height: 300)
+        guard let consumer = CGDataConsumer(data: data), let context = CGContext(consumer: consumer, mediaBox: &box, nil) else {
+            throw failure("Cannot create selectable PDF fixture")
+        }
+        for page in 0..<2 {
+            context.beginPDFPage(nil)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+            for line in 0..<3 {
+                ("Page \(page) selected text line \(line)" as NSString).draw(at: CGPoint(x: 30, y: 50 + line * 40),
+                    withAttributes: [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.black])
+            }
+            NSGraphicsContext.restoreGraphicsState()
+            context.endPDFPage()
+        }
+        context.closePDF()
+        return data as Data
     }
     static func makeMetadataImage(type: UTType) throws -> Data {
         let image = try ImageOperations.read(makePNG())

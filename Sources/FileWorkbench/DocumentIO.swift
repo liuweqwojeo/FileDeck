@@ -2,7 +2,7 @@ import CoreFoundation
 import Foundation
 
 /// 编辑器专用的完整文本 I/O。与截断预览分开，防止把预览片段误写回原文件。
-enum TextFileEncoding: Equatable, Sendable {
+enum TextFileEncoding: Equatable, Codable, Sendable {
     case utf8(bom: Bool)
     case utf16LittleEndian
     case utf16BigEndian
@@ -119,7 +119,8 @@ enum DocumentIO {
                                 byteOrderMark: byteOrderMark, fileState: state)
     }
 
-    private static func decode(_ data: Data, requestedEncoding: TextFileEncoding?) throws
+    // 递归内容搜索复用同一无损编码/二进制判定，但自行执行有界只读 I/O，不建立保存会话。
+    static func decode(_ data: Data, requestedEncoding: TextFileEncoding?) throws
         -> (text: String, encoding: TextFileEncoding, byteOrderMark: Data) {
         let markedEncoding: TextFileEncoding?
         if data.starts(with: [0xFF, 0xFE]) {

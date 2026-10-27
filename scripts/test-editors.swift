@@ -158,8 +158,40 @@ final class EditorResourceTests: NSObject, NSApplicationDelegate, WKNavigationDe
 
         let markdown = "# 中文预览\n\n![remote](\(probeOrigin)/markdown.png)\n\n[链接](\(probeOrigin)/link)\n\n<script>window.__markdownScriptRan=true</script>"
         _ = try await javascript("return window.workbench.open(document)", arguments: ["document": ["id": "native-markdown", "text": markdown, "language": "markdown", "readOnly": false]])
+        let updatedMarkdown = markdown.replacingOccurrences(of: "# 中文预览", with: "# 中文预览更新")
+        _ = try await javascript("document.querySelector('.cm-content').focus(); document.execCommand('selectAll'); return document.execCommand('insertText', false, text)", arguments: ["text": updatedMarkdown])
+        try await Task.sleep(for: .milliseconds(100))
+        let hidden = try await javascript("return document.querySelector('#preview').hidden && document.querySelector('#preview').childNodes.length === 0 && window.workbench.getText('native-markdown') === text", arguments: ["text": updatedMarkdown]) as? Bool ?? false
+        record("隐藏 Markdown 不生成预览且即时同步最新输入", hidden && bridgeMessages.contains { $0["id"] as? String == "native-markdown" && $0["type"] as? String == "change" && $0["text"] as? String == updatedMarkdown })
+        _ = try await javascript("return window.workbench.setMode({mode: 'split'})")
         let preview = try await javascript("return {title: document.querySelector('#preview h1').textContent, active: document.querySelectorAll('#preview img,#preview a,#preview script').length, ran: !!window.__markdownScriptRan, visible: !document.querySelector('#preview').hidden}") as? [String: Any] ?? [:]
-        record("真实 Markdown 双栏阻止远程图、链接与 HTML 脚本", preview["title"] as? String == "中文预览" && preview["active"] as? Int == 0 && preview["ran"] as? Bool == false && preview["visible"] as? Bool == true)
+        record("真实 Markdown 双栏阻止远程图、链接与 HTML 脚本", preview["title"] as? String == "中文预览更新" && preview["active"] as? Int == 0 && preview["ran"] as? Bool == false && preview["visible"] as? Bool == true)
+        let reused = try await javascript("const heading = document.querySelector('#preview h1'); window.workbench.setMode({mode: 'preview'}); window.workbench.setMode({mode: 'source'}); window.workbench.setMode({mode: 'split'}); return heading === document.querySelector('#preview h1')") as? Bool ?? false
+        record("相同 Markdown 正文切换显示模式复用预览 DOM", reused)
+
+        let batching = try await javascript("""
+        window.workbench.open({id: 'native-batching', text: '# 起点', language: 'markdown', mode: 'split', bridgeMode: 'patch-v1'});
+        const preview = document.querySelector('#preview');
+        const html = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+        let writes = 0;
+        Object.defineProperty(preview, 'innerHTML', {configurable: true, get() { return html.get.call(this); }, set(value) { writes++; html.set.call(this, value); }});
+        const content = document.querySelector('.cm-content');
+        for (const text of ['# 第一版', '# 第二版', '# 最新正文']) {
+            content.focus(); document.execCommand('selectAll'); document.execCommand('insertText', false, text);
+            await Promise.resolve();
+        }
+        const beforeFrame = writes;
+        const snapshot = window.workbench.getSnapshot();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const result = {beforeFrame, afterFrame: writes, text: snapshot.text, title: preview.querySelector('h1').textContent};
+        delete preview.innerHTML;
+        return result;
+        """) as? [String: Any] ?? [:]
+        record("真实 WK 可见 Markdown 同帧合并且快照立即保留最后输入", batching["beforeFrame"] as? Int == 0 && batching["afterFrame"] as? Int == 1
+               && batching["text"] as? String == "# 最新正文" && batching["title"] as? String == "最新正文", String(describing: batching))
+        try await Task.sleep(for: .milliseconds(100))
+        let patches = bridgeMessages.filter { $0["type"] as? String == "patch" && $0["id"] as? String == "native-batching" }
+        record("真实 WK 即时发送带版本差量和撤销状态", patches.count >= 3 && patches.allSatisfy { $0["text"] == nil && $0["edits"] is [[String: Any]] && $0["baseVersion"] is Int && $0["version"] is Int && $0["canUndo"] is Bool }, "patches=\(patches.count)")
 
         // 使用环回地址做阻止探针；没有真实远程主机，也不要求启动网络服务。
         // 断言 securitypolicyviolation，而不是把连接失败误判成 CSP 生效。

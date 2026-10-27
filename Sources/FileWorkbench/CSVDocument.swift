@@ -61,6 +61,26 @@ struct CSVDocument: Equatable, Sendable {
     private var lineEndings: [CSVLineEnding?]
     // 表格呈矩形，但未编辑的短行不补写分隔符，避免打开再保存改变原有字段数量。
     private var fieldCounts: [Int]
+    private var rowByteCounts: [Int]
+    private var rowHashes: [UInt64]
+    private var combinedHash: UInt64
+    private(set) var serializedByteCount: Int
+
+    /// 仅用于快速判定“必然不同”；相同签名仍须比较完整 UTF-8，不能用哈希碰撞清除脏状态。
+    struct SerializationSignature: Equatable, Sendable {
+        let byteCount: Int
+        let rowCount: Int
+        let hash: UInt64
+    }
+    var serializationSignature: SerializationSignature {
+        SerializationSignature(byteCount: serializedByteCount, rowCount: rowCount, hash: combinedHash)
+    }
+    struct CellSnapshot: Sendable {
+        let row: Int
+        let column: Int
+        let value: String
+        let fieldCount: Int
+    }
 
     var rowCount: Int { rows.count }
     var columnCount: Int { rows.first?.count ?? 0 }
@@ -73,6 +93,10 @@ struct CSVDocument: Equatable, Sendable {
         rows = []
         lineEndings = []
         fieldCounts = []
+        rowByteCounts = []
+        rowHashes = []
+        combinedHash = 0
+        serializedByteCount = 0
         preferredLineEnding = .lf
         try parse(text)
     }
@@ -82,11 +106,31 @@ struct CSVDocument: Equatable, Sendable {
         try validateIndex(row: row, column: column)
         // Swift 的 String 相等会合并 Unicode 规范等价形式；编辑时须按字节判断，保留用户实际输入。
         guard !rows[row][column].utf8.elementsEqual(value.utf8) else { return }
-        var updated = self
-        updated.rows[row][column] = value
-        updated.fieldCounts[row] = max(fieldCounts[row], column + 1)
-        try updated.validateContent()
-        self = updated
+        try restoreCell(CellSnapshot(row: row, column: column, value: value, fieldCount: max(fieldCounts[row], column + 1)))
+    }
+
+    func cellSnapshot(row: Int, column: Int) throws -> CellSnapshot {
+        try validateIndex(row: row, column: column)
+        return CellSnapshot(row: row, column: column, value: rows[row][column], fieldCount: fieldCounts[row])
+    }
+
+    /// 单格撤销同时恢复短行原字段数；先复制/校验受影响行，合法后才提交；独立持有时不复制全表。
+    mutating func restoreCell(_ snapshot: CellSnapshot) throws {
+        let row = snapshot.row, column = snapshot.column
+        try validateIndex(row: row, column: column)
+        guard (1...columnCount).contains(snapshot.fieldCount) else { throw CSVDocumentError.indexOutOfRange }
+        var values = rows[row]
+        values[column] = snapshot.value
+        guard values.dropFirst(snapshot.fieldCount).allSatisfy(\.isEmpty) else { throw CSVDocumentError.indexOutOfRange }
+        let metrics = try rowMetrics(values, count: snapshot.fieldCount, ending: lineEndings[row], row: row)
+        let total = serializedByteCount - rowByteCounts[row] + metrics.bytes
+        guard total <= Self.maximumTextBytes else { throw CSVDocumentError.textTooLarge }
+        rows[row] = values
+        fieldCounts[row] = snapshot.fieldCount
+        serializedByteCount = total
+        combinedHash ^= rowHashes[row] ^ metrics.hash
+        rowByteCounts[row] = metrics.bytes
+        rowHashes[row] = metrics.hash
     }
 
     /// 传入值不足时补空字段；追加行保留原文是否具有尾部换行的习惯。
@@ -102,19 +146,22 @@ struct CSVDocument: Equatable, Sendable {
         updated.rows.append(values + Array(repeating: "", count: width - values.count))
         updated.fieldCounts.append(width)
         updated.lineEndings.append(trailing ? preferredLineEnding : nil)
-        try updated.validateContent()
+        try updated.rebuildSerializationCache()
         self = updated
     }
 
     mutating func deleteRow(at index: Int) throws {
         guard rows.indices.contains(index) else { throw CSVDocumentError.indexOutOfRange }
+        var updated = self
         let trailing = hasTrailingNewline
-        rows.remove(at: index)
-        fieldCounts.remove(at: index)
-        lineEndings.remove(at: index)
-        if !rows.isEmpty, !trailing { lineEndings[rowCount - 1] = nil }
+        updated.rows.remove(at: index)
+        updated.fieldCounts.remove(at: index)
+        updated.lineEndings.remove(at: index)
+        if !updated.rows.isEmpty, !trailing { updated.lineEndings[updated.rowCount - 1] = nil }
         // 删除唯一的宽行后，至少保留一行完整字段数，否则保存再打开会悄悄丢掉空列。
-        if !rows.isEmpty, fieldCounts.max() != columnCount { fieldCounts[0] = columnCount }
+        if !updated.rows.isEmpty, updated.fieldCounts.max() != updated.columnCount { updated.fieldCounts[0] = updated.columnCount }
+        try updated.rebuildSerializationCache()
+        self = updated
     }
 
     /// 空表追加列时创建至少一行；已有表格只能提供不超过现有行数的值。
@@ -135,7 +182,7 @@ struct CSVDocument: Equatable, Sendable {
                 updated.fieldCounts[row] = width
             }
         }
-        try updated.validateContent()
+        try updated.rebuildSerializationCache()
         self = updated
     }
 
@@ -146,6 +193,10 @@ struct CSVDocument: Equatable, Sendable {
             rows = []
             fieldCounts = []
             lineEndings = []
+            rowByteCounts = []
+            rowHashes = []
+            combinedHash = 0
+            serializedByteCount = 0
             return
         }
         var updated = self
@@ -154,27 +205,33 @@ struct CSVDocument: Equatable, Sendable {
             if index < updated.fieldCounts[row] { updated.fieldCounts[row] = max(1, updated.fieldCounts[row] - 1) }
         }
         // 删除列也可能增大 CSV：末行“,”变成单空字段时必须写成“\"\"”，仍需在提交前校验上限。
-        try updated.validateContent()
+        try updated.rebuildSerializationCache()
         self = updated
     }
 
     func serialize() throws -> String {
-        try validateContent()
+        // 所有模型变更已在提交前校验并维护长度，保存时只生成正文，不再扫描校验整张表。
         var result = ""
+        result.reserveCapacity(serializedByteCount)
         for row in rows.indices {
-            let count = fieldCounts[row]
-            for column in 0..<count {
-                if column > 0 { result += delimiter.rawValue }
-                let value = rows[row][column]
-                let forceQuote = count == 1 && value.isEmpty && lineEndings[row] == nil
-                if needsQuotes(value) || forceQuote {
-                    result += "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
-                } else {
-                    result += value
-                }
-            }
-            result += lineEndings[row]?.rawValue ?? ""
+            result += encodeRow(rows[row], count: fieldCounts[row], ending: lineEndings[row])
         }
+        return result
+    }
+
+    private func encodeRow(_ values: [String], count: Int, ending: CSVLineEnding?) -> String {
+        var result = ""
+        for column in 0..<count {
+            if column > 0 { result += delimiter.rawValue }
+            let value = values[column]
+            let forceQuote = count == 1 && value.isEmpty && ending == nil
+            if needsQuotes(value) || forceQuote {
+                result += "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+            } else {
+                result += value
+            }
+        }
+        result += ending?.rawValue ?? ""
         return result
     }
 
@@ -268,7 +325,7 @@ struct CSVDocument: Equatable, Sendable {
         for row in rows.indices {
             rows[row].append(contentsOf: repeatElement("", count: width - rows[row].count))
         }
-        try validateContent()
+        try rebuildSerializationCache()
     }
 
     private func validateIndex(row: Int, column: Int) throws {
@@ -285,27 +342,42 @@ struct CSVDocument: Equatable, Sendable {
         value.utf8.contains { $0 == delimiter.byte || $0 == 34 || $0 == 10 || $0 == 13 }
     }
 
-    private func validateContent() throws {
+    private mutating func rebuildSerializationCache() throws {
         try Self.validateDimensions(rowCount: rowCount, columnCount: columnCount)
+        var sizes: [Int] = [], hashes: [UInt64] = []
+        sizes.reserveCapacity(rowCount); hashes.reserveCapacity(rowCount)
         var totalBytes = 0
+        var hash: UInt64 = 0
         for row in rows.indices {
-            let count = fieldCounts[row]
-            totalBytes += count - 1 + (lineEndings[row]?.rawValue.utf8.count ?? 0)
-            for column in 0..<count {
-                let value = rows[row][column]
-                let bytes = value.utf8
-                guard bytes.count <= Self.maximumCellBytes else {
-                    throw CSVDocumentError.cellTooLarge(row: row + 1, column: column + 1)
-                }
-                if let null = bytes.firstIndex(of: 0) {
-                    throw CSVDocumentError.nullCharacter(byteOffset: bytes.distance(from: bytes.startIndex, to: null) + 1)
-                }
-                totalBytes += bytes.count
-                if needsQuotes(value) || (count == 1 && value.isEmpty && lineEndings[row] == nil) {
-                    totalBytes += 2 + bytes.filter { $0 == 34 }.count
-                }
-                guard totalBytes <= Self.maximumTextBytes else { throw CSVDocumentError.textTooLarge }
-            }
+            let metrics = try rowMetrics(rows[row], count: fieldCounts[row], ending: lineEndings[row], row: row)
+            totalBytes += metrics.bytes
+            guard totalBytes <= Self.maximumTextBytes else { throw CSVDocumentError.textTooLarge }
+            sizes.append(metrics.bytes); hashes.append(metrics.hash); hash ^= metrics.hash
         }
+        rowByteCounts = sizes; rowHashes = hashes
+        serializedByteCount = totalBytes; combinedHash = hash
+    }
+
+    private func rowMetrics(_ values: [String], count: Int, ending: CSVLineEnding?, row: Int) throws -> (bytes: Int, hash: UInt64) {
+        var totalBytes = count - 1 + (ending?.rawValue.utf8.count ?? 0)
+        for column in 0..<count {
+            let value = values[column]
+            let bytes = value.utf8
+            guard bytes.count <= Self.maximumCellBytes else {
+                throw CSVDocumentError.cellTooLarge(row: row + 1, column: column + 1)
+            }
+            if let null = bytes.firstIndex(of: 0) {
+                throw CSVDocumentError.nullCharacter(byteOffset: bytes.distance(from: bytes.startIndex, to: null) + 1)
+            }
+            totalBytes += bytes.count
+            if needsQuotes(value) || (count == 1 && value.isEmpty && ending == nil) {
+                totalBytes += 2 + bytes.reduce(0) { $0 + ($1 == 34 ? 1 : 0) }
+            }
+            guard totalBytes <= Self.maximumTextBytes else { throw CSVDocumentError.textTooLarge }
+        }
+        // FNV-1a 加入行号后合并，降低交换行相互抵消的机会；这不是安全摘要或相等性证明。
+        var hash = UInt64(0xcbf29ce484222325) ^ UInt64(row)
+        for byte in encodeRow(values, count: count, ending: ending).utf8 { hash = (hash ^ UInt64(byte)) &* 0x100000001b3 }
+        return (totalBytes, hash)
     }
 }

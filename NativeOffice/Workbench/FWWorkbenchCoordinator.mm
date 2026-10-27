@@ -25,6 +25,8 @@ static char FWCoordinatorKey;
 @property(nonatomic) NSTabView *editorTabs;
 @property(nonatomic) NSMutableSet<NSString *> *readyOfficeTabs;
 @property(nonatomic) BOOL closingAll;
+@property(nonatomic) NSString *saveReturnRequest;
+@property(nonatomic) NSString *saveReturnTabID;
 @end
 
 @implementation FWWorkbenchCoordinator
@@ -157,14 +159,14 @@ static char FWCoordinatorKey;
         [browserView.topAnchor constraintEqualToAnchor:parent.topAnchor],
         [browserView.bottomAnchor constraintEqualToAnchor:parent.bottomAnchor]
     ]];
-    owner.view.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+    owner.view.window.appearance = nil; // 浏览与原生工作层跟随系统浅色/深色外观。
     // ContentView 挂载后统一设置欢迎页默认尺寸与分阶段最小值，避免覆盖用户缩放。
     [self updateEditorState];
 }
 
 - (void)performBrowserCommand:(NSString *)command {
     if (self.closingAll) return;
-    if (self.browser.hasFilePreview && ([command hasPrefix:@"new:"] || [command isEqualToString:@"open"])) {
+    if (self.browser.hasFilePreview && ([command hasPrefix:@"new:"] || [command isEqualToString:@"open"] || [command isEqualToString:@"recoverDrafts"])) {
         [self.browser requestClosePreviewWithCompletion:^(BOOL closed) { if (closed) [self performBrowserCommand:command]; }];
         return;
     }
@@ -172,9 +174,11 @@ static char FWCoordinatorKey;
         NSMenuItem *item = [NSMenuItem new];
         item.representedObject = [command substringFromIndex:4];
         [self createDocument:item];
-    } else if ([command isEqualToString:@"open"]) [self openPanel];
+    } else if ([command isEqualToString:@"recoverDrafts"]) [self recoverDrafts:nil];
+    else if ([command isEqualToString:@"open"]) [self openPanel];
     else if ([command isEqualToString:@"save"]) [self saveFromButton:nil];
     else if ([command isEqualToString:@"saveAs"]) [self saveAsFromButton:nil];
+    else if ([command isEqualToString:@"saveAndReturn"]) [self saveAndReturnSelected];
     else if ([command isEqualToString:@"export"]) [self exportSelected:nil];
     else if ([command isEqualToString:@"undo"]) [self undoSelected:nil];
     else if ([command isEqualToString:@"redo"]) [self redoSelected:nil];
@@ -206,6 +210,10 @@ static char FWCoordinatorKey;
             [self.readyOfficeTabs addObject:tab.uuid];
         if ([notification.name isEqualToString:CEFEventNameSave] && ![notification.userInfo[@"cancel"] boolValue])
             [self.browser refreshDirectory];
+        if ([notification.name isEqualToString:CEFEventNameSave] && [self.saveReturnTabID isEqualToString:tab.uuid]) {
+            if ([notification.userInfo[@"cancel"] boolValue]) [self cancelSaveReturn];
+            else [self finishOfficeSaveReturn:tab request:self.saveReturnRequest deadline:[NSDate dateWithTimeIntervalSinceNow:30]];
+        }
         [self updateEditorState];
     });
 }
@@ -232,7 +240,7 @@ static char FWCoordinatorKey;
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"工作台"];
     NSMenuItem *newItem = [[NSMenuItem alloc] initWithTitle:@"新建" action:nil keyEquivalent:@""];
     newItem.submenu = self.newMenu; [menu addItem:newItem];
-    for (NSArray *row in @[@[@"打开…", @"openFromButton:", @""], @[@"导出…", @"exportSelected:", @""],
+    for (NSArray *row in @[@[@"打开…", @"openFromButton:", @""], @[@"恢复未保存草稿…", @"recoverDrafts:", @""], @[@"导出…", @"exportSelected:", @""],
                             @[@"查找与替换", @"findSelected:", @""], @[@"撤销", @"undoSelected:", @""],
                             @[@"重做", @"redoSelected:", @""], @[@"固定当前标签", @"pinSelected:", @""]]) {
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:row[0] action:NSSelectorFromString(row[1]) keyEquivalent:row[2]];
@@ -257,6 +265,29 @@ static char FWCoordinatorKey;
         [[NSNotificationCenter defaultCenter] postNotificationName:CEFEventNameCreateTab object:nil
             userInfo:@{@"action":@(ASCTabActionCreateLocalFile), @"type":office[kind], @"active":@YES}];
     } else [coordinator openNativeURL:nil kind:kind pinned:YES];
+}
+// 恢复列表始终可从欢迎页或工作台菜单进入，不自动覆盖或静默打开用户文档。
+- (void)recoverDrafts:(id)sender {
+    if (self.closingAll) return;
+    if (self.browser.hasFilePreview) {
+        [self.browser requestClosePreviewWithCompletion:^(BOOL closed) { if (closed) [self recoverDrafts:sender]; }];
+        return;
+    }
+    __weak typeof(self) weakSelf = self;
+    [FWDocumentHost presentDraftRecoveryIn:self.owner.view.window completion:^(FWDocumentHost *host) {
+        FWWorkbenchCoordinator *strongSelf = weakSelf;
+        if (!host || !strongSelf.owner.view.window || strongSelf.closingAll) return;
+        [strongSelf.browser showEditor];
+        [strongSelf replaceCleanPreview];
+        ASCTabView *tab = [[ASCTabView alloc] initWithFrame:NSZeroRect];
+        tab.uuid = [@"fw:" stringByAppendingString:NSUUID.UUID.UUIDString];
+        tab.title = host.documentTitle;
+        tab.params = [@{@"fwNative":@YES, @"fwPreview":@NO} mutableCopy];
+        strongSelf.documents[tab.uuid] = host;
+        [strongSelf.owner.tabsControl addTab:tab selected:YES];
+        host.stateDidChange = ^{ [weakSelf updateTab:tab]; };
+        [strongSelf updateTab:tab];
+    }];
 }
 - (void)openPanel {
     if (self.browser.hasFilePreview) {
@@ -395,11 +426,12 @@ static char FWCoordinatorKey;
 - (void)updateEditorState {
     ASCTabView *tab = self.owner.tabsControl.selectedTab;
     FWDocumentHost *host = self.documents[tab.uuid ?: @""];
+    self.browser.legacyDocument = host;
     NSCefView *cef = tab && !host ? [self.owner cefViewWithTab:tab] : nil;
     NSString *path = host.documentURL.path ?: cef.data.path ?: tab.params[@"path"];
     NSURL *url = path.length ? [NSURL fileURLWithPath:path] : nil;
     BOOL ready = cef && [self.readyOfficeTabs containsObject:tab.uuid];
-    BOOL officeBusy = cef && (!ready || [cef isSaveLocked] || [cef checkBuilding]);
+    BOOL officeBusy = cef && (!ready || [cef isSaveLocked] || [cef checkBuilding] || [self.saveReturnTabID isEqualToString:tab.uuid]);
     BOOL officeCanSave = ready && [cef.data isViewType:cvwtEditor] && !cef.data.hasError &&
                          ![cef.data closed] && !officeBusy;
     [self.browser updateEditorWithTitle:host.documentTitle ?: tab.title ?: @"文件编辑"
@@ -411,6 +443,7 @@ static char FWCoordinatorKey;
                              canExport:host ? host.canExport : officeCanSave];
 }
 - (void)didSelectTab:(ASCTabView *)tab {
+    if (self.saveReturnTabID && ![self.saveReturnTabID isEqualToString:tab.uuid]) [self cancelSaveReturn];
     [self updateEditorState];
     if (tab) [self.browser showEditor];
     else [self.browser hideEditor];
@@ -443,6 +476,68 @@ static char FWCoordinatorKey;
         if (success) [self.browser refreshDirectory];
         [self updateEditorState];
     }];
+}
+- (void)cancelSaveReturn {
+    self.saveReturnRequest = nil;
+    self.saveReturnTabID = nil;
+}
+- (void)saveAndReturnSelected {
+    ASCTabView *tab = self.owner.tabsControl.selectedTab;
+    FWDocumentHost *host = self.selectedDocument;
+    if (host) {
+        [host saveIn:self.browser.currentDirectory saveAs:(!host.canSave && host.canSaveAs) completion:^(BOOL success) {
+            // 保存失败、目标已切换或等待期间继续输入时，都保留原会话。
+            if (success && self.selectedDocument == host && self.owner.tabsControl.selectedTab == tab && !host.modified && !host.busy) {
+                // 复用无提示的干净关闭门禁：暂停交互并最终同步 WK，晚到输入必须留在编辑器。
+                [host closeCleanPreviewWithCompletion:^(BOOL closed) {
+                    BOOL wasSelected = self.owner.tabsControl.selectedTab == tab;
+                    if (closed && self.documents[tab.uuid] == host) [self.owner.tabsControl removeTab:tab animated:NO];
+                    if (closed && wasSelected) [self.browser hideEditor];
+                    [self updateEditorState];
+                }];
+            }
+            [self updateEditorState];
+        }];
+        return;
+    }
+    NSCefView *cef = tab ? [self.owner cefViewWithTab:tab] : nil;
+    if (!cef || self.saveReturnRequest || ![self.readyOfficeTabs containsObject:tab.uuid] ||
+        [cef isSaveLocked] || [cef checkBuilding] || cef.data.hasError || [cef.data closed]) return;
+    if (!cef.data.hasChanges && cef.data.path.length && [[NSFileManager defaultManager] fileExistsAtPath:cef.data.path]) {
+        [self.browser hideEditor];
+        return;
+    }
+    NSString *request = NSUUID.UUID.UUIDString;
+    self.saveReturnRequest = request;
+    self.saveReturnTabID = tab.uuid;
+    [self updateEditorState];
+    [self saveFromButton:nil];
+    // 只接受本次保存的完成通知；超时只解除等待，绝不把“发出保存命令”当成保存成功。
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        if ([weakSelf.saveReturnRequest isEqualToString:request]) {
+            [weakSelf cancelSaveReturn];
+            [weakSelf updateEditorState];
+        }
+    });
+}
+- (void)finishOfficeSaveReturn:(ASCTabView *)tab request:(NSString *)request deadline:(NSDate *)deadline {
+    if (!request || ![self.saveReturnRequest isEqualToString:request]) return;
+    NSCefView *cef = [self.owner cefViewWithTab:tab];
+    if (!cef || self.owner.tabsControl.selectedTab != tab || !self.browser.hasAnyPreview || self.closingAll ||
+        cef.data.hasChanges || cef.data.hasError || [cef.data closed] || deadline.timeIntervalSinceNow <= 0) {
+        [self cancelSaveReturn]; [self updateEditorState]; return;
+    }
+    if ([cef isSaveLocked] || [cef checkBuilding]) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+            [weakSelf finishOfficeSaveReturn:tab request:request deadline:deadline];
+        });
+        return;
+    }
+    [self cancelSaveReturn];
+    [self.browser hideEditor];
+    [self updateEditorState];
 }
 - (void)openFromButton:(id)sender { [[FWWorkbenchCoordinator current] openPanel]; }
 - (void)saveFromButton:(id)sender { [(AppDelegate *)NSApp.delegate onMenuSave:sender]; }

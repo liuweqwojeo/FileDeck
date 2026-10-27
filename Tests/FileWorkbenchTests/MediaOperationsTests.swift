@@ -187,6 +187,45 @@ final class MediaOperationsTests: XCTestCase {
         XCTAssertEqual(annotation.quadrilateralPoints?.count, 4)
     }
 
+    func testPDFBatchHighlightsPreservePagesAnnotationsGeometryAndMetadata() throws {
+        let initial = try makePDF(pageSizes: [CGSize(width: 120, height: 80), CGSize(width: 200, height: 100)])
+        let noted = try PDFOperations.addTextAnnotation(initial, pageIndex: 0, bounds: CGRect(x: 5, y: 5, width: 10, height: 10), text: "保留批注")
+        let source = try PDFOperations.rotate(noted, pageIndexes: [1])
+        let marks = [PDFOperations.Highlight(pageIndex: 0, bounds: CGRect(x: 10, y: 30, width: 80, height: 10)),
+                     .init(pageIndex: 0, bounds: CGRect(x: 10, y: 50, width: 60, height: 10)),
+                     .init(pageIndex: 1, bounds: CGRect(x: 20, y: 40, width: 100, height: 12))]
+        let document = try PDFOperations.read(PDFOperations.addHighlights(source, highlights: marks))
+        XCTAssertEqual(document.pageCount, 2)
+        XCTAssertEqual(document.page(at: 1)?.rotation, 90)
+        XCTAssertEqual(document.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String, "测试文档")
+        XCTAssertEqual(document.page(at: 0)?.annotations.first?.contents, "保留批注")
+        for mark in marks {
+            let annotation = try XCTUnwrap(document.page(at: mark.pageIndex)?.annotations.first { $0.type == "Highlight" && $0.bounds == mark.bounds })
+            XCTAssertEqual(annotation.quadrilateralPoints?.count, 4)
+        }
+        XCTAssertEqual(try PDFOperations.read(source).page(at: 0)?.annotations.filter { $0.type == "Highlight" }.count, 0)
+        XCTAssertTrue(try PDFOperations.read(source).page(at: 1)?.annotations.isEmpty == true)
+    }
+
+    func testPDFBatchHighlightsRejectEntireInvalidSelection() throws {
+        let source = try makePDF(pageSizes: [CGSize(width: 120, height: 80)])
+        let valid = PDFOperations.Highlight(pageIndex: 0, bounds: CGRect(x: 5, y: 5, width: 30, height: 10))
+        for invalid in [PDFOperations.Highlight(pageIndex: 5, bounds: valid.bounds),
+                        .init(pageIndex: 0, bounds: CGRect(x: -1, y: 5, width: 10, height: 10)),
+                        .init(pageIndex: 0, bounds: CGRect(x: CGFloat.nan, y: 0, width: 10, height: 10))] {
+            XCTAssertThrowsError(try PDFOperations.addHighlights(source, highlights: [valid, invalid]))
+        }
+        XCTAssertThrowsError(try PDFOperations.addHighlights(source, highlights: []))
+        XCTAssertTrue(try PDFOperations.read(source).page(at: 0)?.annotations.isEmpty == true)
+    }
+
+    func testDecodedImageToPDFPreservesNormalizedGeometry() throws {
+        let image = try ImageOperations.rotate90(makeImage(width: 120, height: 80))
+        let document = try PDFOperations.read(PDFOperations.imageToPDF(image))
+        XCTAssertEqual(document.pageCount, 1)
+        XCTAssertEqual(document.page(at: 0)?.bounds(for: .mediaBox).size, CGSize(width: 80, height: 120))
+    }
+
     func testPDFMergeRemapsInternalLinksAndPreservesExternalURLs() throws {
         let prefix = try makePDF(pageSizes: [CGSize(width: 40, height: 50)])
         let linked = try makeLinkedPDF()

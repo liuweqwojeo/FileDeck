@@ -6,7 +6,7 @@ import { JSDOM } from "jsdom";
 
 const resource = (name) => new URL(`../../Resources/Editors/${name}`, import.meta.url);
 
-test("离线 bundle 支持 JSON 编辑撤销及 JSON/YAML 彩色预览", async () => {
+test("离线 bundle 支持 JSON 编辑撤销、配置预览与常见语言高亮", async () => {
   const html = await readFile(resource("index.html"), "utf8");
   const bundle = await readFile(resource("editor.js"), "utf8");
   const dom = new JSDOM(html, { runScripts: "outside-only", pretendToBeVisual: true, url: resource("index.html").href });
@@ -66,6 +66,29 @@ test("离线 bundle 支持 JSON 编辑撤销及 JSON/YAML 彩色预览", async (
       for (const theme of [light, css.slice(css.indexOf("@media (prefers-color-scheme: dark)"))]) {
         assert.match(theme, new RegExp(`\\.fw-yaml-${kind}[^{}]*\\{ color: #[0-9a-f]{6}; \\}`));
       }
+    }
+    for (const [filename, source] of [
+      ["main.rs", 'fn main() { println!("中文"); }\r\n'],
+      ["main.kt", 'fun main() { println("中文") }\r\n'],
+      ["build.gradle.kts", 'val message = "中文"\r\n'],
+      ["sample.h", '#define VALUE 42\r\n'], ["sample.hpp", 'class Example {};\r\n'],
+      ["module.mjs", 'export const message = "中文";\r\n'],
+      ["sample.mm", '@interface Example\r\n@end\r\n'],
+      ["App.svelte", '<script>let name = "中文";</script>\r\n<h1>{name}</h1>\r\n'],
+      ["main.jl", 'function greet()\r\n  return "中文"\r\nend\r\n'],
+    ]) {
+      const count = messages.length;
+      workbench.open({ id: filename, text: source, language: filename, readOnly: true });
+      for (let attempt = 0; attempt < 100 && !content.querySelector('.cm-line span[class]'); attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.ok(content.querySelector('.cm-line span[class]'), `${filename} 应从离线 bundle 显示实际高亮`);
+      assert.equal(workbench.getText(), source, filename);
+      workbench.setEditing({ id: filename, enabled: true });
+      assert.ok(content.querySelector('.cm-line span[class]'), `${filename} 进入编辑后保留高亮`);
+      assert.equal(workbench.getText(), source, filename);
+      assert.equal(workbench.undo(), false, filename);
+      assert.deepEqual(messages.slice(count).map(({ type }) => type), ['opened'], filename);
     }
     const nonce = dom.window.document.querySelector('meta[name="style-nonce"]').content;
     assert.ok(Array.from(dom.window.document.querySelectorAll("style")).some((style) => style.getAttribute("nonce") === nonce));

@@ -290,7 +290,7 @@ final class FileDragDropTests: XCTestCase {
         let target = rootDirectory.appendingPathComponent("Target", isDirectory: true)
         try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let store = BrowserStore(restoreLastLocation: false)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
         store.openQuickLocation(rootDirectory)
         try await settled(store)
         try await run(rootDirectory, target, store)

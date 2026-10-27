@@ -2,6 +2,13 @@ import Foundation
 
 @MainActor
 final class TextDocumentSession: DocumentSession {
+    struct Edit {
+        let from: Int
+        let to: Int
+        let text: String
+    }
+    enum EditError: Error { case invalidRange }
+
     /// 保持实际文件 I/O 可替换，便于确定性验证保存期间的编辑；正式实现始终使用完整 DocumentIO。
     struct Storage: Sendable {
         let open: @Sendable (URL, TextFileEncoding?) async throws -> TextFileDocument
@@ -27,6 +34,7 @@ final class TextDocumentSession: DocumentSession {
     private var document: TextFileDocument
     // 重建 WebKit 时需要恢复真实磁盘基线，不能把内存草稿误标为已保存。
     private(set) var savedText: String
+    private var recoveredUnsaved = false
     private var work: Work?
     private let storage: Storage
 
@@ -60,6 +68,14 @@ final class TextDocumentSession: DocumentSession {
         TextDocumentSession(document: DocumentIO.create(text: text, encoding: encoding), savedText: "", storage: storage)
     }
 
+    /// 崩溃恢复始终建立独立未命名文档，空正文也必须先保存或明确丢弃。
+    static func recover(text: String, encoding: TextFileEncoding) -> TextDocumentSession {
+        let session = create(text: text, encoding: encoding)
+        session.recoveredUnsaved = true
+        session.isModified = true
+        return session
+    }
+
     static func open(url: URL, encoding: TextFileEncoding? = nil,
                      storage: Storage = .fileSystem) async throws -> TextDocumentSession {
         let document = try await storage.open(url, encoding)
@@ -73,7 +89,36 @@ final class TextDocumentSession: DocumentSession {
         // String == 会把 NFC/NFD 视为相等，不能用于决定用户实际输入是否需要保存。
         guard !document.text.utf8.elementsEqual(text.utf8) else { return }
         document.text = text
-        isModified = !text.utf8.elementsEqual(savedText.utf8)
+        isModified = recoveredUnsaved || !text.utf8.elementsEqual(savedText.utf8)
+    }
+
+    /// 所有偏移基于同一份原始 UTF-16；先校验全部范围，再倒序提交，错误不能留下半份草稿。
+    func applyEdits(_ edits: [Edit]) throws {
+        try requireOpen()
+        guard work != .reloading else { throw DocumentSessionError.busy }
+        if isReadOnly, let path { throw DocumentIOError.readOnly(path) }
+        let source = document.text as NSString
+        let length = source.length
+        // NSRange 可以切开 UTF-16 高/低代理对，必须拒绝；组合附加符的合法边界仍允许编辑。
+        func isScalarBoundary(_ offset: Int) -> Bool {
+            guard offset > 0, offset < length else { return true }
+            return !(0xD800...0xDBFF).contains(source.character(at: offset - 1))
+                || !(0xDC00...0xDFFF).contains(source.character(at: offset))
+        }
+        var previousEnd = 0
+        for edit in edits {
+            guard edit.from >= previousEnd, edit.to >= edit.from, edit.to <= length,
+                  isScalarBoundary(edit.from), isScalarBoundary(edit.to) else {
+                throw EditError.invalidRange
+            }
+            previousEnd = edit.to
+        }
+        guard !edits.isEmpty else { return }
+        let updated = NSMutableString(string: document.text)
+        for edit in edits.reversed() {
+            updated.replaceCharacters(in: NSRange(location: edit.from, length: edit.to - edit.from), with: edit.text)
+        }
+        try replaceText(updated as String)
     }
 
     func save(overwriteExternalChanges: Bool) async throws {
@@ -107,6 +152,7 @@ final class TextDocumentSession: DocumentSession {
         let loaded = try await storage.open(path, encoding ?? document.encoding)
         document = loaded
         savedText = loaded.text
+        recoveredUnsaved = false
         isModified = false
     }
 
@@ -122,6 +168,7 @@ final class TextDocumentSession: DocumentSession {
         document = saved
         document.text = currentText
         savedText = saved.text
+        recoveredUnsaved = false
         isModified = !currentText.utf8.elementsEqual(savedText.utf8)
     }
 

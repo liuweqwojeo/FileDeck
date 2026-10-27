@@ -11,7 +11,7 @@ final class BrowserStoreTests: XCTestCase {
         let parent = root.appendingPathComponent("Parent", isDirectory: true)
         let child = parent.appendingPathComponent("Child", isDirectory: true)
         try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
-        let store = BrowserStore(restoreLastLocation: false)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
         store.openRoot(root, remember: false)
         try await settled(store)
         store.toggleExpanded(parent)
@@ -37,7 +37,7 @@ final class BrowserStoreTests: XCTestCase {
         let second = root.appendingPathComponent("Second", isDirectory: true)
         try FileManager.default.createDirectory(at: first, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: second, withIntermediateDirectories: true)
-        let store = BrowserStore(restoreLastLocation: false)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
         store.openRoot(root, remember: false)
         try await settled(store)
         store.navigate(to: first)
@@ -63,7 +63,7 @@ final class BrowserStoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let file = root.appendingPathComponent("hello.txt")
         try Data("preview".utf8).write(to: file)
-        let store = BrowserStore(restoreLastLocation: false)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
         store.openRoot(root, remember: false)
         try await settled(store)
         store.selectedURL = file
@@ -83,7 +83,7 @@ final class BrowserStoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
         let file = target.appendingPathComponent("selected.txt")
         try Data("preview".utf8).write(to: file)
-        let store = BrowserStore(restoreLastLocation: false)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
         store.openRoot(root, remember: false)
         try await settled(store)
         store.navigate(to: previous)
@@ -116,7 +116,7 @@ final class BrowserStoreTests: XCTestCase {
         let second = secondDirectory.appendingPathComponent("second.txt")
         try Data("first".utf8).write(to: first)
         try Data("second".utf8).write(to: second)
-        let store = BrowserStore(restoreLastLocation: false)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
 
         // 不等待第一次枚举，验证后续打开与导航都会使旧请求失效。
         store.openFile(first, remember: false)
@@ -140,7 +140,7 @@ final class BrowserStoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let file = root.appendingPathComponent(".hidden.txt")
         try Data("hidden".utf8).write(to: file)
-        let store = BrowserStore(restoreLastLocation: false)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
         store.openRoot(root, remember: false)
         try await settled(store)
         XCTAssertTrue(store.entries.isEmpty)
@@ -170,7 +170,7 @@ final class BrowserStoreTests: XCTestCase {
         try Data("content".utf8).write(to: file)
         try FileManager.default.createSymbolicLink(at: fileLink, withDestinationURL: file)
         try FileManager.default.createSymbolicLink(at: parentLink, withDestinationURL: parent)
-        let store = BrowserStore(restoreLastLocation: false)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
 
         store.openFile(package, remember: false)
         try await settled(store)
@@ -197,7 +197,7 @@ final class BrowserStoreTests: XCTestCase {
         let file = root.appendingPathComponent("selected.txt")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try Data("content".utf8).write(to: file)
-        let store = BrowserStore(restoreLastLocation: false)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
         store.openFile(file, remember: false)
         try await settled(store)
         store.query = "selected"

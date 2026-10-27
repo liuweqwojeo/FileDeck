@@ -7,7 +7,7 @@ final class WorkspaceEditorBridge: ObservableObject {
     let nativeView: NSView?
     private let openHandler: (URL, Bool) -> Void
     private let commandHandler: (String) -> Void
-    var previewHandler: ((URL, String) -> Void)?
+    var previewHandler: ((URL, String, Int?) -> Void)?
     @Published private(set) var title = "文件编辑"
     @Published private(set) var url: URL?
     @Published private(set) var hasDocument = false
@@ -18,6 +18,7 @@ final class WorkspaceEditorBridge: ObservableObject {
     @Published private(set) var canExport = false
     @Published private(set) var isPresented = false
     @Published var isExpanded = false
+    @Published var isPreviewPresented = false
     private var presentedURL: URL?
 
     var isAvailable: Bool { nativeView != nil }
@@ -43,7 +44,7 @@ final class WorkspaceEditorBridge: ObservableObject {
 
     func command(_ name: String) { if isAvailable { commandHandler(name) } }
 
-    func preview(_ url: URL, source: String) { previewHandler?(url, source) }
+    func preview(_ url: URL, source: String, line: Int? = nil) { previewHandler?(url, source, line) }
 
     func update(title: String, url: URL?, hasDocument: Bool, modified: Bool, busy: Bool,
                 canSave: Bool, canSaveAs: Bool, canExport: Bool) {

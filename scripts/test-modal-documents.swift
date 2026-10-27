@@ -106,6 +106,11 @@ final class ModalDocumentTests: NSObject, NSApplicationDelegate {
         window.title = "FileDeck 文档关闭验收（自动关闭）"
         window.isReleasedWhenClosed = false
         let testCase = ProcessInfo.processInfo.environment["FW_MODAL_DOCUMENT_TEST_CASE"]
+        if testCase == "incremental-bridge" {
+            try await incrementalBridge()
+            try await bridgeSnapshotRace()
+            return
+        }
         if testCase == "save-panel" {
             try await deletionAndSaveAs()
             return
@@ -144,6 +149,85 @@ final class ModalDocumentTests: NSObject, NSApplicationDelegate {
         try await webKitRecovery()
         try await webKitFailureAfterWrite()
         try await menuCapabilities()
+        try await incrementalBridge()
+        try await bridgeSnapshotRace()
+    }
+
+    /// 丢一条真实 WK 差量后继续输入，验证自动重同步；随后故障另存不能依靠网页补取正文。
+    func incrementalBridge() async throws {
+        trace("差量桥接与版本恢复")
+        let source = output.appendingPathComponent("版本桥接.json")
+        let baseline = "{\r\n\"emoji\":\"😀e\u{301}\",\r\"n\":9223372036854775807\n}"
+        try Data(baseline.utf8).write(to: source)
+        let host = try await open(source)
+        host.beginEditing()
+        try await wait("差量文档进入编辑") { host.isEditing && !host.busy }
+        let editor = web(in: host.view)!
+        guard let content = host.children.first as? FWTextContent else { throw Failed.assertion("缺少文本内容") }
+        let snapshot = try await js(editor, """
+        const handler = window.webkit.messageHandlers.workbench;
+        window.__forwardPatch = handler.postMessage.bind(handler);
+        window.__patches = [];
+        handler.postMessage = message => {
+            if (message.type === 'patch') {
+                window.__patches.push(message);
+                if (window.__patches.length === 1) return;
+            }
+            window.__forwardPatch(message);
+        };
+        window.workbench.formatJSON();
+        const content = document.querySelector('.cm-content');
+        content.focus(); document.execCommand('selectAll');
+        document.execCommand('insertText', false, '最新😀é 草稿');
+        await Promise.resolve();
+        return window.workbench.getSnapshot();
+        """) as? [String: Any] ?? [:]
+        let expected = snapshot["text"] as? String
+        try check("真实 WK 使用版本差量而非逐字全文", (snapshot["version"] as? Int ?? 0) >= 2 && expected?.contains("最新😀") == true)
+        try await wait("缺失差量自动完整重同步") { host.modified && host.canSave && host.canUndo }
+        try check("差量缺口恢复完整正文及真实撤销能力", host.modified && host.canUndo && content.loadError == nil)
+        _ = try await js(editor, "window.__forwardPatch(window.__patches[0]); window.__forwardPatch(window.__patches.at(-1)); return true")
+        try await Task.sleep(for: .milliseconds(100))
+        try check("过期及重复差量不回退版本或使编辑器故障", host.modified && host.canSave && content.loadError == nil)
+        content.webViewWebContentProcessDidTerminate(editor)
+        _ = try await js(editor, "window.workbench = null; return true")
+        let copy = output.appendingPathComponent("版本恢复草稿.txt")
+        try await content.saveAs(to: copy)
+        try check("版本恢复后故障另存保留最后输入和来源字节", (try String(contentsOf: copy, encoding: .utf8)) == expected
+                  && (try Data(contentsOf: source)) == Data(baseline.utf8) && !host.modified)
+        try await content.close()
+    }
+
+    /// 全文请求正在等待时继续输入，旧快照返回后也不能覆盖已接收的新差量。
+    func bridgeSnapshotRace() async throws {
+        let source = output.appendingPathComponent("快照竞态.txt")
+        try Data("原文".utf8).write(to: source)
+        let host = try await open(source)
+        host.beginEditing()
+        try await wait("快照竞态进入编辑") { host.isEditing && !host.busy }
+        let editor = web(in: host.view)!
+        _ = try await js(editor, """
+        const originalSnapshot = window.workbench.getSnapshot;
+        let first = true;
+        window.workbench = {...window.workbench, getSnapshot: async id => {
+            const old = originalSnapshot(id);
+            if (first) {
+                first = false;
+                const content = document.querySelector('.cm-content');
+                content.focus(); document.execCommand('selectAll');
+                document.execCommand('insertText', false, '等待快照时的最后输入😀');
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+            return old;
+        }};
+        return true;
+        """)
+        guard let content = host.children.first as? FWTextContent else { throw Failed.assertion("缺少文本内容") }
+        let copy = output.appendingPathComponent("快照竞态另存.txt")
+        try await content.saveAs(to: copy)
+        try check("异步旧快照不能覆盖后到的新差量且保存基线正确", (try String(contentsOf: copy, encoding: .utf8)) == "等待快照时的最后输入😀"
+                  && (try Data(contentsOf: source)) == Data("原文".utf8) && !host.modified && host.documentURL == copy)
+        try await content.close()
     }
 
     /// 使用真实 WK 历史、宿主门面和标准 responder 菜单校验，避免只断言布尔值的静态接线。
@@ -364,9 +448,14 @@ final class ModalDocumentTests: NSObject, NSApplicationDelegate {
         let after = try await state(editor)
         let restoredText = try await js(editor, "return window.workbench.getText()") as? String
         let selectionEqual = (before["selection"] as? NSDictionary) == (after["selection"] as? NSDictionary)
+        // 用户可在验收期间切到其他应用；此时应保留逻辑焦点，不能要求测试窗口抢回全局焦点。
+        let domFocus = try await js(editor, "return document.activeElement === document.querySelector('.cm-content');") as? Bool == true
+        let responder = window.firstResponder as? NSView
+        let nativeFocus = responder === editor || responder?.isDescendant(of: editor) == true
+        let focusRestored = domFocus && nativeFocus && (!NSApp.isActive || !window.isKeyWindow || after["focusedEditor"] as? Bool == true)
         let restored = !cancelled && host.modified && editor === web(in: host.view)
                   && selectionEqual && before["editorTop"] as? Double == after["editorTop"] as? Double
-                  && after["mode"] as? String == "split" && after["focusedEditor"] as? Bool == true
+                  && after["mode"] as? String == "split" && focusRestored
                   && restoredText == draft
         if !restored {
             trace("取消诊断 before=" + String(describing: before) + " after=" + String(describing: after)

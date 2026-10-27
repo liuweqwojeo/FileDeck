@@ -187,9 +187,7 @@ struct FilePreviewView: View {
     private func unavailableContent(_ failure: FilePreviewFailure) -> some View {
         VStack(spacing: 14) {
             if failure.isUnsupported {
-                Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
-                    .resizable().scaledToFit().frame(width: 64, height: 64)
-                    .accessibilityHidden(true)
+                WorkspaceFileIcon(url: url, size: 64)
             } else {
                 Image(systemName: "doc")
                     .font(.system(size: 60, weight: .ultraLight))

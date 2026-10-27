@@ -1,0 +1,55 @@
+--- a/macos/ONLYOFFICE.xcodeproj/project.pbxproj
++++ b/macos/ONLYOFFICE.xcodeproj/project.pbxproj
+@@ -329,6 +329,7 @@
+ 		FCB4C6D426DD018B0012C20D /* NSLayoutConstraint+Extensions.m in Sources */ = {isa = PBXBuildFile; fileRef = FCC77C6B206CE28F001B7837 /* NSLayoutConstraint+Extensions.m */; };
+ 		FCB4C6D526DD018B0012C20D /* AnalyticsHelper.m in Sources */ = {isa = PBXBuildFile; fileRef = FCFE61E11CAD02D4000D2418 /* AnalyticsHelper.m */; };
+ 		FCB4C6D626DD018B0012C20D /* ASCCertificateQLPreviewController.m in Sources */ = {isa = PBXBuildFile; fileRef = FC2C43AF25D46D66003A39C4 /* ASCCertificateQLPreviewController.m */; };
++		0BDEE101427B4FC1030B4B6C /* DraftRecoveryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D40B6CF6F49698AC0ACDF093 /* DraftRecoveryStore.swift */; };
+ 		FCB4C6D726DD018B0012C20D /* NSLayoutConstraint+PureLayout.m in Sources */ = {isa = PBXBuildFile; fileRef = FCE7D15F207D002700642010 /* NSLayoutConstraint+PureLayout.m */; };
+ 		FCB4C6D826DD018B0012C20D /* ASCTabsScrubberSelectionView.m in Sources */ = {isa = PBXBuildFile; fileRef = FCCC2FDE21E5E10D00FB9209 /* ASCTabsScrubberSelectionView.m */; };
+ 		FCB4C6D926DD018B0012C20D /* ASCDocumentSignatureController.m in Sources */ = {isa = PBXBuildFile; fileRef = FC8AA3142084C52500549F2D /* ASCDocumentSignatureController.m */; };
+@@ -1162,6 +1163,7 @@
+ 		FCE7D15F207D002700642010 /* NSLayoutConstraint+PureLayout.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = "NSLayoutConstraint+PureLayout.m"; sourceTree = "<group>"; };
+ 		FCE7D160207D002700642010 /* NSArray+PureLayout.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = "NSArray+PureLayout.h"; sourceTree = "<group>"; };
+ 		FCE7D161207D002700642010 /* NSLayoutConstraint+PureLayout.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = "NSLayoutConstraint+PureLayout.h"; sourceTree = "<group>"; };
++		D40B6CF6F49698AC0ACDF093 /* DraftRecoveryStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DraftRecoveryStore.swift; sourceTree = "<group>"; };
+ 		FCE7D162207D002700642010 /* ALView+PureLayout.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = "ALView+PureLayout.m"; sourceTree = "<group>"; };
+ 		FCE7D163207D002700642010 /* PureLayout+Internal.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = "PureLayout+Internal.h"; sourceTree = "<group>"; };
+ 		FCE7D164207D002700642010 /* PureLayout.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = PureLayout.h; sourceTree = "<group>"; };
+@@ -1659,9 +1661,28 @@
+ 			isa = PBXGroup;
+ 			children = (
+ 				FCBC426A1B9D650400405301 /* ONLYOFFICE */,
++				4D59E8A6C333EFA7AA17B816 /* DraftRecoveryBuild */,
+ 				FCBC42691B9D650400405301 /* Products */,
+ 				FCF2761F22C10D9300984E83 /* Frameworks */,
+ 			);
++			sourceTree = "<group>";
++		};
++		4D59E8A6C333EFA7AA17B816 /* DraftRecoveryBuild */ = {
++			isa = PBXGroup;
++			children = (
++				B7BB16D98C3F8E1838CCC62D /* FileDeckDraftRecovery */,
++			);
++			name = DraftRecoveryBuild;
++			path = ONLYOFFICE;
++			sourceTree = "<group>";
++		};
++		B7BB16D98C3F8E1838CCC62D /* FileDeckDraftRecovery */ = {
++			isa = PBXGroup;
++			children = (
++				D40B6CF6F49698AC0ACDF093 /* DraftRecoveryStore.swift */,
++			);
++			name = FileDeckDraftRecovery;
++			path = FileWorkbenchNative;
+ 			sourceTree = "<group>";
+ 		};
+ 		FCBC42691B9D650400405301 /* Products */ = {
+@@ -2679,6 +2700,7 @@
+ 				FCB4C6D426DD018B0012C20D /* NSLayoutConstraint+Extensions.m in Sources */,
+ 				FCB4C6D526DD018B0012C20D /* AnalyticsHelper.m in Sources */,
+ 				FCB4C6D626DD018B0012C20D /* ASCCertificateQLPreviewController.m in Sources */,
++				0BDEE101427B4FC1030B4B6C /* DraftRecoveryStore.swift in Sources */,
+ 				FCB4C6D726DD018B0012C20D /* NSLayoutConstraint+PureLayout.m in Sources */,
+ 				F14CD3C32EB73EBC00D476FE /* ASCEditorWindow.m in Sources */,
+ 				FCB4C6D826DD018B0012C20D /* ASCTabsScrubberSelectionView.m in Sources */,

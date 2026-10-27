@@ -18,17 +18,24 @@ export const lineEndingField = StateField.define({
   update(value, transaction) {
     let updated = value;
     if (transaction.docChanged) {
-      const endings = [];
-      let cursor = 0;
+      let changesLineStructure = false;
       transaction.changes.iterChanges((from, to, _newFrom, _newTo, inserted) => {
-        const first = transaction.startState.doc.lineAt(from).number - 1;
-        const last = transaction.startState.doc.lineAt(to).number - 1;
-        for (let index = cursor; index < first; index++) endings.push(value.endings[index]);
-        for (let line = 1; line < inserted.lines; line++) endings.push(value.preferred);
-        cursor = last;
+        if (inserted.lines > 1 || transaction.startState.doc.lineAt(from).number !== transaction.startState.doc.lineAt(to).number) changesLineStructure = true;
       });
-      for (let index = cursor; index < value.endings.length; index++) endings.push(value.endings[index]);
-      updated = { endings, preferred: value.preferred };
+      // 普通同一行输入不改变行尾映射，复用不可变数组及桥接偏移缓存，避免每字复制全部行尾。
+      if (changesLineStructure) {
+        const endings = [];
+        let cursor = 0;
+        transaction.changes.iterChanges((from, to, _newFrom, _newTo, inserted) => {
+          const first = transaction.startState.doc.lineAt(from).number - 1;
+          const last = transaction.startState.doc.lineAt(to).number - 1;
+          for (let index = cursor; index < first; index++) endings.push(value.endings[index]);
+          for (let line = 1; line < inserted.lines; line++) endings.push(value.preferred);
+          cursor = last;
+        });
+        for (let index = cursor; index < value.endings.length; index++) endings.push(value.endings[index]);
+        updated = { endings, preferred: value.preferred };
+      }
     }
     // 历史合并时反向 effect 按新到旧排列，最后一个快照对应整个撤销组开始前的换行。
     for (const effect of transaction.effects) {

@@ -13,6 +13,7 @@ export FW_OFFICE_SMOKE_DIR="$RUN_DIR/fixtures"
 export FW_OFFICE_SMOKE_TOKEN="$(uuidgen)"
 # 浏览页使用 AppStorage；隔离 CoreFoundation 偏好目录，避免验收改变真实工作区的分栏和预览设置。
 export CFFIXED_USER_HOME="$RUN_DIR/preferences-home"
+export FW_WORKBENCH_TEST_SUITE="local.fileworkbench.ui-test-$(uuidgen | tr '[:upper:]' '[:lower:]')"
 /usr/bin/ditto "$PROJECT_DIR/Resources/Editors" "$APP_DIR/Contents/Resources/FileWorkbenchEditors"
 python3 -B - "$APP_DIR/Contents/Info.plist" <<'PY'
 import plistlib
@@ -30,7 +31,7 @@ for SOURCE in "$PROJECT_DIR"/Sources/FileWorkbench/*.swift; do
         *) SOURCES+=("$SOURCE") ;;
     esac
 done
-SOURCES+=("$PROJECT_DIR"/NativeOffice/Workbench/*.swift "$PROJECT_DIR/scripts/test-native-hosts.swift")
+SOURCES+=("$PROJECT_DIR"/NativeOffice/Workbench/*.swift "$PROJECT_DIR/scripts/test-native-hosts.swift" "$PROJECT_DIR/NativeOffice/Tests/InteractionRegression.swift")
 # 并行开发可能在 swiftc 多阶段读取之间更新源码；每次验收编译自己的只读快照并记录摘要。
 mkdir -p "$RUN_DIR/sources"
 python3 -B - "$RUN_DIR" "${SOURCES[@]}" <<'PY'

@@ -5,6 +5,7 @@ import SwiftUI
 struct WorkspaceSplitView<Sidebar: View, Content: View, Preview: View>: View {
     let showPreview: Bool
     var expandPreview = false
+    var showSidebar = true
     @ViewBuilder let sidebar: () -> Sidebar
     @ViewBuilder let content: () -> Content
     @ViewBuilder let preview: () -> Preview
@@ -17,15 +18,18 @@ struct WorkspaceSplitView<Sidebar: View, Content: View, Preview: View>: View {
         GeometryReader { geometry in
             let widths = columnWidths(available: geometry.size.width)
             HStack(spacing: 0) {
-                sidebar().frame(width: widths.sidebar)
-                divider(label: "调整导航栏宽度", change: { translation in
-                    if sidebarDragOrigin == nil { sidebarDragOrigin = widths.sidebar }
-                    savedSidebarWidth = boundedSidebar((sidebarDragOrigin ?? widths.sidebar) + translation,
-                                                       available: geometry.size.width)
-                }, end: { sidebarDragOrigin = nil }, adjust: { direction in
-                    savedSidebarWidth = boundedSidebar(widths.sidebar + direction, available: geometry.size.width)
-                })
-                content().frame(width: expandPreview ? 0 : max(0, geometry.size.width - widths.sidebar - widths.preview - (showPreview ? 2 : 1)))
+                sidebar().frame(width: widths.sidebar).clipped()
+                    .allowsHitTesting(showSidebar).accessibilityHidden(!showSidebar).disabled(!showSidebar)
+                if showSidebar {
+                    divider(label: "调整导航栏宽度", change: { translation in
+                        if sidebarDragOrigin == nil { sidebarDragOrigin = widths.sidebar }
+                        savedSidebarWidth = boundedSidebar((sidebarDragOrigin ?? widths.sidebar) + translation,
+                                                           available: geometry.size.width)
+                    }, end: { sidebarDragOrigin = nil }, adjust: { direction in
+                        savedSidebarWidth = boundedSidebar(widths.sidebar + direction, available: geometry.size.width)
+                    })
+                }
+                content().frame(width: expandPreview ? 0 : max(0, geometry.size.width - widths.sidebar - widths.preview - (showPreview ? 1 : 0) - (showSidebar ? 1 : 0)))
                     .clipped().allowsHitTesting(!expandPreview).accessibilityHidden(expandPreview)
                 if showPreview && !expandPreview {
                     divider(label: "调整预览栏宽度", change: { translation in
@@ -46,7 +50,7 @@ struct WorkspaceSplitView<Sidebar: View, Content: View, Preview: View>: View {
     }
 
     private func columnWidths(available: CGFloat) -> (sidebar: CGFloat, preview: CGFloat) {
-        let sidebar = boundedSidebar(savedSidebarWidth, available: available)
+        let sidebar = showSidebar ? boundedSidebar(savedSidebarWidth, available: available) : 0
         return (sidebar, showPreview ? (expandPreview ? available - sidebar - 1 : boundedPreview(savedPreviewWidth, available: available, sidebar: sidebar)) : 0)
     }
 

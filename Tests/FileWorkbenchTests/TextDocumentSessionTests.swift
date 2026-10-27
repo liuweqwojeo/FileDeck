@@ -4,6 +4,54 @@ import XCTest
 
 @MainActor
 final class TextDocumentSessionTests: XCTestCase {
+    func testRecoveredEmptyTextRemainsDirtyAndCannotSaveOverOriginalImplicitly() async throws {
+        let session = TextDocumentSession.recover(text: "", encoding: .utf8(bom: true))
+        XCTAssertTrue(session.isModified); XCTAssertNil(session.path)
+        try session.replaceText("")
+        XCTAssertTrue(session.isModified)
+        do { try await session.close(discardChanges: false); XCTFail("恢复空草稿仍需明确处理") }
+        catch { XCTAssertEqual(error as? DocumentSessionError, .unsavedChanges) }
+        do { try await session.save(); XCTFail("恢复草稿须选择另存位置") }
+        catch { guard case DocumentIOError.saveLocationRequired = error else { throw error }
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("F3-empty-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = root.appendingPathComponent("recovered.txt")
+        try await session.saveAs(to: target)
+        XCTAssertEqual(try Data(contentsOf: target), Data([0xEF, 0xBB, 0xBF]))
+        XCTAssertFalse(session.isModified); XCTAssertEqual(session.path, target)
+    }
+
+    func testIncrementalUTF16EditsPreserveMixedEndingsUnicodeAndSavedBaseline() async throws {
+        try await withDirectory { directory in
+            let url = directory.appendingPathComponent("差量.txt")
+            let source = "a😀e\u{301}\r\n中文\r尾\n"
+            try Data(source.utf8).write(to: url)
+            let session = try await TextDocumentSession.open(url: url)
+            try session.applyEdits([.init(from: 1, to: 3, text: "🌱"), .init(from: 7, to: 9, text: "新\r\n文")])
+            XCTAssertTrue(session.text.utf8.elementsEqual("a🌱e\u{301}\r\n新\r\n文\r尾\n".utf8))
+            XCTAssertTrue(session.isModified)
+            try await session.save()
+            XCTAssertEqual(try Data(contentsOf: url), Data(session.text.utf8))
+            XCTAssertFalse(session.isModified)
+            try session.applyEdits([.init(from: 4, to: 5, text: "")])
+            XCTAssertTrue(session.isModified)
+            try session.applyEdits([.init(from: 4, to: 4, text: "\u{301}")])
+            XCTAssertFalse(session.isModified)
+        }
+    }
+
+    func testInvalidIncrementalRangesAreAtomicAndCannotSplitSurrogates() throws {
+        let session = TextDocumentSession.create(text: "a😀bc")
+        for edits in [[TextDocumentSession.Edit(from: 0, to: 1, text: "ok"), .init(from: 2, to: 3, text: "bad")],
+                      [.init(from: 3, to: 5, text: "x"), .init(from: 4, to: 5, text: "y")],
+                      [.init(from: -1, to: 0, text: "")], [.init(from: 0, to: 100, text: "")]] {
+            XCTAssertThrowsError(try session.applyEdits(edits))
+            XCTAssertEqual(session.text, "a😀bc")
+        }
+    }
+
     func testNewSessionRequiresSaveLocationAndRejectsUnsupportedExport() async throws {
         try await withDirectory { directory in
             let session = TextDocumentSession.create(text: "未保存内容")
@@ -134,7 +182,7 @@ final class TextDocumentSessionTests: XCTestCase {
             await gate.waitUntilStarted()
             XCTAssertTrue(session.isBusy)
             XCTAssertEqual(session.availableOperations, [.edit])
-            try session.replaceText("new edit during save")
+            try session.applyEdits([.init(from: 0, to: session.text.utf16.count, text: "new edit during save")])
             await assertSessionError(.busy) { try await session.save() }
             await assertSessionError(.busy) { try await session.saveAs(to: extra) }
             await assertSessionError(.busy) { try await session.reload(discardChanges: true) }

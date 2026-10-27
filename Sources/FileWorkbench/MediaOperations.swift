@@ -93,9 +93,27 @@ enum PDFOperations {
         }
     }
 
-    /// 高亮矩形同样使用页面坐标；多行选区应对每行分别调用，避免覆盖行间空白。
+    struct Highlight: Sendable {
+        let pageIndex: Int
+        let bounds: CGRect
+    }
+
+    /// 一次事务处理全部行/页，只解析和序列化一次；仍逐行保留 QuadPoints，避免覆盖行间空白。
     static func addHighlight(_ data: Data, pageIndex: Int, bounds: CGRect) throws -> Data {
-        try annotate(data, pageIndex: pageIndex, bounds: bounds) { bounds in
+        try addHighlights(data, highlights: [Highlight(pageIndex: pageIndex, bounds: bounds)])
+    }
+    static func addHighlights(_ data: Data, highlights: [Highlight]) throws -> Data {
+        guard !highlights.isEmpty else { throw MediaOperationError.invalidParameter("选区没有可高亮的文字。") }
+        let document = try read(data)
+        guard document.allowsCommenting else { throw MediaOperationError.restrictedPDF }
+        let targets = try highlights.map { mark -> (PDFPage, CGRect) in
+            let page = try page(at: mark.pageIndex, in: document)
+            guard finitePositive(mark.bounds), page.bounds(for: .cropBox).contains(mark.bounds) else {
+                throw MediaOperationError.invalidParameter("批注范围必须为页面内的有效矩形。")
+            }
+            return (page, mark.bounds)
+        }
+        for (page, bounds) in targets {
             let annotation = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
             annotation.color = NSColor.yellow.withAlphaComponent(0.35)
             // QuadPoints 相对批注框，按 PDFKit 要求的左上、右上、左下、右下顺序排列。
@@ -105,8 +123,18 @@ enum PDFOperations {
                 NSValue(point: .zero),
                 NSValue(point: NSPoint(x: bounds.width, y: 0))
             ]
-            return annotation
+            page.addAnnotation(annotation)
         }
+        return try serialize(document)
+    }
+
+    /// 当前图片已有归一后的不可变像素，不经 PNG/JPEG 往返来生成单页 PDF。
+    static func imageToPDF(_ image: CGImage) throws -> Data {
+        let document = PDFDocument()
+        let size = NSSize(width: image.width, height: image.height)
+        guard let page = PDFPage(image: NSImage(cgImage: image, size: size)) else { throw MediaOperationError.encodingFailed("PDF") }
+        document.insert(page, at: 0)
+        return try serialize(document)
     }
 
     /// 每张图片生成一页，归一方向后按每像素一个 PDF point 定义页面尺寸。

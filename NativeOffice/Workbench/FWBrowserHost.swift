@@ -11,7 +11,7 @@ public final class FWBrowserHost: NSViewController {
     private(set) var backgroundView: NSView!
     private(set) var previewModal: FWPreviewModal?
     private var observations = Set<AnyCancellable>()
-    private var pendingPreview: (URL, String)?
+    private var pendingPreview: (URL, String, Int?)?
     private let commandHandler: (String) -> Void
     private let workbenchDefaults: UserDefaults
     @objc public var currentDirectory: URL? { browserStore.currentDirectory }
@@ -19,6 +19,7 @@ public final class FWBrowserHost: NSViewController {
     @objc public var hasAnyPreview: Bool { previewModal != nil }
     @objc public var previewDocument: FWDocumentHost? { previewModal?.documentHost }
     @objc public var previewBusy: Bool { previewModal?.isClosing == true || previewDocument?.busy == true }
+    @objc public weak var legacyDocument: FWDocumentHost?
 
     enum TestPreferencesError: Error { case invalidSuite, unavailableSuite }
 
@@ -44,7 +45,7 @@ public final class FWBrowserHost: NSViewController {
         editorBridge = WorkspaceEditorBridge(nativeView: editorView, openHandler: openHandler, commandHandler: commandHandler)
         self.commandHandler = commandHandler
         super.init(nibName: nil, bundle: nil)
-        editorBridge.previewHandler = { [weak self] url, source in self?.openPreview(url, source: source) }
+        editorBridge.previewHandler = { [weak self] url, source, line in self?.openPreview(url, source: source, line: line) }
         editorBridge.$isPresented.removeDuplicates().dropFirst().sink { [weak self] visible in
             guard let self else { return }
             if visible { self.showLegacyEditor() }
@@ -61,7 +62,7 @@ public final class FWBrowserHost: NSViewController {
     public override func loadView() {
         let root = NSView()
         backgroundView = NSHostingView(rootView: ContentView(store: browserStore, editor: editorBridge)
-            .defaultAppStorage(workbenchDefaults).preferredColorScheme(.light))
+            .defaultAppStorage(workbenchDefaults))
         backgroundView.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(backgroundView)
         NSLayoutConstraint.activate([
@@ -75,7 +76,7 @@ public final class FWBrowserHost: NSViewController {
         super.viewDidAppear()
         if let pending = pendingPreview {
             pendingPreview = nil
-            openPreview(pending.0, source: pending.1)
+            openPreview(pending.0, source: pending.1, line: pending.2)
         } else if editorBridge.isPresented { showLegacyEditor() }
     }
 
@@ -86,42 +87,59 @@ public final class FWBrowserHost: NSViewController {
 
     @objc(openPreviewURL:source:)
     public func openPreview(_ url: URL, source: String) {
+        openPreview(url, source: source, line: nil)
+    }
+
+    func openPreview(_ url: URL, source: String, line: Int?) {
         guard url.isFileURL else { return }
-        guard isViewLoaded, view.window != nil else { pendingPreview = (url, source); return }
+        guard isViewLoaded, view.window != nil else { pendingPreview = (url, source, line); return }
         if browserStore.startupPhase != .ready { browserStore.skipWelcome() }
         if let modal = previewModal {
             guard modal.mode == .file else { return }
-            if modal.url == url, !modal.isClosing { view.window?.makeFirstResponder(modal.overlay.dialog); return }
-            pendingPreview = (url, source)
+            if modal.url == url, !modal.isClosing {
+                if let line { modal.revealLine(line) }
+                else { view.window?.makeFirstResponder(modal.overlay.dialog) }
+                return
+            }
+            pendingPreview = (url, source, line)
             guard !modal.isClosing else { return }
             modal.requestClose { [weak self] closed in
                 guard let self else { return }
                 if closed, let next = self.pendingPreview {
                     self.pendingPreview = nil
-                    self.presentPreview(next.0, source: next.1)
+                    self.presentPreview(next.0, source: next.1, line: next.2)
                 } else { self.pendingPreview = nil }
             }
-        } else { presentPreview(url, source: source) }
+        } else { presentPreview(url, source: source, line: line) }
     }
 
-    private func presentPreview(_ url: URL, source: String) {
-        let modal = FWPreviewModal(owner: self, url: url, source: source)
+    private func presentPreview(_ url: URL, source: String, line: Int?) {
+        let modal = FWPreviewModal(owner: self, url: url, source: source, initialLine: line)
         attach(modal)
         modal.present()
     }
 
     private func attach(_ modal: FWPreviewModal) {
         previewModal = modal
+        editorBridge.isPreviewPresented = true
         modal.didClose = { [weak self, weak modal] in
             guard let self, self.previewModal === modal else { return }
             self.previewModal = nil
+            self.editorBridge.isPreviewPresented = false
+            // 返回动画尚未完成时可能已有新的打开请求；等旧层卸载后兑现当前呈现意图。
+            if self.editorBridge.isPresented {
+                Task { @MainActor [weak self] in self?.showLegacyEditor() }
+            }
         }
     }
 
     private func showLegacyEditor() {
-        guard let nativeView = editorBridge.nativeView, editorBridge.hasDocument, view.window != nil else { return }
+        guard let nativeView = editorBridge.nativeView, editorBridge.hasDocument, editorBridge.isPresented, view.window != nil else { return }
         if let modal = previewModal {
-            if modal.mode == .legacy { updateLegacyChrome(); return }
+            if modal.mode == .legacy {
+                if !modal.isClosing { updateLegacyChrome() }
+                return
+            }
             // 外部打开/新建也先保护临时会话，不能用标签回调直接替换未保存编辑器。
             modal.requestClose { [weak self] closed in if closed { self?.showLegacyEditor() } }
             return

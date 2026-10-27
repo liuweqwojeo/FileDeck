@@ -12,7 +12,7 @@ from common import ROOT, SOURCE, BUILD
 SHARED_SWIFT_SOURCES = (
     "BrowserStore.swift", "CSVDocument.swift", "DocumentIO.swift", "DocumentSession.swift",
     "FileCapabilities.swift", "FileSystem.swift", "MediaOperations.swift", "SafeFileIO.swift",
-    "TextDocumentSession.swift", "TextPreviewLoader.swift",
+    "TextDocumentSession.swift", "TextPreviewLoader.swift", "DraftRecoveryStore.swift", "DirectorySearch.swift",
     "ContentView.swift", "FilePreviewView.swift", "FileMetadataView.swift",
     "WorkspaceDesign.swift", "WorkspaceStartupView.swift", "WorkspaceSplitView.swift",
     "WorkspaceEditorBridge.swift", "NewFileTemplate.swift",

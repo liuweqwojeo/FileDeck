@@ -130,7 +130,7 @@ class SmokeVerificationTests(unittest.TestCase):
             verify_run(self.directory)
         stages = {name: True for name in ["passed", "textEditedInWebKit", "nativeSaveRoutedWhileSwitching",
                   "nativeCloseVerified", "pdfNativeTabVerified", "officeRetainedUnsavedChanges",
-                  "browserEmbedded", "editorStillInBrowserWindow", "modalWindowCloseProtected", "modalQuitProtected", "modalDiscardClosed"]}
+                  "browserEmbedded", "editorStillInBrowserWindow", "modalWindowCloseProtected", "modalQuitProtected", "modalDiscardClosed", "officeSaveAndReturnVerified", "nativeSaveAndReturnVerified"]}
         result = self.result(workbench=stages)
         (self.directory / "native-result.json").write_text(json.dumps(result))
         output = self.directory / "mixed.txt"
@@ -140,7 +140,7 @@ class SmokeVerificationTests(unittest.TestCase):
         output.write_bytes((self.marker + "\r\n").encode())
         self.assertTrue(verify_run(self.directory)["workbench"]["passed"])
         # 单窗布局也是验收契约：不能用旧版混合标签报告证明浏览页面已经承载编辑器。
-        for stage in ("nativeSaveRoutedWhileSwitching", "browserEmbedded", "editorStillInBrowserWindow", "modalWindowCloseProtected", "modalQuitProtected", "modalDiscardClosed"):
+        for stage in ("nativeSaveRoutedWhileSwitching", "browserEmbedded", "editorStillInBrowserWindow", "modalWindowCloseProtected", "modalQuitProtected", "modalDiscardClosed", "officeSaveAndReturnVerified", "nativeSaveAndReturnVerified"):
             with self.subTest(stage=stage):
                 incomplete = {**stages, stage: False}
                 (self.directory / "native-result.json").write_text(json.dumps(self.result(workbench=incomplete)))
@@ -155,7 +155,7 @@ class SmokeVerificationTests(unittest.TestCase):
         workbench = {name: True for name in ["passed", "textEditedInWebKit", "nativeSaveRoutedWhileSwitching",
                     "nativeCloseVerified", "pdfNativeTabVerified", "officeRetainedUnsavedChanges",
                     "browserEmbedded", "editorStillInBrowserWindow", "modalWindowCloseProtected",
-                    "modalQuitProtected", "modalDiscardClosed"]}
+                    "modalQuitProtected", "modalDiscardClosed", "officeSaveAndReturnVerified", "nativeSaveAndReturnVerified"]}
         recovery = {stage: True for stage in RECOVERY_STAGES}
         recovery.update(sourceFile="mixed.txt", destinationFile=RECOVERY_FILE,
                         lastSavedPath=str(self.directory / RECOVERY_FILE),

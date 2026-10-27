@@ -1,24 +1,26 @@
 {
   "schema": 2,
   "target": "Safari 17 / macOS 14",
-  "dependenciesLockSHA256": "2c9d4bd52f7d18e6113ccb1220500a79d1ab14e75fd6d4fb60a694b5e01ca328",
+  "dependenciesLockSHA256": "610abf4394cc47ffb137c147fe91588b0938fe1594ccfe830732d68dc734c79d",
   "inputs": {
     "EditorAssets/build.mjs": "5fb16ee3edde688e98dfa5d57366d1d3e5895b963bcb85df251e796e607b0193",
-    "EditorAssets/package.json": "48d7de034469408a5c33b4adccab6721062b46eaa70545087f4229382afbef0b",
-    "EditorAssets/package-lock.json": "2c9d4bd52f7d18e6113ccb1220500a79d1ab14e75fd6d4fb60a694b5e01ca328",
-    "EditorAssets/src/editor.css": "7d478f7a78ff3198b1b81e536a59c4814aeee94bf9740b0ccacbc70d609b169c",
+    "EditorAssets/package.json": "27073a6ff783ca0ad63416a0b24f7edf56f6d16f44d4fa681c016d6b2f0125b2",
+    "EditorAssets/package-lock.json": "610abf4394cc47ffb137c147fe91588b0938fe1594ccfe830732d68dc734c79d",
+    "EditorAssets/src/editor.css": "f4bff1c61ed88a9ec696316cfc17ce7b2134caafcd2f3f76a8fb04167f6b5490",
     "EditorAssets/src/index.html": "651224353c590528f3e1a5956d0481712f68528320d8ecffbc3a16f0dd361751",
     "EditorAssets/src/index.mjs": "16dbc98e1f72430a0f7248de40694e7138e0afe2d99bbeb04c226486bbabf4a5",
     "EditorAssets/src/json-format.mjs": "b5281007babe035e7e38e8186656312ddff59f0daf888c537d2bc82531f96edb",
-    "EditorAssets/src/line-endings.mjs": "68713946178ac89c7b0f8440f25610482fda70a4bbd92ee168f05c721fd874a8",
+    "EditorAssets/src/languages.mjs": "d55e2fb0ff78cd000ecff6a81fc593c9bd62945d5284c1092ab14ad57c276bd2",
+    "EditorAssets/src/line-endings.mjs": "bc6684f91abb7fc3fa8ee2cbb5efc3bdeb9c5318a9d1b1fbe06176e69ad6d1b3",
     "EditorAssets/src/markdown.mjs": "2393335dc6fa6e5d17e97991fea7841a8fcff9b8dfb28e8a05b42c7fc036643d",
-    "EditorAssets/src/workbench.mjs": "1843f3481a4b99a78099d48b894d16f783e8a971a35e09ef9975212315a6b55b"
+    "EditorAssets/src/text-bridge.mjs": "a8f6eea7bbea2ec8ebe9a7a73a054fc1ef16c7d4ea5fcb95585723a2c88878d2",
+    "EditorAssets/src/workbench.mjs": "7de8e4965e3771158cbbbba50b6a268da32f4ee44f9dfd3d2eb182307201a21d"
   },
   "files": {
-    "editor.js": "5acf59bbdac0046282e9e34f8c791970446ee4538522153b32971f41a9729e0c",
+    "editor.js": "8f662f291b924f45a82dfc2ebca1c89a1c1c50c45c3d3d4d38da3ad8d1069120",
     "editor.js.LEGAL.txt": "56957f10208bf202c69f67c8de1b90ea606f0058c643a142f26f9761b7e53fef",
-    "editor.css": "7d478f7a78ff3198b1b81e536a59c4814aeee94bf9740b0ccacbc70d609b169c",
-    "index.html": "a028c9ad18f7f7499f1f7db0b9b67cd5916383430f8dabb636bbf55f97160017",
-    "THIRD-PARTY-NOTICES.txt": "c7eff8702aa1c536ad0e52b527b306dab3237ea217718bc112ed1eb0d102b1e1"
+    "editor.css": "f4bff1c61ed88a9ec696316cfc17ce7b2134caafcd2f3f76a8fb04167f6b5490",
+    "index.html": "7a67c24035c8f7f670b6083fed3826170c7efbe558e1cf13eb445b6069971fc2",
+    "THIRD-PARTY-NOTICES.txt": "9ce4f925b055057d60a6d676f987147590d70220d477d2c4587b4e2836603b6d"
   }
 }

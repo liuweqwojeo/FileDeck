@@ -16,6 +16,12 @@ struct ContentView: View {
     @State private var renamedName = ""
     @State private var renameError: String?
     @State private var fileOperationBusy = false
+    @State private var showsDirectorySearch = false
+    @State private var searchWasOpened = false
+    @State private var showsOperationDetails = false
+    @AppStorage("FileWorkbench.sidebarVisible") private var showsSidebar = true
+    @FocusState private var filterFocused: Bool
+    @StateObject private var directorySearch = DirectorySearchSession()
     @FocusState private var gridFocused: Bool
 
     init(store: BrowserStore, editor: WorkspaceEditorBridge? = nil) {
@@ -23,6 +29,7 @@ struct ContentView: View {
         self.editor = editor ?? WorkspaceEditorBridge()
     }
 
+    private var fileActionsBusy: Bool { fileOperationBusy || store.isFileOperationBusy }
     private var browsable: Bool { store.currentDirectory != nil && store.directoryError == nil && !store.isLoading }
     private var hasFilter: Bool { !store.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.typeFilter != .all }
     private var gridView: Bool { store.gridView }
@@ -39,7 +46,8 @@ struct ContentView: View {
             case .welcome, .restoring:
                 WorkspaceStartupView(isRestoring: store.startupPhase == .restoring,
                                      hasPreviousWorkspace: store.hasPreviousWorkspace,
-                                     chooseFolder: store.chooseFolder, skipWelcome: store.skipWelcome)
+                                     chooseFolder: store.chooseFolder, skipWelcome: store.skipWelcome,
+                                     recoverDrafts: editor.isAvailable ? { editor.command("recoverDrafts") } : nil)
             case .ready:
                 workbench
             }
@@ -47,28 +55,63 @@ struct ContentView: View {
         // NSHostingView 会按根视图重新计算窗口最小值；视图与窗口使用同一规则，防止阶段切换后被覆盖。
         .frame(minWidth: minimumContentSize.width, minHeight: minimumContentSize.height)
         .background(WorkspaceWindowConfiguration(ready: store.startupPhase == .ready))
+        .background(WorkspaceBrowserShortcuts(handle: handleBrowserShortcut).frame(width: 0, height: 0))
         .tint(WorkspacePalette.accent)
         .foregroundStyle(WorkspacePalette.primary)
         .onChange(of: store.showHidden) { _, _ in store.refresh() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             // 拖动跨越应用时也会切换焦点；仍按住鼠标时不能清除正在使用的内部令牌。
             if NSEvent.pressedMouseButtons == 0 { store.refreshAfterExternalDrag() }
+            store.checkForExternalChanges()
         }
         .alert("操作未完成", isPresented: Binding(get: { store.actionError != nil }, set: { if !$0 { store.actionError = nil } })) {
             Button("知道了", role: .cancel) { store.actionError = nil }
         } message: { Text(store.actionError ?? "") }
+        .onChange(of: showsSidebar) { _, visible in if !visible { filterFocused = true } }
+        .onChange(of: showsDirectorySearch) { _, visible in
+            if visible { searchWasOpened = true } else { directorySearch.cancel() }
+        }
         .sheet(item: $creationRequest) { request in creationSheet(request) }
         .sheet(item: $renamingEntry) { entry in renameSheet(entry) }
+    }
+
+    private func handleBrowserShortcut(_ event: NSEvent) -> Bool {
+        guard store.startupPhase == .ready, !editor.isPresented, !editor.isPreviewPresented else { return false }
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let key = event.charactersIgnoringModifiers?.lowercased()
+        if key == "f", flags == .command {
+            showsDirectorySearch = false; filterFocused = true; return true
+        }
+        if key == "f", flags == [.command, .shift], store.currentDirectory != nil {
+            showsDirectorySearch = true; return true
+        }
+        if key == "s", flags == [.command, .option] { showsSidebar.toggle(); return true }
+        if key == "e", flags == .command, !showsDirectorySearch,
+           store.selectedURLs.count == 1, let entry = store.selectedEntry, editor.supportsEditing(entry) {
+            editEntry(entry); return true
+        }
+        return false
     }
 
     private var workbench: some View {
         VStack(spacing: 0) {
             globalToolbar
+            fileOperationPanel
             Divider()
-            WorkspaceSplitView(showPreview: false) {
+            WorkspaceSplitView(showPreview: false, showSidebar: showsSidebar) {
                 sidebar
             } content: {
-                fileList
+                // 两个内容面保留各自的滚动/结果，切换搜索不会销毁原生文件列表。
+                ZStack {
+                    fileList.opacity(showsDirectorySearch ? 0 : 1)
+                        .allowsHitTesting(!showsDirectorySearch).accessibilityHidden(showsDirectorySearch).disabled(showsDirectorySearch)
+                    if searchWasOpened {
+                        WorkspaceDirectorySearchView(store: store, session: directorySearch, editor: editor,
+                                                     isPresented: $showsDirectorySearch)
+                            .opacity(showsDirectorySearch ? 1 : 0)
+                            .allowsHitTesting(showsDirectorySearch).accessibilityHidden(!showsDirectorySearch).disabled(!showsDirectorySearch)
+                    }
+                }
             } preview: {
                 EmptyView()
             }
@@ -78,55 +121,103 @@ struct ContentView: View {
         .background(WorkspacePalette.background)
     }
 
-    private var globalToolbar: some View {
-        GeometryReader { geometry in
-            globalToolbarContent(compact: geometry.size.width < 1200)
-        }.frame(height: 52)
+    /// 进度按项目计数；系统单项调用结束前不强行中断，避免留下不完整移动。
+    @ViewBuilder private var fileOperationPanel: some View {
+        if let progress = store.fileOperationProgress {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("\(progress.title)：\(progress.completed) / \(progress.total) 项已处理")
+                    Text(progress.current ?? "准备中…").lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Button(progress.cancellationRequested ? "正在停止…" : "取消") { store.cancelFileOperation() }
+                        .disabled(progress.cancellationRequested)
+                        .accessibilityIdentifier("file-operation-cancel")
+                }
+                ProgressView(value: Double(progress.completed), total: Double(max(1, progress.total)))
+                if progress.cancellationRequested { Text("等待当前项目结束；已完成项目保留，可在结束后撤销。") }
+            }.font(.system(size: 11)).padding(10)
+                .accessibilityIdentifier("file-operation-progress")
+        } else if store.fileOperationSummary != nil || !store.fileOperationUndo.isEmpty {
+            HStack(alignment: .top) {
+                if let summary = store.fileOperationSummary {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Button { showsOperationDetails.toggle() } label: {
+                            Label(summary.components(separatedBy: "\n").first ?? "操作结果",
+                                  systemImage: showsOperationDetails ? "chevron.down" : "chevron.right")
+                                .lineLimit(2)
+                        }.buttonStyle(.plain).accessibilityLabel("展开或收起操作详情")
+                        if showsOperationDetails {
+                            ScrollView { Text(summary).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
+                                .frame(maxHeight: 110)
+                        }
+                    }
+                }
+                Spacer(minLength: 4)
+                if !store.fileOperationUndo.isEmpty {
+                    Button("撤销最近文件操作（\(store.fileOperationUndo.count) 项）") { Task { await store.undoLastFileOperation() } }
+                        .disabled(store.isFileOperationBusy)
+                        .help("副本移到废纸篓；移动和废纸篓项目恢复原位。冲突时保留文件，不覆盖。仅保留本窗口最近一批，关闭后失效。")
+                        .accessibilityIdentifier("file-operation-undo")
+                }
+                if store.fileOperationSummary != nil {
+                    Button("收起结果") { store.dismissFileOperationSummary() }
+                }
+            }.font(.system(size: 11)).padding(10)
+                .accessibilityIdentifier("file-operation-result")
+        }
     }
 
-    private func globalToolbarContent(compact: Bool) -> some View {
-        HStack(spacing: compact ? 4 : 8) {
-            tool("后退", "chevron.left", disabled: !store.canGoBack, action: store.goBack)
-            tool("前进", "chevron.right", disabled: !store.canGoForward, action: store.goForward)
-            tool("上级", "arrow.up", disabled: !store.canGoUp, action: store.goUp)
-            tool("刷新", "arrow.clockwise", disabled: store.currentDirectory == nil, action: store.refresh)
-            toolbarDivider
-            tool("添加目录", "folder.badge.plus", action: store.chooseFolder)
-            tool("打开文件", "doc.viewfinder") {
-                if editor.isAvailable { editor.command("open") } else { store.chooseFile() }
-            }
-            NewFileMenu(directory: store.currentDirectory, disabled: !browsable || fileOperationBusy, create: beginCreation)
-                .menuStyle(.borderlessButton).fixedSize().help("在当前目录中新建文件或文件夹")
-            if !compact { tool("复制路径", "link", disabled: store.selectedURL == nil) { copyPath(store.selectedURL) } }
-            toolbarDivider
-            Toggle(isOn: $store.showHidden) {
-                Label("隐藏文件", systemImage: store.showHidden ? "eye" : "eye.slash")
-                    .font(.system(size: 11)).padding(.horizontal, 5).frame(height: 32)
-                    .contentShape(Rectangle())
-            }
-                .toggleStyle(.button).buttonStyle(.borderless)
-                .help("显示或隐藏以点开头的文件（⇧⌘.）").accessibilityLabel("显示隐藏文件")
-            Spacer(minLength: compact ? 4 : 12)
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass").foregroundStyle(WorkspacePalette.tertiary)
-                TextField("搜索当前目录", text: $store.query).textFieldStyle(.plain)
+    private var globalToolbar: some View {
+        HStack(spacing: 8) {
+            Button { showsSidebar.toggle() } label: { Image(systemName: "sidebar.left") }
+                .keyboardShortcut("s", modifiers: [.command, .option])
+                .help("显示或隐藏侧栏（⌥⌘S）").accessibilityLabel("切换侧栏")
+            Button(action: store.goBack) { Image(systemName: "chevron.left") }.disabled(!store.canGoBack)
+                .keyboardShortcut("[", modifiers: .command).help("后退（⌘[）").accessibilityLabel("后退")
+            Button(action: store.goForward) { Image(systemName: "chevron.right") }.disabled(!store.canGoForward)
+                .keyboardShortcut("]", modifiers: .command).help("前进（⌘]）").accessibilityLabel("前进")
+            Button(action: store.goUp) { Image(systemName: "arrow.up") }.disabled(!store.canGoUp)
+                .help("上级目录").accessibilityLabel("上级目录")
+            Divider().frame(height: 18)
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").foregroundStyle(WorkspacePalette.secondary)
+                TextField("筛选当前目录", text: $store.query).textFieldStyle(.plain).focused($filterFocused)
                     .accessibilityLabel("搜索当前目录")
                 if !store.query.isEmpty {
                     Button(action: store.clearSearch) { Image(systemName: "xmark.circle.fill") }
-                        .buttonStyle(.plain).foregroundStyle(WorkspacePalette.tertiary).accessibilityLabel("清除搜索")
+                        .accessibilityLabel("清除搜索")
                 }
-            }
-            .font(.system(size: 12)).padding(.horizontal, 10).frame(width: compact ? 180 : 220, height: 32)
-            .background(.white, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(WorkspacePalette.separator, lineWidth: 1))
+                Button { showsDirectorySearch = false; filterFocused = true } label: { Text("⌘F").font(.system(size: 10)) }
+                    .keyboardShortcut("f", modifiers: .command).help("聚焦当前目录筛选")
+                    .accessibilityLabel("聚焦当前目录筛选")
+            }.padding(.horizontal, 10).frame(minWidth: 130, maxWidth: 340).frame(height: 30)
+                .background(WorkspacePalette.surface, in: RoundedRectangle(cornerRadius: 6))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(WorkspacePalette.separator, lineWidth: 0.5))
+            Button { showsDirectorySearch.toggle() } label: {
+                Label("子目录与内容", systemImage: "doc.text.magnifyingglass")
+            }.keyboardShortcut("f", modifiers: [.command, .shift])
+                .disabled(store.currentDirectory == nil)
+                .help("搜索子目录的名称或文本（⇧⌘F）")
+                .accessibilityLabel("递归搜索").accessibilityIdentifier("directory-search-open")
+            Spacer(minLength: 0)
             Picker("文件视图", selection: $store.gridView) {
                 Image(systemName: "list.bullet").tag(false)
                 Image(systemName: "square.grid.2x2").tag(true)
-            }.pickerStyle(.segmented).labelsHidden().frame(width: 76).help("列表或网格视图")
-        }.padding(.horizontal, compact ? 10 : 16).frame(height: 52).background(Color.white.opacity(0.5))
+            }.pickerStyle(.segmented).labelsHidden().frame(width: 68)
+            Menu {
+                Button("添加目录…", action: store.chooseFolder)
+                Button("打开文件…") { if editor.isAvailable { editor.command("open") } else { store.chooseFile() } }
+                Button("刷新当前目录", action: store.refresh).disabled(store.currentDirectory == nil)
+                Toggle("显示隐藏文件", isOn: $store.showHidden)
+                Divider()
+                if editor.isAvailable {
+                    Button("继续编辑") { editor.show() }.disabled(!editor.hasDocument)
+                    Button("恢复未保存草稿…") { editor.command("recoverDrafts") }
+                }
+            } label: { Label("工作区", systemImage: "ellipsis.circle") }.fixedSize()
+        }.font(.system(size: 12)).buttonStyle(.borderless)
+            .padding(.horizontal, 12).frame(height: 48).background(WorkspacePalette.background)
     }
-
-    private var toolbarDivider: some View { Divider().frame(height: 20).padding(.horizontal, 4) }
 
     private func tool(_ title: String, _ symbol: String, disabled: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -140,7 +231,7 @@ struct ContentView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("文件导航").font(.system(size: 14, weight: .semibold)).padding(.top, 22).padding(.bottom, 14)
+            Text("工作区").font(.system(size: 13, weight: .semibold)).padding(.top, 16).padding(.bottom, 12)
             HStack(spacing: 7) {
                 Image(systemName: "magnifyingglass")
                 TextField("搜索目录…", text: $directoryQuery).textFieldStyle(.plain).accessibilityLabel("搜索目录")
@@ -148,7 +239,7 @@ struct ContentView: View {
                     Button { directoryQuery = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).accessibilityLabel("清除目录搜索")
                 }
             }.font(.system(size: 12)).foregroundStyle(WorkspacePalette.secondary).padding(.horizontal, 10)
-                .frame(height: 34).background(Color.black.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
+                .frame(height: 34).background(WorkspacePalette.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
             ScrollView {
                 VStack(alignment: .leading, spacing: 4) {
                     sectionTitle("快速访问").padding(.top, 24).padding(.bottom, 5)
@@ -174,17 +265,26 @@ struct ContentView: View {
                         }.padding(.horizontal, 8).padding(.vertical, 30).frame(maxWidth: .infinity)
                     } else {
                         ForEach(store.managedRoots, id: \.self) { root in
-                            FolderBranch(store: store, url: root, root: root, depth: 0, query: directoryQuery, creationDisabled: fileOperationBusy, create: beginCreation)
+                            FolderBranch(store: store, url: root, root: root, depth: 0, query: directoryQuery, creationDisabled: fileActionsBusy, create: beginCreation)
                         }
                     }
                 }
             }
             Spacer(minLength: 8)
+            if editor.isAvailable {
+                if editor.hasDocument {
+                    Button { editor.show() } label: {
+                        Label(editor.modified ? "继续编辑 · 未保存" : "继续编辑", systemImage: "square.and.pencil")
+                    }.buttonStyle(.borderless).font(.system(size: 12)).padding(.bottom, 8)
+                }
+                Button("恢复未保存草稿…") { editor.command("recoverDrafts") }
+                    .buttonStyle(.borderless).font(.system(size: 12)).padding(.bottom, 8)
+            }
             Button(action: store.chooseFolder) {
                 Label("添加本地目录", systemImage: "plus").font(.system(size: 12, weight: .medium))
                     .frame(maxWidth: .infinity).frame(height: 36)
             }.buttonStyle(.plain).foregroundStyle(WorkspacePalette.accent)
-                .background(.white.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+                .background(WorkspacePalette.surface.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(WorkspacePalette.separator, lineWidth: 1))
                 .padding(.bottom, 16)
         }.padding(.horizontal, 16).background(WorkspacePalette.sidebar)
@@ -203,7 +303,7 @@ struct ContentView: View {
                 .accessibilityLabel(name)
                 .accessibilityIdentifier("directory.quick.\(url.path)")
                 .modifier(WorkspaceDirectoryDragSource(store: store, url: url, open: { store.openQuickLocation(url) }))
-                .contextMenu { NewFileMenu(directory: url, disabled: fileOperationBusy, create: beginCreation) }
+                .contextMenu { NewFileMenu(directory: url, disabled: fileActionsBusy, create: beginCreation) }
                 .modifier(WorkspaceFileDropTarget(store: store, directory: url))
                 .foregroundStyle(store.currentDirectory?.path == url.path ? WorkspacePalette.accent : WorkspacePalette.primary)
                 .background(store.currentDirectory?.path == url.path ? WorkspacePalette.accent.opacity(0.10) : .clear,
@@ -221,12 +321,31 @@ struct ContentView: View {
             }.padding(.horizontal, 20).frame(height: 54)
             breadcrumb
             Divider()
-            HStack(spacing: 12) {
-                NewFileMenu(directory: store.currentDirectory, disabled: !browsable || fileOperationBusy, create: beginCreation)
-                Button { store.copySelectedFiles() } label: { Label("复制", systemImage: "doc.on.doc") }
-                    .disabled(store.selectedURLs.isEmpty).help("复制所选文件（⌘C）")
-                Button { store.pasteFiles() } label: { Label("粘贴", systemImage: "clipboard") }
-                    .disabled(!browsable || store.isImporting).help("将剪贴板文件复制到当前目录（⌘V）")
+            HStack(spacing: 10) {
+                if store.selectedURLs.isEmpty {
+                    NewFileMenu(directory: store.currentDirectory, disabled: !browsable || fileActionsBusy, create: beginCreation)
+                    Button { store.pasteFiles() } label: { Label("粘贴", systemImage: "clipboard") }
+                        .disabled(!browsable || fileActionsBusy)
+                } else {
+                    Text("已选 \(store.selectedURLs.count) 项").foregroundStyle(WorkspacePalette.secondary)
+                    if store.selectedURLs.count == 1, let entry = store.selectedEntry, !entry.isBrowsableDirectory {
+                        Button("预览") { editor.preview(entry.url, source: "selection") }
+                            .help("快速预览（空格）").accessibilityIdentifier("selection-preview")
+                        if editor.supportsEditing(entry) {
+                            Button("编辑") { editEntry(entry) }.keyboardShortcut("e", modifiers: .command)
+                                .accessibilityIdentifier("selection-edit")
+                        }
+                    }
+                    Button { store.copySelectedFiles() } label: { Image(systemName: "doc.on.doc") }
+                        .help("复制所选文件（⌘C）").accessibilityLabel("复制所选文件")
+                    // 与右键菜单共用捕获的批次范围，打开菜单后的选择变化不能扩大操作对象。
+                    let selectedEntries = store.selectedFileEntries
+                    Menu {
+                        if let entry = selectedEntries.first {
+                            entryActions(entry, contextSelection: Set(selectedEntries.map(\.url)))
+                        }
+                    } label: { Label("操作", systemImage: "ellipsis") }.fixedSize()
+                }
                 Spacer(minLength: 0)
                 Menu {
                     Picker("文件类型", selection: $store.typeFilter) {
@@ -250,25 +369,12 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contentShape(Rectangle())
                 .contextMenu {
-                    NewFileMenu(directory: store.currentDirectory, disabled: !browsable || fileOperationBusy, create: beginCreation)
-                    Button("粘贴") { store.pasteFiles() }.disabled(!browsable || store.isImporting)
+                    NewFileMenu(directory: store.currentDirectory, disabled: !browsable || fileActionsBusy, create: beginCreation)
+                    Button("粘贴") { store.pasteFiles() }.disabled(!browsable || store.isFileOperationBusy)
                     Button("刷新当前目录", action: store.refresh).disabled(store.currentDirectory == nil)
                 }
                 .modifier(WorkspaceFileDropTarget(store: store, directory: browsable ? store.currentDirectory : nil))
-            Divider()
-            HStack {
-                Text(store.currentDirectory == nil ? "尚未选择目录" : store.isLoading ? "正在读取目录…" : "\(store.visibleEntries.count) 个项目")
-                if let entry = store.selectedEntry {
-                    Text("· 已选择 \(store.selectedURLs.count) 个：\(entry.name)")
-                        .lineLimit(1).truncationMode(.middle).help(entry.url.path)
-                }
-                Spacer()
-                if store.isImporting {
-                    ProgressView().controlSize(.mini)
-                    Text("正在处理文件…")
-                }
-            }.font(.system(size: 11)).foregroundStyle(WorkspacePalette.secondary).padding(.horizontal, 20).frame(height: 30)
-        }.background(.white)
+        }.background(WorkspacePalette.surface)
             // 命令仅挂在文件浏览区；搜索框与预览编辑器继续使用各自的文本复制粘贴。
             .onCopyCommand(perform: store.selectedFileURLs.isEmpty ? nil : {
                 store.selectedFileURLs.map { NSItemProvider(object: $0 as NSURL) }
@@ -323,7 +429,7 @@ struct ContentView: View {
         } else if store.visibleEntries.isEmpty {
             WorkspaceEmptyState(title: "此文件夹为空", icon: "folder", detail: "你可以拖入文件，或右键新建文档、图片和文件夹。") {
                 HStack(spacing: 10) {
-                    NewFileMenu(directory: store.currentDirectory, disabled: fileOperationBusy, create: beginCreation)
+                    NewFileMenu(directory: store.currentDirectory, disabled: fileActionsBusy, create: beginCreation)
                         .menuStyle(.borderlessButton).fixedSize()
                     Button("在 Finder 中显示") { revealCurrent() }.buttonStyle(.bordered)
                 }.controlSize(.large)
@@ -350,10 +456,10 @@ struct ContentView: View {
                 // 让 List 自己分派双击和右键，行内手势或按钮会截获原生选择与第一响应者。
                 .contextMenu(forSelectionType: URL.self) { urls in
                     if let entry = displayedEntries.first(where: { urls.contains($0.url) }) {
-                        entryActions(entry)
+                        entryActions(entry, contextSelection: urls)
                     } else {
-                        NewFileMenu(directory: store.currentDirectory, disabled: !browsable || fileOperationBusy, create: beginCreation)
-                        Button("粘贴") { store.pasteFiles() }.disabled(!browsable || store.isImporting)
+                        NewFileMenu(directory: store.currentDirectory, disabled: !browsable || fileActionsBusy, create: beginCreation)
+                        Button("粘贴") { store.pasteFiles() }.disabled(!browsable || store.isFileOperationBusy)
                     }
                 } primaryAction: { urls in
                     if let entry = displayedEntries.first(where: { urls.contains($0.url) }) { activate(entry) }
@@ -378,7 +484,7 @@ struct ContentView: View {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 16)], spacing: 16) {
                         ForEach(displayedEntries) { entry in
                             VStack(spacing: 10) {
-                                Image(nsImage: NSWorkspace.shared.icon(forFile: entry.url.path)).resizable().frame(width: 52, height: 52)
+                                WorkspaceFileIcon(entry: entry, size: 52)
                                 Text(entry.name).font(.system(size: 12)).lineLimit(2).multilineTextAlignment(.center)
                             }.frame(maxWidth: .infinity).frame(height: 112)
                                 .background(store.selectedURLs.contains(entry.url) ? WorkspacePalette.accent.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 8))
@@ -490,11 +596,11 @@ struct ContentView: View {
 
     private var statusBar: some View {
         HStack(spacing: 8) {
-            Text("当前目录：\(store.currentDirectory?.lastPathComponent ?? "未选择")").lineLimit(1)
+            Text(showsDirectorySearch ? "搜索工作区" : "空格预览 · ⌘E 编辑 · ⇧⌘F 搜索子目录").lineLimit(1)
             Spacer()
-            if store.isImporting {
+            if store.isFileOperationBusy {
                 ProgressView().controlSize(.mini)
-                Text("正在处理文件…")
+                Text(store.fileOperationProgress?.title ?? "正在处理文件…")
             }
             if browsable { Text("\(store.visibleEntries.count) 个项目 · 已选择 \(store.selectedURLs.count) 个") }
             Spacer()
@@ -504,7 +610,7 @@ struct ContentView: View {
 
     /// 菜单打开时冻结目录身份，避免命名期间目录被移动/替换后写入错误位置。
     private func beginCreation(_ template: NewFileTemplate, in directory: URL) {
-        guard !fileOperationBusy else { return }
+        guard !fileActionsBusy else { return }
         do {
             let identity = try FileSystem.identity(at: directory)
             newFileName = template.defaultName
@@ -518,26 +624,29 @@ struct ContentView: View {
             Text("新建\(request.template.title)").font(.system(size: 18, weight: .semibold))
             Text("位置：\(request.directory.path)").font(.system(size: 12))
                 .foregroundStyle(WorkspacePalette.secondary).lineLimit(2).textSelection(.enabled)
-            TextField("名称（包含扩展名）", text: $newFileName).textFieldStyle(.roundedBorder)
+            TextField(request.template.fileExtension.map { "名称（自动补 .\($0)）" } ?? "名称", text: $newFileName).textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("creation.name")
-                .onSubmit { createFile(request) }.disabled(fileOperationBusy)
+                .onSubmit { createFile(request) }.disabled(fileActionsBusy)
             if request.template == .custom {
                 Text("输入完整文件名和扩展名。已支持的格式使用相应模板；其他文本扩展名创建空白文件。")
+                    .font(.system(size: 12)).foregroundStyle(WorkspacePalette.secondary)
+            } else if let ext = request.template.fileExtension {
+                Text("未填写扩展名时自动补 .\(ext)。填写其他类型的扩展名时会提示检查。")
                     .font(.system(size: 12)).foregroundStyle(WorkspacePalette.secondary)
             }
             if let creationError { Text(creationError).font(.system(size: 12)).foregroundStyle(.orange) }
             HStack {
-                if fileOperationBusy { ProgressView().controlSize(.small) }
+                if fileActionsBusy { ProgressView().controlSize(.small) }
                 Spacer()
-                Button("取消", role: .cancel) { creationRequest = nil }.keyboardShortcut(.cancelAction).disabled(fileOperationBusy)
+                Button("取消", role: .cancel) { creationRequest = nil }.keyboardShortcut(.cancelAction).disabled(fileActionsBusy)
                 Button("创建") { createFile(request) }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
-                    .disabled(fileOperationBusy || newFileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(fileActionsBusy || newFileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-        }.padding(24).frame(width: 440).interactiveDismissDisabled(fileOperationBusy)
+        }.padding(24).frame(width: 440).interactiveDismissDisabled(fileActionsBusy)
     }
 
     private func createFile(_ request: FileCreationRequest) {
-        guard !fileOperationBusy else { return }
+        guard !fileActionsBusy else { return }
         let name = newFileName
         fileOperationBusy = true
         creationError = nil
@@ -559,11 +668,16 @@ struct ContentView: View {
     }
 
     private func revealCurrent() { if let url = store.currentDirectory { NSWorkspace.shared.activateFileViewerSelecting([url]) } }
-    private func copyPath(_ url: URL?) { guard let url else { return }; NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.path, forType: .string) }
     private func activate(_ entry: FileEntry, source: String = "doubleClick") {
         selectPrimary(entry)
         if entry.isBrowsableDirectory { store.enter(entry) }
         else { editor.preview(entry.url, source: source) }
+    }
+    private func editEntry(_ entry: FileEntry) {
+        let kind = FileCapabilityRegistry().capabilities(for: entry).kind
+        if [.text, .code, .json, .yaml, .markdown].contains(kind) {
+            editor.preview(entry.url, source: "edit")
+        } else { editor.open(entry.url) }
     }
     private func selectForPreview(_ entry: FileEntry) {
         let flags = NSApp.currentEvent?.modifierFlags ?? []
@@ -573,50 +687,60 @@ struct ContentView: View {
         if store.selectedURLs.contains(entry.url) { store.setSelection(store.selectedURLs, primary: entry.url) }
         else { store.selectedURL = entry.url }
     }
-    @ViewBuilder private func entryActions(_ entry: FileEntry) -> some View {
-        NewFileMenu(directory: entry.isBrowsableDirectory ? entry.url : store.currentDirectory,
-                    disabled: fileOperationBusy, create: beginCreation)
+    @ViewBuilder private func entryActions(_ entry: FileEntry, contextSelection: Set<URL>? = nil) -> some View {
+        let trashEntries = store.fileActionEntries(for: entry, contextSelection: contextSelection)
+        let multiple = trashEntries.count > 1
+        let urls = trashEntries.map(\.url)
+        NewFileMenu(directory: !multiple && entry.isBrowsableDirectory ? entry.url : store.currentDirectory,
+                    disabled: fileActionsBusy, create: beginCreation)
         Divider()
-        if entry.isBrowsableDirectory { Button("打开目录") { activate(entry) } }
-        else { Button("预览") { selectPrimary(entry); editor.preview(entry.url, source: "contextMenu") } }
-        if !entry.isBrowsableDirectory {
+        if !multiple {
+            if entry.isBrowsableDirectory { Button("打开目录") { activate(entry) } }
+            else { Button("预览") { selectPrimary(entry); editor.preview(entry.url, source: "contextMenu") } }
+            if editor.supportsEditing(entry) { Button("编辑") { selectPrimary(entry); editEntry(entry) } }
+        }
+        if !multiple && !entry.isBrowsableDirectory {
             Button("使用默认应用打开") { NSWorkspace.shared.open(entry.url) }
         }
-        Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([entry.url]) }
-        Button("复制") {
-            selectPrimary(entry)
-            store.copySelectedFiles()
+        Button(multiple ? "在 Finder 中显示（\(urls.count) 个项目）" : "在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting(urls) }
+        // 所有批量动作使用打开菜单时捕获的同一组选项，不能在执行时重新读取变化后的选区。
+        Button(multiple ? "复制（\(urls.count) 个项目）" : "复制") { store.copyFiles(urls) }
+        Button("粘贴") { store.pasteFiles(into: !multiple && entry.isBrowsableDirectory ? entry.url : store.currentDirectory) }
+            .disabled(store.isFileOperationBusy)
+        Button(multiple ? "复制路径（\(urls.count) 个项目）" : "复制路径") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(urls.map(\.path).joined(separator: "\n"), forType: .string)
         }
-        Button("粘贴") { store.pasteFiles(into: entry.isBrowsableDirectory ? entry.url : store.currentDirectory) }
-            .disabled(store.isImporting)
-        Button("复制路径") { copyPath(entry.url) }
         Divider()
-        Button("重命名…") {
+        if !multiple { Button("重命名…") {
             store.selectedURL = entry.url
             renamedName = entry.name
             renameError = nil
             renamingEntry = entry
-        }.disabled(fileOperationBusy)
-        Button("移到废纸篓", role: .destructive) { trash(entry) }.disabled(fileOperationBusy)
+        }.disabled(fileActionsBusy) }
+        Button(trashEntries.count > 1 ? "移到废纸篓（\(trashEntries.count) 个项目）" : "移到废纸篓", role: .destructive) {
+            trash(trashEntries)
+        }.disabled(fileActionsBusy || trashEntries.isEmpty)
+            .accessibilityIdentifier("file.trash")
     }
 
     private func renameSheet(_ entry: FileEntry) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("重命名").font(.system(size: 18, weight: .semibold))
             TextField("文件名称", text: $renamedName).textFieldStyle(.roundedBorder)
-                .onSubmit { rename(entry) }.disabled(fileOperationBusy)
+                .onSubmit { rename(entry) }.disabled(fileActionsBusy)
             if let renameError { Text(renameError).font(.system(size: 12)).foregroundStyle(.orange) }
             HStack {
                 Spacer()
-                Button("取消", role: .cancel) { renamingEntry = nil }.keyboardShortcut(.cancelAction).disabled(fileOperationBusy)
+                Button("取消", role: .cancel) { renamingEntry = nil }.keyboardShortcut(.cancelAction).disabled(fileActionsBusy)
                 Button("重命名") { rename(entry) }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
-                    .disabled(fileOperationBusy || renamedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(fileActionsBusy || renamedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-        }.padding(24).frame(width: 400).interactiveDismissDisabled(fileOperationBusy)
+        }.padding(24).frame(width: 400).interactiveDismissDisabled(fileActionsBusy)
     }
 
     private func rename(_ entry: FileEntry) {
-        guard !fileOperationBusy else { return }
+        guard !fileActionsBusy else { return }
         let name = renamedName
         guard name != entry.name else { renamingEntry = nil; return }
         fileOperationBusy = true
@@ -629,29 +753,9 @@ struct ContentView: View {
         }
     }
 
-    private func trash(_ entry: FileEntry) {
-        guard !fileOperationBusy else { return }
-        let directory = store.currentDirectory
-        fileOperationBusy = true
-        Task {
-            let result = await Task.detached(priority: .userInitiated) {
-                Result {
-                    try Self.requireSameFile(entry)
-                    try FileManager.default.trashItem(at: entry.url, resultingItemURL: nil)
-                }
-            }.value
-            fileOperationBusy = false
-            switch result {
-            case .success: if store.currentDirectory == directory { store.refresh() }
-            case .failure(let error): store.actionError = error.localizedDescription
-            }
-        }
-    }
-
-    nonisolated private static func requireSameFile(_ entry: FileEntry) throws {
-        guard let identity = entry.identity, try FileSystem.identity(at: entry.url) == identity else {
-            throw NSError(domain: "FileDeck.FileOperation", code: 1, userInfo: [NSLocalizedDescriptionKey: "文件已发生变化，请刷新后重试。"])
-        }
+    private func trash(_ entries: [FileEntry]) {
+        guard !fileActionsBusy else { return }
+        Task { await store.trashFiles(entries) }
     }
 
 }
@@ -737,7 +841,7 @@ private struct FolderBranch: View {
                         .accessibilityLabel("打开目录 \(url.lastPathComponent)")
                         .modifier(WorkspaceDirectoryDragSource(store: store, url: url, open: { store.navigate(to: url) }))
                 }.padding(.leading, CGFloat(min(depth, 12)) * 16 + 4)
-                    .background(store.currentDirectory == url ? WorkspacePalette.accent.opacity(0.12) : hovered ? .black.opacity(0.035) : .clear,
+                    .background(store.currentDirectory == url ? WorkspacePalette.accent.opacity(0.12) : hovered ? WorkspacePalette.primary.opacity(0.04) : .clear,
                                 in: RoundedRectangle(cornerRadius: 6))
                     .onHover { hovered = $0 }.help(store.treeErrors[url] ?? url.path)
                     .modifier(WorkspaceFileDropTarget(store: store, directory: store.treeErrors[url] == nil ? url : nil))
@@ -747,7 +851,7 @@ private struct FolderBranch: View {
                         Button("打开目录") { store.navigate(to: url) }
                         Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
                         Button("复制文件夹") { store.copyFiles([url]) }
-                        Button("粘贴") { store.pasteFiles(into: url) }.disabled(store.isImporting)
+                        Button("粘贴") { store.pasteFiles(into: url) }.disabled(store.isFileOperationBusy)
                         Button("复制路径") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(url.path, forType: .string) }
                         Button("刷新") { store.refresh() }
                         if url == root {
@@ -777,7 +881,7 @@ private struct FileRow: View {
         GeometryReader { proxy in
             HStack(spacing: 0) {
                 HStack(spacing: 9) {
-                    Image(nsImage: NSWorkspace.shared.icon(forFile: entry.url.path)).resizable().frame(width: 22, height: 22)
+                    WorkspaceFileIcon(entry: entry)
                     Text(entry.name).fontWeight(selected ? .semibold : .regular).lineLimit(1).truncationMode(.middle)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     if selected { Image(systemName: "checkmark.circle.fill").foregroundStyle(WorkspacePalette.accent) }
@@ -904,7 +1008,7 @@ private struct FileDropDelegate: DropDelegate {
     }
 
     func validateDrop(info: DropInfo) -> Bool {
-        guard let directory, !store.isImporting else { return false }
+        guard let directory, !store.isFileOperationBusy else { return false }
         return !isInternal(info) || store.canDropActiveDrag(into: directory)
     }
 
@@ -951,5 +1055,157 @@ private struct FileDropDelegate: DropDelegate {
             }
         }
         return true
+    }
+}
+
+/// 搜索表单与结果均独立于浏览器筛选；只有明确定位有效结果才改变目录/选择。
+@MainActor
+struct WorkspaceDirectorySearchView: View {
+    @ObservedObject var store: BrowserStore
+    @ObservedObject var session: DirectorySearchSession
+    let editor: WorkspaceEditorBridge
+    @Binding var isPresented: Bool
+    @FocusState private var termFocused: Bool
+    @State private var root: URL?
+    @State private var term: String
+    @State private var mode: DirectorySearchRequest.Mode = .name
+    @State private var caseSensitive = false
+    @State private var includeHidden = false
+    @State private var exclusions = DirectorySearchRequest.defaultExclusions.sorted().joined(separator: ", ")
+    @State private var error: String?
+    @State private var locating = false
+    @State private var locationTask: Task<Void, Never>?
+    @State private var visible = false
+
+    init(store: BrowserStore, session: DirectorySearchSession, editor: WorkspaceEditorBridge, isPresented: Binding<Bool>) {
+        self.store = store; self.session = session; self.editor = editor; self._isPresented = isPresented
+        _root = State(initialValue: store.currentDirectory)
+        _term = State(initialValue: store.query)
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("目录递归搜索").font(.title2)
+                Spacer()
+                Button("返回浏览") { visible = false; session.cancel(); isPresented = false }.keyboardShortcut(.cancelAction)
+            }
+            HStack {
+                Text("范围：")
+                Text(root?.path ?? "请选择目录").lineLimit(1).truncationMode(.middle).help(root?.path ?? "")
+                Spacer()
+                Button("当前目录") { root = store.currentDirectory }
+                Button("选择目录…") { store.chooseSearchDirectory { root = $0 } }
+            }.font(.system(size: 12))
+            HStack {
+                Picker("搜索", selection: $mode) {
+                    ForEach(DirectorySearchRequest.Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.pickerStyle(.segmented).frame(width: 170)
+                TextField("输入搜索词（字面子串）", text: $term).textFieldStyle(.roundedBorder).focused($termFocused)
+                    .onSubmit(start).accessibilityIdentifier("directory-search-term")
+                Button(session.isRunning ? "重新搜索" : "搜索", action: start)
+                    .disabled(root == nil || term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || locating)
+                    .keyboardShortcut(.defaultAction).accessibilityIdentifier("directory-search-start")
+                if session.isRunning {
+                    Button(session.isStopping ? "正在停止…" : "取消", action: session.cancel)
+                        .accessibilityIdentifier("directory-search-cancel")
+                }
+            }
+            HStack {
+                Toggle("区分大小写", isOn: $caseSensitive)
+                Toggle("包含隐藏项", isOn: $includeHidden)
+                Spacer()
+            }.toggleStyle(.checkbox)
+            HStack {
+                Text("排除目录名：")
+                TextField("用逗号分隔；可修改或清空", text: $exclusions).textFieldStyle(.roundedBorder)
+            }.font(.system(size: 12))
+            Text("仅搜索所选目录及其子目录。跳过文档包、符号链接和其他卷；内容只检索文本，不解析 PDF、Office 或图片。")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            if let error { Text(error).foregroundStyle(.red).font(.system(size: 12)).textSelection(.enabled) }
+            Divider()
+            if let snapshot = session.snapshot {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("本次：\(snapshot.request.mode.rawValue) · \(snapshot.request.term) · \(snapshot.request.root.path)")
+                        .lineLimit(1).truncationMode(.middle).help(snapshot.request.root.path)
+                    HStack {
+                        if session.isRunning { ProgressView().controlSize(.small) }
+                        Text(session.isStopping ? "正在停止旧搜索；等待当前系统调用结束…" : snapshot.end.description)
+                        Text("已扫描 \(snapshot.visited) 项 · \(snapshot.hits.count) 个结果 · 读取 \(ByteCountFormatter.string(fromByteCount: Int64(snapshot.bytesRead), countStyle: .file))")
+                    }
+                    if !snapshot.currentPath.isEmpty { Text(snapshot.currentPath).lineLimit(1).truncationMode(.middle) }
+                    if !snapshot.skipDescription.isEmpty { Text("已跳过：" + snapshot.skipDescription).lineLimit(2) }
+                    if snapshot.hasUnsearchedItems {
+                        Text("部分文件或子目录因上限、变化或错误未检索，结果不完整。 ").foregroundStyle(.orange)
+                    }
+                    if snapshot.issueCount > 0 {
+                        DisclosureGroup("\(snapshot.issueCount) 项未能读取，结果不完整（最多显示 20 项原因）") {
+                            ScrollView { Text(snapshot.issues.joined(separator: "\n")).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }.frame(maxHeight: 65)
+                        }.foregroundStyle(.orange)
+                    }
+                }.font(.system(size: 11))
+                if snapshot.hits.isEmpty {
+                    Text(session.isRunning ? "正在检索…" : snapshot.end == .completed && !snapshot.hasUnsearchedItems ? "在本次范围与排除规则内未找到匹配项目。" : "尚无匹配结果；本次搜索未完整结束，请检查状态或调整范围后重搜。")
+                        .foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List(snapshot.hits) { hit in
+                        HStack(alignment: .top) {
+                            WorkspaceFileIcon(url: snapshot.request.root.appendingPathComponent(hit.id), isDirectory: hit.isDirectory)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(hit.id).lineLimit(1).truncationMode(.middle).help(hit.id)
+                                if let excerpt = hit.excerpt, let line = hit.line {
+                                    Text("第 \(line) 行 · \(excerpt)").font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
+                                }
+                            }
+                            Spacer()
+                            if !hit.isDirectory {
+                                Button("预览") { locate(hit, request: snapshot.request, preview: true) }.disabled(locating || store.isFileOperationBusy)
+                            }
+                            Button("定位") { locate(hit, request: snapshot.request) }.disabled(locating || store.isFileOperationBusy)
+                        }.padding(.vertical, 3)
+                    }.listStyle(.bordered)
+                }
+            } else {
+                Text("选择范围和搜索方式后开始；开始前不会扫描目录。")
+                    .foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            Text("上限：5 万项目 / 1000 个结果 / 64 层目录；内容单文件 2 MiB、合计 256 MiB。取消保留已找到结果，系统读取需等待返回。")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+        }.padding(16).frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .onAppear { visible = isPresented; termFocused = isPresented }
+            .onChange(of: isPresented) { _, value in
+                visible = value; termFocused = value
+                if !value { locationTask?.cancel(); locating = false }
+            }
+            .onDisappear { visible = false; session.cancel(); locationTask?.cancel() }
+            .accessibilityIdentifier("directory-search-sheet")
+    }
+    private func start() {
+        guard let root else { return }
+        do {
+            let names = Set(exclusions.split(whereSeparator: { $0 == "," || $0 == "，" || $0.isNewline })
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+            let request = try DirectorySearchRequest(root: root, term: term, mode: mode, caseSensitive: caseSensitive,
+                                                     includeHidden: includeHidden, excludedDirectories: names)
+            error = nil
+            session.start(request)
+        } catch { self.error = error.localizedDescription }
+    }
+    private func locate(_ hit: DirectorySearchHit, request: DirectorySearchRequest, preview: Bool = false) {
+        let generation = session.generation
+        locationTask?.cancel()
+        locating = true
+        locationTask = Task {
+            defer { if !Task.isCancelled { locating = false } }
+            do {
+                let url = try await Task.detached(priority: .userInitiated) { try DirectorySearchEngine.validatedURL(for: hit, request: request) }.value
+                guard !Task.isCancelled, visible, session.generation == generation else { return }
+                if preview { editor.preview(url, source: "search", line: hit.line); return }
+                if request.includeHidden { store.showHidden = true }
+                session.cancel()
+                store.navigate(to: url.deletingLastPathComponent(), selecting: url)
+                isPresented = false
+            } catch { if !Task.isCancelled, visible, session.generation == generation { self.error = error.localizedDescription } }
+        }
     }
 }

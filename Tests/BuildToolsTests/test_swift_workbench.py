@@ -34,7 +34,8 @@ class SwiftWorkbenchProjectTests(unittest.TestCase):
                                                       "8f452c7f703b795dcc09012ba6517df4ca47f9bc:" + PROJECT]))
             for name in ["desktop-apps-001-smoke-hooks.patch", "desktop-apps-002-cef-signing.patch",
                          "desktop-apps-003-swift-workbench.patch", "desktop-apps-007-embedded-browser.patch",
-                         "desktop-apps-009-preview-modal.patch", "desktop-apps-010-new-file-templates.patch"]:
+                         "desktop-apps-009-preview-modal.patch", "desktop-apps-010-new-file-templates.patch",
+                         "desktop-apps-011-draft-recovery.patch", "desktop-apps-012-directory-search.patch"]:
                 if name.startswith("desktop-apps-003"):
                     cls.before = read_project(path)
                 subprocess.run(["git", "-C", str(directory), "apply", "--include=" + PROJECT,
@@ -61,7 +62,7 @@ class SwiftWorkbenchProjectTests(unittest.TestCase):
         self.assertIn("WorkspaceEditorBridge.swift", new)
         self.assertIn("NewFileTemplate.swift", new)
         groups = [obj for obj in self.after.values() if obj.get("isa") == "PBXGroup"
-                  and obj.get("path") == "FileWorkbenchNative"]
+                  and obj.get("path") in {"FileWorkbenchNative", "../FileWorkbenchNative"}]
         self.assertEqual({self.after[key]["path"] for group in groups for key in group["children"]},
                          expected | {"FWWorkbenchCoordinator.h"})
 

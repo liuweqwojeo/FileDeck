@@ -4,6 +4,79 @@ import XCTest
 
 /// 新建需写出可解码的格式，并且不能覆盖文件或沿失效目录身份写入。
 final class NewFileTemplateTests: XCTestCase {
+    func testSelectedTypeAppendsMissingExtensionWithoutOverwritingOrChangingCustomNames() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let identity = try FileSystem.identity(at: root)
+        let file = try NewFileCreator.create(template: .rust, name: "  main  ", directory: root, expectedDirectoryIdentity: identity)
+        XCTAssertEqual(file.lastPathComponent, "main.rs")
+        XCTAssertThrowsError(try NewFileCreator.create(template: .rust, name: "main", directory: root, expectedDirectoryIdentity: identity))
+        XCTAssertThrowsError(try NewFileCreator.create(template: .rust, name: "wrong.py", directory: root, expectedDirectoryIdentity: identity))
+        let custom = try NewFileCreator.create(template: .custom, name: ".env", directory: root, expectedDirectoryIdentity: identity)
+        XCTAssertEqual(custom.lastPathComponent, ".env")
+        let folder = try NewFileCreator.create(template: .folder, name: "project", directory: root, expectedDirectoryIdentity: identity)
+        XCTAssertEqual(folder.lastPathComponent, "project")
+    }
+    func testCommonProgrammingTemplatesCreateEditableCodeFiles() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let identity = try FileSystem.identity(at: root)
+        var registry = FileCapabilityRegistry()
+        registry.register(.codeMirror, operations: [.open, .edit, .save, .saveAs])
+        let cases: [(NewFileTemplate, String)] = [
+            (.jsx, "jsx"), (.tsx, "tsx"), (.vue, "vue"), (.svelte, "svelte"),
+            (.scss, "scss"), (.less, "less"), (.sass, "sass"),
+            (.c, "c"), (.cpp, "cpp"), (.cHeader, "h"), (.cppHeader, "hpp"), (.csharp, "cs"),
+            (.go, "go"), (.rust, "rs"), (.kotlin, "kt"), (.kotlinScript, "kts"),
+            (.objectiveC, "m"), (.objectiveCpp, "mm"), (.php, "php"), (.ruby, "rb"),
+            (.dart, "dart"), (.lua, "lua"), (.r, "r"), (.perl, "pl"), (.scala, "scala"),
+            (.groovy, "groovy"), (.julia, "jl"), (.powershell, "ps1"), (.fsharp, "fs"),
+            (.visualBasic, "vb"), (.clojure, "clj"), (.erlang, "erl")
+        ]
+        for (template, ext) in cases {
+            let file = try NewFileCreator.create(template: template, name: template.defaultName,
+                                                 directory: root, expectedDirectoryIdentity: identity)
+            XCTAssertEqual(file.pathExtension, ext, template.title)
+            XCTAssertTrue(template.isAvailable(resourceDirectory: nil), template.title)
+            XCTAssertTrue(TextPreviewLoader.isTextFile(file), template.title)
+            let capabilities = registry.capabilities(for: file)
+            XCTAssertEqual(capabilities.kind, .code, template.title)
+            XCTAssertEqual(capabilities.activeBackend, .codeMirror, template.title)
+            XCTAssertTrue(capabilities.operations.isSuperset(of: [.open, .edit, .save]), template.title)
+            XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "", template.title)
+        }
+    }
+
+    func testLanguageExtensionVariantsStayEditableAndRejectDifferentSyntax() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let identity = try FileSystem.identity(at: root)
+        let cases: [(NewFileTemplate, [String])] = [
+            (.javascript, ["mjs", "cjs"]), (.typescript, ["mts", "cts"]),
+            (.cpp, ["cc", "cxx", "c++"]), (.cppHeader, ["hh", "hxx", "h++"]),
+            (.python, ["pyw", "pyi"]), (.php, ["phtml"]), (.shell, ["bash", "zsh"]),
+            (.perl, ["pm"]), (.scala, ["sbt"]), (.groovy, ["gradle"]),
+            (.powershell, ["psm1", "psd1"]), (.fsharp, ["fsx", "fsi"]), (.clojure, ["cljc"])
+        ]
+        for (template, extensions) in cases {
+            for ext in extensions {
+                let file = try NewFileCreator.create(template: template, name: "sample.\(ext.uppercased())",
+                                                     directory: root, expectedDirectoryIdentity: identity)
+                XCTAssertTrue(TextPreviewLoader.isTextFile(file), file.lastPathComponent)
+                XCTAssertEqual(FileCapabilityRegistry().capabilities(for: file).kind, .code, file.lastPathComponent)
+                if template == .shell {
+                    XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "#!/bin/\(ext)\n")
+                }
+            }
+        }
+        for (template, name) in [(NewFileTemplate.javascript, "wrong.jsx"), (.typescript, "wrong.tsx"),
+                                 (.c, "wrong.h"), (.kotlin, "wrong.kts")] {
+            XCTAssertThrowsError(try NewFileCreator.create(template: template, name: name,
+                                                          directory: root, expectedDirectoryIdentity: identity))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(name).path))
+        }
+    }
+
     func testCreatesEveryLocalTemplateAndDecodesStructuredFormats() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

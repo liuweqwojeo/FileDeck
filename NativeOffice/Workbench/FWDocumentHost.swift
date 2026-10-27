@@ -5,8 +5,11 @@ import UniformTypeIdentifiers
 @MainActor
 @objc(FWDocumentHost)
 public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations {
-    private let content: any FWNativeContent
+    let content: any FWNativeContent
     private let notice: String?
+    private let recoveredOriginal: DraftRecoveryHeader?
+    private var draftRecovery: FWDraftCheckpoint!
+    private let recoveryLabel = NSTextField(labelWithString: "")
     private var actionBusy = false { didSet { stateDidChange?() } }
     private var saving = false
     private var closed = false
@@ -14,7 +17,7 @@ public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations 
     @objc public private(set) var lastError: String?
     @objc public private(set) var lastSavedURL: URL?
     @objc public var stateDidChange: (() -> Void)?
-    @objc public var documentTitle: String { content.contentTitle }
+    @objc public var documentTitle: String { content.path == nil ? recoveredOriginal.map { "恢复 · " + $0.title } ?? content.contentTitle : content.contentTitle }
     @objc public var documentURL: URL? { content.path }
     @objc public var modified: Bool { content.isModified }
     @objc public var busy: Bool { actionBusy || content.isBusy }
@@ -27,7 +30,10 @@ public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations 
     @objc public var canRedo: Bool { !closed && !busy && content.canRedo }
     @objc public var isEditing: Bool { (content as? FWTextContent)?.isEditing ?? !content.isReadOnly }
     @objc public var canBeginEditing: Bool { !busy && !closed && (content as? FWTextContent)?.canBeginEditing == true }
-    @objc public var statusText: String { lastError ?? (content as? FWTextContent)?.statusText ?? (readOnly ? "只读" : modified ? "未保存" : "已保存") }
+    @objc public var statusText: String {
+        let base = lastError ?? (content as? FWTextContent)?.statusText ?? (readOnly ? "只读" : modified ? "未保存" : "已保存")
+        return draftRecovery?.message.map { base + " · " + $0 } ?? base
+    }
     @objc public var sessionState: String {
         if closed { return "CLOSED" }
         if saving { return "SAVING" }
@@ -40,11 +46,25 @@ public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations 
         return isEditing ? (modified ? "DIRTY" : "EDITING") : "PREVIEW"
     }
 
-    private init(content: any FWNativeContent, notice: String? = nil) {
+    init(content: any FWNativeContent, notice: String? = nil, recovered: DraftRecoveryHeader? = nil,
+                 recoveryStore: DraftRecoveryStore = .shared) {
         self.content = content
         self.notice = notice
+        self.recoveredOriginal = recovered
         super.init(nibName: nil, bundle: nil)
-        content.onStateChanged = { [weak self] in self?.stateDidChange?() }
+        draftRecovery = FWDraftCheckpoint(content: content, id: recovered?.id ?? content.id,
+                                          original: recovered, store: recoveryStore)
+        draftRecovery.onStatusChanged = { [weak self] in
+            guard let self else { return }
+            self.updateRecoveryLabel()
+            self.stateDidChange?()
+        }
+        content.onStateChanged = { [weak self] in
+            self?.draftRecovery.changed()
+            self?.updateRecoveryLabel()
+            self?.stateDidChange?()
+        }
+        draftRecovery.changed()
         (content as? FWTextContent)?.onSaveRecoveryDraft = { [weak self] in
             self?.save(in: nil, saveAs: true) { _ in }
         }
@@ -108,13 +128,100 @@ public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations 
         Task {
             do {
                 guard let kind = WorkbenchFileKind(rawValue: kind(for: url)),
-                      [.text, .code, .json, .yaml, .markdown].contains(kind) else {
+                      [.text, .code, .json, .yaml, .markdown, .csv].contains(kind) else {
                     throw DocumentSessionError.unsupportedOperation(.open)
                 }
-                let content = try await FWTextContent.open(url: url, kind: kind, preview: true)
+                // CSV 内容搜索按物理文本行定位；进入编辑时仍由模态层切换至表格编辑器。
+                let content = try await FWTextContent.open(url: url, kind: kind == .csv ? .text : kind, preview: true)
                 completion(FWDocumentHost(content: content), nil)
             } catch { completion(nil, error as NSError) }
         }
+    }
+
+    /// 恢复只认领独立副本，绝不从原路径重新读取或建立可直接覆盖原文件的保存状态。
+    static func recoverDraft(_ id: UUID, store: DraftRecoveryStore = .shared) async throws -> FWDocumentHost {
+        let draft = try await store.claim(id)
+        do {
+            let content = try await restoredContent(draft)
+            return FWDocumentHost(content: content,
+                notice: "从恢复副本打开，原文件保持不变。请另存此草稿；原撤销历史不恢复。",
+                recovered: draft.header, recoveryStore: store)
+        } catch {
+            try? await store.relinquish(id)
+            throw error
+        }
+    }
+
+    static func restoredContent(_ draft: DraftRecoveryDocument) async throws -> any FWNativeContent {
+        switch WorkbenchFileKind(rawValue: draft.header.kind) {
+        case .text, .code, .json, .yaml, .markdown: return try FWTextContent.recover(draft)
+        case .csv: return try FWCSVContent.recover(draft)
+        case .pdf: return try await FWPDFContent.recover(draft)
+        case .png, .jpeg, .heic: return try await FWImageContent.recover(draft)
+        default: throw DraftRecoveryError.incompatible
+        }
+    }
+
+    @objc(presentDraftRecoveryIn:completion:)
+    public static func presentDraftRecovery(in window: NSWindow?, completion: @escaping (FWDocumentHost?) -> Void) {
+        Task {
+            do {
+                while true {
+                    let items = try await DraftRecoveryStore.shared.items()
+                    let alert = NSAlert()
+                    alert.messageText = "恢复未保存草稿"
+                    alert.informativeText = items.isEmpty ? "没有待恢复草稿。正在其他窗口或进程编辑的草稿不会在此列出。"
+                        : "选择草稿后恢复为独立未命名文档，原文件不变。副本保留 30 天；单份 256 MiB、已提交副本总计 512 MiB、最多 20 份。"
+                    if items.isEmpty {
+                        alert.addButton(withTitle: "知道了")
+                    } else {
+                        alert.addButton(withTitle: "恢复所选")
+                        alert.addButton(withTitle: "删除所选…")
+                        alert.addButton(withTitle: "稍后")
+                    }
+                    let choice = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 500, height: 30))
+                    for item in items {
+                        let date = item.header.map { DateFormatter.localizedString(from: $0.updatedAt, dateStyle: .short, timeStyle: .short) } ?? "无法读取"
+                        choice.addItem(withTitle: "\(item.title) · \(date) · \(ByteCountFormatter.string(fromByteCount: Int64(item.bytes), countStyle: .file))")
+                    }
+                    if !items.isEmpty { alert.accessoryView = choice }
+                    let response = await recoveryAlert(alert, in: window)
+                    guard !items.isEmpty, items.indices.contains(choice.indexOfSelectedItem) else { completion(nil); return }
+                    let item = items[choice.indexOfSelectedItem]
+                    if response == .alertFirstButtonReturn {
+                        if let problem = item.problem {
+                            let error = NSAlert(); error.messageText = "草稿暂时无法恢复"; error.informativeText = problem
+                            error.addButton(withTitle: "知道了"); _ = await recoveryAlert(error, in: window)
+                            continue
+                        }
+                        completion(try await recoverDraft(item.id)); return
+                    }
+                    if response == .alertSecondButtonReturn {
+                        let confirm = NSAlert(); confirm.messageText = "删除此恢复副本？"
+                        confirm.informativeText = "仅删除“\(item.title)”的恢复副本，原文件不变。删除后无法恢复。"
+                        confirm.addButton(withTitle: "取消"); confirm.addButton(withTitle: "删除副本")
+                        if await recoveryAlert(confirm, in: window) == .alertSecondButtonReturn {
+                            try await DraftRecoveryStore.shared.delete(item.id)
+                        }
+                        continue
+                    }
+                    completion(nil); return
+                }
+            } catch {
+                let alert = NSAlert(error: error); _ = await recoveryAlert(alert, in: window)
+                completion(nil)
+            }
+        }
+    }
+    private static func recoveryAlert(_ alert: NSAlert, in window: NSWindow?) async -> NSApplication.ModalResponse {
+        if let window {
+            return await withCheckedContinuation { continuation in
+                alert.beginSheetModal(for: window) { response in
+                    alert.window.orderOut(nil); continuation.resume(returning: response)
+                }
+            }
+        }
+        return alert.runModal()
     }
 
     @objc public func beginEditing() {
@@ -173,13 +280,28 @@ public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations 
             ])
             top = label.bottomAnchor
         }
+        recoveryLabel.font = .systemFont(ofSize: 11)
+        recoveryLabel.lineBreakMode = .byTruncatingMiddle
+        recoveryLabel.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(recoveryLabel)
+        updateRecoveryLabel()
         NSLayoutConstraint.activate([
+            recoveryLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            recoveryLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            recoveryLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -5),
+            recoveryLabel.heightAnchor.constraint(equalToConstant: 16),
             child.view.topAnchor.constraint(equalTo: top, constant: notice == nil ? 0 : 10),
             child.view.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             child.view.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            child.view.bottomAnchor.constraint(equalTo: root.bottomAnchor)
+            child.view.bottomAnchor.constraint(equalTo: recoveryLabel.topAnchor, constant: -4)
         ])
         view = root
+    }
+
+    private func updateRecoveryLabel() {
+        recoveryLabel.stringValue = draftRecovery.message ?? (modified ? "未保存草稿将在本机保留恢复副本" : "当前内容无需恢复副本")
+        recoveryLabel.toolTip = recoveryLabel.stringValue
+        recoveryLabel.textColor = draftRecovery.isFailure ? .systemOrange : .secondaryLabelColor
     }
 
     @objc(saveIn:saveAs:completion:)
@@ -302,6 +424,10 @@ public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations 
                 }
             } catch { await present(error) }
             self.closed = closed
+            if closed {
+                do { try await draftRecovery.finish() }
+                catch { await present(error) }
+            }
             if !closed {
                 await content.suspendInteraction(false)
                 await content.restoreInteraction()
@@ -323,6 +449,10 @@ public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations 
             do { try await content.close(discardChanges: false); closed = true }
             catch { closed = false }
             self.closed = closed
+            if closed {
+                do { try await draftRecovery.finish() }
+                catch { await present(error) }
+            }
             if !closed {
                 await content.suspendInteraction(false)
                 await content.restoreInteraction()
@@ -361,7 +491,8 @@ public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations 
         panel.prompt = exporting ? "导出" : "保存"
         panel.canCreateDirectories = true
         panel.directoryURL = content.path?.deletingLastPathComponent() ?? directory
-        let base = content.path?.deletingPathExtension().lastPathComponent ?? "未命名"
+        let base = content.path?.deletingPathExtension().lastPathComponent
+            ?? recoveredOriginal.map { ($0.title as NSString).deletingPathExtension + "-恢复" } ?? "未命名"
         let defaultExtension = content.kind == .code && !exporting ? content.path?.pathExtension : nil
         panel.nameFieldStringValue = base + (recoveringDraft ? "-恢复草稿" : "") + "."
             + (defaultExtension.flatMap { $0.isEmpty ? nil : $0 } ?? Self.fileExtension(for: initial))

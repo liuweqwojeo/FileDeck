@@ -68,7 +68,7 @@ final class FileClipboardTests: XCTestCase {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let pasteboard = NSPasteboard.withUniqueName()
         defer { pasteboard.releaseGlobally(); try? FileManager.default.removeItem(at: root) }
-        let store = BrowserStore(restoreLastLocation: false)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
         store.openQuickLocation(root)
         try await settled(store)
         try await run(root, store, pasteboard)

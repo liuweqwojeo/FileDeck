@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-CORE = ["DocumentSession", "DocumentIO", "SafeFileIO", "CSVDocument", "MediaOperations", "FileCapabilities", "FileSystem", "TextPreviewLoader"]
+CORE = ["DraftRecoveryStore", "DocumentSession", "DocumentIO", "SafeFileIO", "CSVDocument", "MediaOperations", "FileCapabilities", "FileSystem", "TextPreviewLoader"]
 NATIVE = ["FWNativeContent", "FWBinaryState", "FWCSVContent", "FWPDFContent", "FWImageContent", "FWQuickLookContent"]
 
 
@@ -23,7 +23,7 @@ def main():
         if result.stderr:
             print(result.stderr, end="")
         result.check_returncode()
-        if "PASS: 11 native media/CSV session regressions" not in result.stdout:
+        if "PASS: 15 native media/CSV session regressions" not in result.stdout:
             raise RuntimeError("Native regression process exited before its completion marker")
 
 

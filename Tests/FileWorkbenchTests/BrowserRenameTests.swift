@@ -14,7 +14,7 @@ final class BrowserRenameTests: XCTestCase {
         let sibling = root.appendingPathComponent("sibling.txt")
         try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
         try Data("unchanged".utf8).write(to: sibling)
-        let store = BrowserStore(restoreLastLocation: false)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
         store.openRoot(root, remember: false)
         try await settled(store)
         let entry = try XCTUnwrap(store.entries.first { $0.url == source })
@@ -67,7 +67,7 @@ final class BrowserRenameTests: XCTestCase {
         let suite = "BrowserRenameTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let store = BrowserStore(defaults: defaults, arguments: [])
+        let store = BrowserStore(observesExternalChanges: false, defaults: defaults, arguments: [])
         store.openRoot(root)
         try await settled(store)
         let entry = try XCTUnwrap(store.entries.first { $0.url == source })
@@ -92,7 +92,7 @@ final class BrowserRenameTests: XCTestCase {
         XCTAssertFalse((saved["expandedPaths"] as? [String] ?? []).contains { $0.hasPrefix(source.path) })
 
         // 真正重新创建 store 并解析保存的书签，避免只验证内存中的路径映射。
-        let restored = BrowserStore(defaults: defaults, arguments: [])
+        let restored = BrowserStore(observesExternalChanges: false, defaults: defaults, arguments: [])
         restored.skipWelcome()
         try await settled(restored)
         XCTAssertEqual(restored.managedRoots, [root, destination])
@@ -112,7 +112,7 @@ final class BrowserRenameTests: XCTestCase {
         let suite = "BrowserRenameTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let store = BrowserStore(defaults: defaults, arguments: [])
+        let store = BrowserStore(observesExternalChanges: false, defaults: defaults, arguments: [])
         store.openRoot(root)
         try await settled(store)
         let entry = try XCTUnwrap(store.entries.first { $0.url == source })
@@ -159,7 +159,7 @@ final class BrowserRenameTests: XCTestCase {
         let suite = "BrowserRenameTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        let store = BrowserStore(defaults: defaults, arguments: [])
+        let store = BrowserStore(observesExternalChanges: false, defaults: defaults, arguments: [])
         store.openRoot(root)
         try await settled(store)
         let entry = try XCTUnwrap(store.entries.first { $0.url == source })
@@ -200,7 +200,7 @@ final class BrowserRenameTests: XCTestCase {
         XCTAssertEqual(store.currentDirectory, destination.appendingPathComponent("Child", isDirectory: true))
         XCTAssertEqual(store.rootURL, destination, "同路径历史冲突时使用真实迁移子树的根归属")
 
-        let restored = BrowserStore(defaults: defaults, arguments: [])
+        let restored = BrowserStore(observesExternalChanges: false, defaults: defaults, arguments: [])
         restored.skipWelcome()
         try await settled(restored)
         XCTAssertEqual(restored.managedRoots, [root, destination])
@@ -214,7 +214,7 @@ final class BrowserRenameTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("original.txt")
         try Data("original".utf8).write(to: source)
-        let store = BrowserStore(restoreLastLocation: false)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
         store.openRoot(root, remember: false)
         try await settled(store)
         let entry = try XCTUnwrap(store.entries.first)
@@ -243,7 +243,7 @@ final class BrowserRenameTests: XCTestCase {
         for directory in [source, other] {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         }
-        let store = BrowserStore(restoreLastLocation: false)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
         store.openRoot(root, remember: false)
         try await settled(store)
         let entry = try XCTUnwrap(store.entries.first { $0.url == source })

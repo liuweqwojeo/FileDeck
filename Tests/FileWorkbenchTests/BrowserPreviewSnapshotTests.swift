@@ -178,7 +178,7 @@ final class BrowserPreviewSnapshotTests: XCTestCase {
     }
 
     private func opened(_ directory: URL) async throws -> BrowserStore {
-        let store = BrowserStore(restoreLastLocation: false)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
         store.openQuickLocation(directory)
         try await settled(store)
         return store

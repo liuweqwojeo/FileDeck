@@ -155,6 +155,51 @@ final class CSVDocumentTests: XCTestCase {
         XCTAssertTrue(try document.serialize().utf8.elementsEqual(text.utf8))
     }
 
+    func testIncrementalCacheMatchesFreshParseAcrossEditsUndoAndStructureChanges() throws {
+        var document = try CSVDocument(text: "a,b,c\r\n短行\ré,f\n末行")
+        let original = try document.serialize()
+        let signature = document.serializationSignature
+        let shortCell = try document.cellSnapshot(row: 1, column: 2)
+        try document.setCell("逗号,\"引号\"\r\n多行", row: 1, column: 2)
+        try assertCache(document)
+        try document.restoreCell(shortCell)
+        XCTAssertTrue(try document.serialize().utf8.elementsEqual(original.utf8))
+        XCTAssertEqual(document.serializationSignature, signature)
+        for value in ["e\u{301}", "é", "", "\"", "中\n文"] {
+            try document.setCell(value, row: 2, column: 1)
+            try assertCache(document)
+        }
+        try document.appendRow(["新行"]); try assertCache(document)
+        try document.appendColumn(["1", "2"]); try assertCache(document)
+        try document.deleteRow(at: 0); try assertCache(document)
+        try document.deleteColumn(at: 1); try assertCache(document)
+        let beforeFailure = document
+        XCTAssertThrowsError(try document.setCell("\0", row: 0, column: 0))
+        XCTAssertEqual(document, beforeFailure)
+        try assertCache(document)
+    }
+
+    func testLargeTableIncrementalEditsKeepLengthAndSnapshotsIndependent() throws {
+        let source = String(repeating: "a,a,a,a,a,a,a,a,a,a\r\n", count: 100_000)
+        var document = try CSVDocument(text: source)
+        let original = document
+        for index in 0..<40 {
+            try document.setCell(index.isMultiple(of: 2) ? "中文" : "\"x\"", row: index * 2_017, column: index % 10)
+        }
+        try assertCache(document)
+        XCTAssertEqual(original.serializedByteCount, source.utf8.count)
+        XCTAssertTrue(try original.serialize().utf8.elementsEqual(source.utf8))
+        XCTAssertNotEqual(document.serializationSignature, original.serializationSignature)
+    }
+
+    private func assertCache(_ document: CSVDocument, file: StaticString = #filePath, line: UInt = #line) throws {
+        let text = try document.serialize()
+        XCTAssertEqual(document.serializedByteCount, text.utf8.count, file: file, line: line)
+        let reparsed = try CSVDocument(text: text, delimiter: document.delimiter)
+        XCTAssertEqual(document.serializationSignature, reparsed.serializationSignature, file: file, line: line)
+        XCTAssertEqual(document.rows, reparsed.rows, file: file, line: line)
+    }
+
     private func assertError(_ text: String, _ expected: CSVDocumentError, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertThrowsError(try CSVDocument(text: text), file: file, line: line) { error in
             XCTAssertEqual(error as? CSVDocumentError, expected, file: file, line: line)

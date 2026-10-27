@@ -58,6 +58,278 @@ enum FileTypeFilter: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// 与筛选条件同寿命的显示快照；身份碰撞必须保留歧义，不能用字典最后一项猜测硬链接。
+final class BrowserDisplaySnapshot {
+    enum IdentityMatch { case unique(URL), ambiguous }
+    let visible: [FileEntry]
+    let ordered: [FileEntry]
+    let byURL: [URL: FileEntry]
+    let byIdentity: [FileIdentity: IdentityMatch]
+    let positions: [URL: Int]
+
+    init(entries: [FileEntry], query: String, filter: FileTypeFilter, sortByModified: Bool) {
+        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        visible = entries.filter { filter.includes($0) && (term.isEmpty || $0.name.localizedStandardContains(term)) }
+        ordered = sortByModified ? visible.sorted {
+            if $0.isBrowsableDirectory != $1.isBrowsableDirectory { return $0.isBrowsableDirectory }
+            if $0.modifiedAt != $1.modifiedAt { return ($0.modifiedAt ?? .distantPast) > ($1.modifiedAt ?? .distantPast) }
+            let comparison = $0.name.localizedStandardCompare($1.name)
+            return comparison == .orderedSame ? $0.url.path < $1.url.path : comparison == .orderedAscending
+        } : visible
+        byURL = Dictionary(uniqueKeysWithValues: visible.map { ($0.url, $0) })
+        positions = Dictionary(uniqueKeysWithValues: ordered.enumerated().map { ($0.element.url, $0.offset) })
+        var identities: [FileIdentity: IdentityMatch] = [:]
+        for item in visible {
+            guard let identity = item.identity else { continue }
+            identities[identity] = identities[identity] == nil ? .unique(item.url) : .ambiguous
+        }
+        byIdentity = identities
+    }
+
+    /// 菜单通常只涉及少量项目，按已建索引取值并排序所选项，不为每个网格菜单扫描整目录。
+    func entries(for urls: Set<URL>) -> [FileEntry] {
+        urls.compactMap { byURL[$0] }.sorted { positions[$0.url, default: .max] < positions[$1.url, default: .max] }
+    }
+
+}
+
+struct BrowserDirectorySnapshot: Sendable {
+    let entries: [FileEntry]
+    let trulyEmpty: Bool
+    let identity: FileIdentity?
+    init(entries: [FileEntry], trulyEmpty: Bool, identity: FileIdentity? = nil) {
+        self.entries = entries; self.trulyEmpty = trulyEmpty; self.identity = identity
+    }
+
+    nonisolated static func read(_ url: URL, showHidden: Bool) throws -> Self {
+        let identity = try FileSystem.identity(at: url)
+        let items = try FileSystem.entries(at: url, showHidden: showHidden)
+        // 保留系统隐藏属性的语义；只有可见列表为空时才额外判断“仅含隐藏文件”。
+        let empty = items.isEmpty && !showHidden ? try FileSystem.entries(at: url, showHidden: true).isEmpty : items.isEmpty
+        guard try FileSystem.identity(at: url) == identity else { throw FileSystemError.notBrowsableDirectory(url) }
+        return Self(entries: items, trulyEmpty: empty, identity: identity)
+    }
+}
+
+/// 列表与树共用在途读取；最多两个磁盘任务，收起/切走后的无订阅排队项立即移除。
+/// 系统目录 I/O 不能可靠中止，已运行任务仍占槽直到结束，不能取消包装 Task 后虚增并发。
+@MainActor
+final class BrowserDirectoryLoader {
+    typealias Read = @Sendable (URL, Bool) throws -> BrowserDirectorySnapshot
+    typealias Completion = @MainActor (Result<BrowserDirectorySnapshot, Error>) -> Void
+    private struct Key: Hashable {
+        let url: URL
+        let hidden: Bool
+        let generation: UUID
+        let expectedIdentity: FileIdentity?
+    }
+    private final class Job {
+        let id = UUID()
+        var callbacks: [UUID: Completion] = [:]
+        var running = false
+    }
+    private let read: Read
+    private var jobs: [Key: Job] = [:]
+    private var subscriptions: [UUID: Key] = [:]
+    private var queue: [Key] = []
+    private var running = 0
+
+    init(read: @escaping Read) { self.read = read }
+
+    @discardableResult
+    func request(_ url: URL, hidden: Bool, generation: UUID, foreground: Bool = false, expectedIdentity: FileIdentity? = nil,
+                 completion: @escaping Completion) -> UUID {
+        let key = Key(url: url, hidden: hidden, generation: generation, expectedIdentity: expectedIdentity)
+        let job = jobs[key] ?? Job()
+        if jobs[key] == nil { jobs[key] = job; queue.append(key) }
+        let ticket = UUID()
+        subscriptions[ticket] = key
+        job.callbacks[ticket] = completion
+        // 快速切换时当前目录优先于尚未开始的树分支，但不会突破正在执行的 I/O 上限。
+        if foreground, !job.running { queue.removeAll { $0 == key }; queue.insert(key, at: 0) }
+        startNext()
+        return ticket
+    }
+
+    func cancel(_ ticket: UUID?) {
+        guard let ticket, let key = subscriptions.removeValue(forKey: ticket), let job = jobs[key] else { return }
+        let callback = job.callbacks.removeValue(forKey: ticket)
+        if job.callbacks.isEmpty {
+            // 无人接收的运行结果不能被后来的导航重新订阅；文件可能已经变化。
+            // 工作器仍计入 running，结束时用 job.id 区分同路径的新请求。
+            jobs[key] = nil
+            queue.removeAll { $0 == key }
+        }
+        // 等待关闭预览的 continuation 也必须结束；页面请求另有代次检查，不会提交取消结果。
+        callback?(.failure(CancellationError()))
+    }
+
+    private func startNext() {
+        while running < 2, !queue.isEmpty {
+            let key = queue.removeFirst()
+            guard let job = jobs[key] else { continue }
+            job.running = true
+            running += 1
+            let id = job.id
+            let read = read
+            Task {
+                let result = await Task.detached(priority: .userInitiated) {
+                    Result {
+                        if let identity = key.expectedIdentity, try FileSystem.identity(at: key.url) != identity {
+                            throw FileSystemError.notBrowsableDirectory(key.url)
+                        }
+                        let snapshot = try read(key.url, key.hidden)
+                        // 枚举期间也可能替换整个目录；不能只在开始时验身份就安装后来对象的快照。
+                        if let identity = key.expectedIdentity {
+                            guard snapshot.identity == nil || snapshot.identity == identity,
+                                  try FileSystem.identity(at: key.url) == identity else {
+                                throw FileSystemError.notBrowsableDirectory(key.url)
+                            }
+                        }
+                        return snapshot
+                    }
+                }.value
+                self.running -= 1
+                if let completed = self.jobs[key], completed.id == id {
+                    self.jobs[key] = nil
+                    for (ticket, callback) in completed.callbacks {
+                        self.subscriptions[ticket] = nil
+                        callback(result)
+                    }
+                }
+                self.startNext()
+            }
+        }
+    }
+}
+
+/// 只监听一层目录 vnode，不递归扫描。所有 fd/订阅由专用串行队列持有，主 actor 不执行 open。
+/// 无法建立监听时只报告一次；回前台或父目录变化后重试，避免失败导致持续重读。
+final class BrowserDirectoryObserver: Sendable {
+    static let maximumSubscriptions = 128
+    struct Target: Equatable, Sendable { let url: URL; let identity: FileIdentity? }
+    struct Event: Sendable {
+        let url: URL
+        let identity: FileIdentity?
+        let destination: URL?
+    }
+    private final class Registration {
+        var url: URL
+        let identity: FileIdentity
+        let descriptor: Int32
+        let source: DispatchSourceFileSystemObject
+        init(url: URL, identity: FileIdentity, descriptor: Int32, source: DispatchSourceFileSystemObject) {
+            self.url = url; self.identity = identity; self.descriptor = descriptor; self.source = source
+        }
+        deinit { source.cancel() }
+    }
+    /// 可变状态只在 queue 访问；事件通过不可变 Sendable 值传回，源回调不保留 owner 或 fd 之外的资源。
+    private final class State: @unchecked Sendable {
+        let queue: DispatchQueue
+        let callback: @Sendable (Event) -> Void
+        var registrations: [URL: Registration] = [:]
+        var failed: [URL: Target] = [:]
+        var targets: [URL: Target] = [:]
+        init(queue: DispatchQueue, callback: @escaping @Sendable (Event) -> Void) {
+            self.queue = queue; self.callback = callback
+        }
+        func reconcile(_ requested: [Target], retry: Bool) {
+            var seen: Set<URL> = []
+            let requested = Array(requested.filter { seen.insert($0.url).inserted }.prefix(BrowserDirectoryObserver.maximumSubscriptions))
+            var relocated: [Registration] = []
+            targets = Dictionary(uniqueKeysWithValues: requested.map { ($0.url, $0) })
+            var next: [URL: Registration] = [:]
+            var used: Set<Int32> = []
+            for target in requested {
+                let previous = registrations[target.url].flatMap { registration in
+                    target.identity == nil || registration.identity == target.identity ? registration : nil
+                } ?? registrations.values.first { $0.identity == target.identity && !used.contains($0.descriptor) }
+                if let previous, used.insert(previous.descriptor).inserted {
+                    if previous.url != target.url { relocated.append(previous) }
+                    previous.url = target.url
+                    next[target.url] = previous
+                    continue
+                }
+                if !retry, failed[target.url] == target { continue }
+                let descriptor = target.url.withUnsafeFileSystemRepresentation { path in
+                    path.map { open($0, O_EVTONLY | O_CLOEXEC | O_NOFOLLOW) } ?? -1
+                }
+                do {
+                    guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+                    let identity = try FileSystem.identity(ofDescriptor: descriptor)
+                    guard target.identity == nil || identity == target.identity,
+                          try FileSystem.identity(at: target.url) == identity else {
+                        throw FileSystemError.notBrowsableDirectory(target.url)
+                    }
+                    let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor,
+                        eventMask: [.write, .delete, .rename, .revoke, .attrib, .link, .extend], queue: queue)
+                    let registration = Registration(url: target.url, identity: identity, descriptor: descriptor, source: source)
+                    source.setEventHandler { [weak self, weak registration] in
+                        guard let self, let registration, self.registrations[registration.url] === registration else { return }
+                        self.report(registration)
+                        // 目录已被删除/卸载时旧 fd 不再监视同路径的后来对象，等待父目录或前台重试。
+                        if !registration.source.data.intersection([.delete, .revoke]).isEmpty {
+                            self.registrations[registration.url] = nil
+                            self.failed[registration.url] = self.targets[registration.url]
+                        }
+                        if registration.source.data.contains(.write) {
+                            let children = self.targets.values.filter { $0.url.deletingLastPathComponent().path == registration.url.path }
+                            for child in children { self.failed[child.url] = nil }
+                            if !children.isEmpty { self.reconcile(Array(self.targets.values), retry: false) }
+                        }
+                    }
+                    source.setCancelHandler { close(descriptor) }
+                    next[target.url] = registration
+                    failed[target.url] = nil
+                    source.resume()
+                    // 注册与第一次枚举有时序间隙，补一次合并检查，不能漏掉安装监听前发生的变化。
+                    callback(Event(url: target.url, identity: identity, destination: nil))
+                } catch {
+                    if descriptor >= 0 { close(descriptor) }
+                    failed[target.url] = target
+                    callback(Event(url: target.url, identity: nil, destination: nil))
+                }
+            }
+            registrations = next
+            failed = failed.filter { targets[$0.key] != nil }
+            // 重命名时按身份复用原 fd；若路径又变过，不能先关掉唯一仍指向原对象的描述符。
+            for registration in relocated {
+                if let destination = currentPath(registration), destination.path != registration.url.path {
+                    callback(Event(url: registration.url, identity: registration.identity, destination: destination))
+                }
+            }
+        }
+        private func report(_ registration: Registration) {
+            let path = currentPath(registration)
+            callback(Event(url: registration.url, identity: registration.identity,
+                           destination: path.flatMap { $0.path == registration.url.path ? nil : $0 }))
+        }
+        private func currentPath(_ registration: Registration) -> URL? {
+            var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+            let path: String? = buffer.withUnsafeMutableBufferPointer {
+                guard let base = $0.baseAddress, fcntl(registration.descriptor, F_GETPATH, base) == 0 else { return nil }
+                return String(validatingCString: base)
+            }
+            guard let path else { return nil }
+            let url = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+            guard (try? FileSystem.identity(at: url)) == registration.identity else { return nil }
+            return url
+        }
+        func stop() { registrations = [:]; targets = [:]; failed = [:] }
+    }
+    private let queue = DispatchQueue(label: "FileDeck.directory-observation", qos: .utility)
+    private let state: State
+    init(callback: @escaping @Sendable (Event) -> Void) { state = State(queue: queue, callback: callback) }
+    func setTargets(_ targets: [Target], retry: Bool = false) {
+        let state = state
+        queue.async { state.reconcile(targets, retry: retry) }
+    }
+    deinit {
+        let state = state
+        queue.async { state.stop() }
+    }
+}
+
 /// 管理多根目录、原生授权、懒加载树与导航历史。磁盘枚举只接收最后一次请求。
 @MainActor
 final class BrowserStore: ObservableObject {
@@ -65,7 +337,13 @@ final class BrowserStore: ObservableObject {
     @Published private(set) var startupPhase: WorkspaceStartupPhase = .welcome
     @Published private(set) var rootURL: URL?
     @Published private(set) var currentDirectory: URL?
-    @Published private(set) var entries: [FileEntry] = []
+    @Published private(set) var entries: [FileEntry] = [] {
+        didSet {
+            entriesByURL = Dictionary(uniqueKeysWithValues: entries.map { ($0.url, $0) })
+            cachedDisplaySnapshot = nil
+            cachedSelectedEntries = nil
+        }
+    }
     @Published var selectedURL: URL? {
         didSet {
             guard !updatingSelection else { return }
@@ -73,18 +351,34 @@ final class BrowserStore: ObservableObject {
             selectionAnchor = selectedURL
         }
     }
-    @Published private(set) var selectedURLs: Set<URL> = []
+    @Published private(set) var selectedURLs: Set<URL> = [] {
+        didSet { cachedSelectedEntries = nil }
+    }
     @Published var sortByModified = false {
-        didSet { if persistsWorkspace { defaults.set(sortByModified, forKey: "FileWorkbench.sortByModified") } }
+        didSet {
+            if sortByModified != oldValue { cachedDisplaySnapshot = nil }
+            if persistsWorkspace { defaults.set(sortByModified, forKey: "FileWorkbench.sortByModified") }
+        }
     }
     @Published var gridView = false {
         didSet { if persistsWorkspace { defaults.set(gridView, forKey: "FileWorkbench.gridView") } }
     }
-    @Published var query = "" { didSet { updateSearchSelection() } }
-    @Published var typeFilter: FileTypeFilter = .all { didSet { updateSearchSelection() } }
+    @Published var query = "" {
+        didSet { if query != oldValue { cachedDisplaySnapshot = nil; updateSearchSelection() } }
+    }
+    @Published var typeFilter: FileTypeFilter = .all {
+        didSet { if typeFilter != oldValue { cachedDisplaySnapshot = nil; updateSearchSelection() } }
+    }
     @Published var showHidden = false
-    @Published private(set) var isLoading = false
-    @Published private(set) var isImporting = false
+    @Published private(set) var isLoading = false { didSet { if !isLoading { scheduleExternalSynchronization() } } }
+    @Published private(set) var isImporting = false { didSet { if !isImporting { scheduleExternalSynchronization() } } }
+    @Published private(set) var isTrashing = false { didSet { if !isTrashing { scheduleExternalSynchronization() } } }
+    var isFileOperationBusy: Bool { isImporting || isTrashing }
+    @Published private(set) var fileOperationProgress: FileOperationControl.Progress?
+    @Published private(set) var fileOperationSummary: String?
+    @Published private(set) var fileOperationUndo: [FileOperationUndo] = []
+    private var operationControl: FileOperationControl?
+
     @Published private(set) var directoryError: String?
     @Published private(set) var directoryIssue: DirectoryIssue?
     @Published private(set) var directoryIsTrulyEmpty = false
@@ -125,24 +419,42 @@ final class BrowserStore: ObservableObject {
     // 键跟随浏览路径，值保留系统最初授予的作用域令牌；重命名不能丢弃仍有效的授权。
     private var scopedURLs: [URL: URL] = [:]
     private var navigationRoots: [URL: URL] = [:]
+    private var updatingDisplayState = false
     private var updatingSelection = false
     private var selectionAnchor: URL?
-    private var activePreviewSnapshotID: UUID?
+    private var activePreviewSnapshotID: UUID? { didSet { if activePreviewSnapshotID == nil { scheduleExternalSynchronization() } } }
     private var activeFileDrag: (id: UUID, files: [BrowserFileReference])?
 
-    var visibleEntries: [FileEntry] {
-        let term = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        return entries.filter { typeFilter.includes($0) && (term.isEmpty || $0.name.localizedStandardContains(term)) }
+    private var entriesByURL: [URL: FileEntry] = [:]
+    // 列表加载时会清空 entries；连续刷新仍须沿用第一次捕获的身份，不能重新 stat 后继承同名替换项。
+    private var pendingSelectionReferences: [URL: BrowserFileReference] = [:]
+    private var cachedDisplaySnapshot: BrowserDisplaySnapshot?
+    private var cachedSelectedEntries: (display: BrowserDisplaySnapshot, entries: [FileEntry])?
+    private let directoryLoader: BrowserDirectoryLoader
+    private var listTicket: UUID?
+    private var treeTickets: [URL: UUID] = [:]
+
+    private let observesExternalChanges: Bool
+    private var directoryObserver: BrowserDirectoryObserver?
+    private var observedDirectories: Set<URL> = []
+    private var directoryIdentities: [URL: FileIdentity] = [:]
+    private var externalDirty: [URL: UInt64] = [:]
+    private var externalVersion: UInt64 = 0
+    private var externalEpoch = UUID()
+    private var externalMoves: [URL: (identity: FileIdentity, destination: URL)] = [:]
+    private var externalRequests: [URL: (id: UUID, ticket: UUID)] = [:]
+    private var externalDebounce: Task<Void, Never>?
+    private(set) var isSynchronizingExternalChanges = false
+
+    var displaySnapshot: BrowserDisplaySnapshot {
+        if let cachedDisplaySnapshot { return cachedDisplaySnapshot }
+        let snapshot = BrowserDisplaySnapshot(entries: entries, query: query, filter: typeFilter, sortByModified: sortByModified)
+        cachedDisplaySnapshot = snapshot
+        return snapshot
     }
-    var selectedEntry: FileEntry? { visibleEntries.first { $0.url == selectedURL } }
-    var orderedEntries: [FileEntry] {
-        guard sortByModified else { return visibleEntries }
-        return visibleEntries.sorted {
-            if $0.isBrowsableDirectory != $1.isBrowsableDirectory { return $0.isBrowsableDirectory }
-            if $0.modifiedAt != $1.modifiedAt { return ($0.modifiedAt ?? .distantPast) > ($1.modifiedAt ?? .distantPast) }
-            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
-        }
-    }
+    var visibleEntries: [FileEntry] { displaySnapshot.visible }
+    var selectedEntry: FileEntry? { selectedURL.flatMap { displaySnapshot.byURL[$0] } }
+    var orderedEntries: [FileEntry] { displaySnapshot.ordered }
     var hasActiveFilters: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || typeFilter != .all || (!isLoading && directoryIssue == nil && currentDirectory != nil && entries.isEmpty && !directoryIsTrulyEmpty) }
     var canGoBack: Bool { historyIndex > 0 }
     var canGoForward: Bool { historyIndex >= 0 && historyIndex + 1 < history.count }
@@ -151,10 +463,18 @@ final class BrowserStore: ObservableObject {
         pendingWorkspace.map { !$0.roots.isEmpty || $0.currentPath != nil } ?? false
     }
 
-    init(restoreLastLocation: Bool = true, defaults: UserDefaults = .standard,
-         arguments: [String] = ProcessInfo.processInfo.arguments) {
+    init(observesExternalChanges: Bool = true, restoreLastLocation: Bool = true, defaults: UserDefaults = .standard,
+         arguments: [String] = ProcessInfo.processInfo.arguments,
+         directoryReader: @escaping BrowserDirectoryLoader.Read = { try BrowserDirectorySnapshot.read($0, showHidden: $1) }) {
         self.defaults = defaults
+        self.directoryLoader = BrowserDirectoryLoader(read: directoryReader)
         self.persistsWorkspace = restoreLastLocation
+        self.observesExternalChanges = observesExternalChanges
+        if observesExternalChanges {
+            directoryObserver = BrowserDirectoryObserver { [weak self] event in
+                Task { @MainActor [weak self] in self?.receiveDirectoryEvent(event) }
+            }
+        }
         self.gridView = defaults.bool(forKey: "FileWorkbench.gridView")
         self.sortByModified = defaults.bool(forKey: "FileWorkbench.sortByModified")
         guard restoreLastLocation else { startupPhase = .ready; return }
@@ -169,6 +489,7 @@ final class BrowserStore: ObservableObject {
     }
 
     deinit {
+        externalDebounce?.cancel()
         for url in scopedURLs.values { url.stopAccessingSecurityScopedResource() }
     }
 
@@ -207,6 +528,11 @@ final class BrowserStore: ObservableObject {
 
     func relocateManagedRoot(_ root: URL) {
         chooseLocation(selectingFile: false) { [weak self] chosen in self?.replaceManagedRoot(root, with: chosen) }
+    }
+
+    /// 搜索只取得目录授权，不新增管理根、不改变当前导航；定位结果时才显式导航。
+    func chooseSearchDirectory(completion: @escaping (URL) -> Void) {
+        chooseLocation(selectingFile: false, completion: completion)
     }
 
     private func chooseLocation(selectingFile: Bool, completion: @escaping (URL) -> Void) {
@@ -297,6 +623,8 @@ final class BrowserStore: ObservableObject {
             history.append(target)
             historyIndex = history.count - 1
         }
+        cancelExternalRequests()
+        directoryIdentities[target] = nil
         currentDirectory = target
         navigationRoots[target] = rootURL
         // 先进入加载态再清除过滤，避免 didSet 把待恢复的文件选择当作旧快照清空。
@@ -305,8 +633,10 @@ final class BrowserStore: ObservableObject {
         query = ""
         typeFilter = .all
         expandAncestors(of: target)
+        cancelInvisibleTreeLoads()
         saveWorkspace()
         loadDirectory()
+        updateObservationTargets()
     }
 
     func goBack() {
@@ -325,22 +655,27 @@ final class BrowserStore: ObservableObject {
     }
 
     func refresh() {
-        let loadedURLs = Set(treeChildren.keys).union(managedRoots)
+        cancelExternalRequests()
         clearTree()
         loadDirectory()
-        for url in loadedURLs { loadChildren(of: url) }
-        if let rootURL { loadChildren(of: rootURL) }
+        reloadVisibleTree()
+        updateObservationTargets()
     }
 
     /// 返回中性空状态时保留管理根与树展开，但取消待返回的旧列表和预览。
     func clearCurrentDirectory() {
+        cancelExternalRequests()
+        externalMoves = [:]
         activePreviewSnapshotID = nil
         currentRestoreID = nil
         loadID = UUID()
+        directoryLoader.cancel(listTicket)
+        listTicket = nil
         isLoading = false
         rootURL = nil
         currentDirectory = nil
         entries = []
+        pendingSelectionReferences = [:]
         selectedURL = nil
         directoryError = nil
         directoryIssue = nil
@@ -352,15 +687,16 @@ final class BrowserStore: ObservableObject {
         navigationRoots = [:]
         startupPhase = .ready
         saveWorkspace()
+        updateObservationTargets()
     }
 
     func clearSearch() { query = "" }
     func resetFilters() { query = ""; typeFilter = .all }
 
     func updateSearchSelection() {
-        guard !isLoading else { return }
-        let visible = Set(visibleEntries.map(\.url))
-        setSelection(selectedURLs.intersection(visible), primary: selectedURL.flatMap { visible.contains($0) ? $0 : nil })
+        guard !isLoading, !updatingDisplayState else { return }
+        let visible = displaySnapshot.byURL
+        setSelection(selectedURLs.filter { visible[$0] != nil }, primary: selectedURL.flatMap { visible[$0] != nil ? $0 : nil })
     }
 
     func setSelection(_ urls: Set<URL>, primary: URL?) {
@@ -373,10 +709,10 @@ final class BrowserStore: ObservableObject {
 
     /// 修饰键选择只改变当前文件集合，不负责导航或打开预览。
     func select(_ entry: FileEntry, extending: Bool = false, toggling: Bool = false) {
+        let snapshot = displaySnapshot
         if extending, let anchor = selectionAnchor,
-           let start = orderedEntries.firstIndex(where: { $0.url == anchor }),
-           let end = orderedEntries.firstIndex(where: { $0.url == entry.url }) {
-            let range = Set(orderedEntries[min(start, end)...max(start, end)].map(\.url))
+           let start = snapshot.positions[anchor], let end = snapshot.positions[entry.url] {
+            let range = Set(snapshot.ordered[min(start, end)...max(start, end)].map(\.url))
             setSelection(toggling ? selectedURLs.union(range) : range, primary: entry.url)
         } else if toggling {
             var selection = selectedURLs
@@ -406,29 +742,35 @@ final class BrowserStore: ObservableObject {
               let directory = snapshot.directory else { return }
         let request = UUID()
         loadID = request
-        let result = await Task.detached(priority: .userInitiated) {
-            Result { () -> ([FileEntry], Bool) in
-                if let identity = snapshot.directoryIdentity, try FileSystem.identity(at: directory) != identity {
-                    throw FileSystemError.notBrowsableDirectory(directory)
-                }
-                let items = try FileSystem.entries(at: directory, showHidden: snapshot.showHidden)
-                let trulyEmpty = items.isEmpty && !snapshot.showHidden
-                    ? try FileSystem.entries(at: directory, showHidden: true).isEmpty : items.isEmpty
-                return (items, trulyEmpty)
+        directoryLoader.cancel(listTicket)
+        directoryLoader.cancel(treeTickets.removeValue(forKey: directory))
+        treeLoading.remove(directory)
+        // 保存可能以原子替换更新磁盘，关闭预览必须开启新一代读取，不能加入保存前的在途快照。
+        let result: Result<BrowserDirectorySnapshot, Error> = await withCheckedContinuation { continuation in
+            listTicket = directoryLoader.request(directory, hidden: snapshot.showHidden, generation: UUID(),
+                                                 foreground: true, expectedIdentity: snapshot.directoryIdentity) {
+                continuation.resume(returning: $0)
             }
-        }.value
+        }
         guard activePreviewSnapshotID == snapshot.id, loadID == request, currentDirectory == directory else { return }
         activePreviewSnapshotID = nil
+        listTicket = nil
+        pendingSelectionReferences = [:]
+        updatingDisplayState = true
         query = snapshot.query
         typeFilter = snapshot.typeFilter
         showHidden = snapshot.showHidden
         sortByModified = snapshot.sortByModified
         gridView = snapshot.gridView
         expandedDirectories = snapshot.expandedDirectories
+        updatingDisplayState = false
         isLoading = false
         revision = UUID()
         switch result {
-        case .success(let (items, trulyEmpty)):
+        case .success(let loaded):
+            let items = loaded.entries
+            let trulyEmpty = loaded.trulyEmpty
+            if let identity = loaded.identity { directoryIdentities[directory] = identity }
             entries = items
             directoryIsTrulyEmpty = trulyEmpty
             directoryError = nil
@@ -437,32 +779,38 @@ final class BrowserStore: ObservableObject {
             treeErrors[directory] = nil
             restoreSelection(snapshot.selection, primary: snapshot.primarySelection, savedURL: savedURL)
         case .failure(let error):
-            entries = []
-            selectedURL = nil
-            directoryIsTrulyEmpty = false
-            directoryIssue = Self.classify(error)
-            directoryError = Self.message(for: error)
-            treeErrors[directory] = Self.message(for: error)
+            // 原目录可能在预览期间改名。保留原身份快照供监听迁移，不能先清掉待恢复的选择。
+            // 同路径后来对象仍被 expectedIdentity 拒绝，失败不会安装其内容。
+            applyExternalSnapshot(.failure(error), at: directory)
         }
         saveWorkspace()
+        updateObservationTargets()
     }
 
     private func fileReference(_ url: URL) -> BrowserFileReference {
-        BrowserFileReference(url: url, identity: entries.first(where: { $0.url == url })?.identity ?? (try? FileSystem.identity(at: url)))
+        if let entry = entriesByURL[url] {
+            return BrowserFileReference(url: url, identity: entry.identity ?? (try? FileSystem.identity(at: url)))
+        }
+        if let pending = pendingSelectionReferences[url] { return pending }
+        return BrowserFileReference(url: url, identity: try? FileSystem.identity(at: url))
     }
 
-    private func restoreSelection(_ references: Set<BrowserFileReference>, primary: BrowserFileReference?, savedURL: URL? = nil) {
+    private func restoreSelection(_ references: Set<BrowserFileReference>, primary: BrowserFileReference?, savedURL: URL? = nil, anchor: BrowserFileReference? = nil) {
+        let snapshot = displaySnapshot
         func resolve(_ reference: BrowserFileReference) -> URL? {
-            if reference.url == savedURL, visibleEntries.contains(where: { $0.url == savedURL }) { return savedURL }
+            if reference.url == savedURL, snapshot.byURL[reference.url] != nil { return savedURL }
             guard let identity = reference.identity else { return nil }
-            // 多个硬链接可共享身份；只有原路径仍匹配或唯一候选时才跟随，不能猜测另一个文件。
-            if let samePath = visibleEntries.first(where: { $0.url == reference.url && $0.identity == identity }) { return samePath.url }
-            let matches = visibleEntries.filter { $0.identity == identity }
-            return matches.count == 1 ? matches.first?.url : nil
+            // 原路径优先且必须同身份；唯一身份才允许跟随重命名，硬链接歧义不能随意继承选择。
+            if snapshot.byURL[reference.url]?.identity == identity { return reference.url }
+            if case .unique(let url) = snapshot.byIdentity[identity] { return url }
+            return nil
         }
         let selection = Set(references.compactMap(resolve))
-        setSelection(selection, primary: primary.flatMap(resolve))
-        selectionAnchor = selectedURL
+        let resolvedPrimary = primary.flatMap(resolve)
+        if selection != selectedURLs || resolvedPrimary != selectedURL {
+            setSelection(selection, primary: resolvedPrimary)
+        }
+        selectionAnchor = anchor.flatMap(resolve) ?? selectedURL
     }
 
     func enter(_ entry: FileEntry) {
@@ -490,6 +838,7 @@ final class BrowserStore: ObservableObject {
         history = history.filter { !Self.contains($0, in: root) }
         historyIndex = retainedPrefixCount - 1
         saveWorkspace()
+        updateObservationTargets()
     }
 
     func replaceManagedRoot(_ url: URL, with replacement: URL) {
@@ -535,7 +884,94 @@ final class BrowserStore: ObservableObject {
         }
     }
 
-    var selectedFileURLs: [URL] { orderedEntries.filter { selectedURLs.contains($0.url) }.map(\.url) }
+    var selectedFileEntries: [FileEntry] {
+        let display = displaySnapshot
+        if let cachedSelectedEntries, cachedSelectedEntries.display === display { return cachedSelectedEntries.entries }
+        let entries = display.entries(for: selectedURLs)
+        cachedSelectedEntries = (display, entries)
+        return entries
+    }
+    var selectedFileURLs: [URL] { selectedFileEntries.map(\.url) }
+
+    /// List 的右键目标由系统给出；网格右键已选项目才沿用多选，右键未选项目只操作该项。
+    /// 返回值在菜单构建时捕获，之后的选择、搜索与目录变化不能扩大破坏性操作范围。
+    func fileActionEntries(for entry: FileEntry, contextSelection: Set<URL>? = nil) -> [FileEntry] {
+        if let contextSelection { return displaySnapshot.entries(for: contextSelection) }
+        if selectedURLs.contains(entry.url) { return selectedFileEntries }
+        return displaySnapshot.byURL[entry.url].map { [$0] } ?? []
+    }
+
+    private func beginFileOperation(_ title: String, total: Int, replacingUndo: Bool = true) -> FileOperationControl {
+        let control = FileOperationControl(title: title, total: total)
+        operationControl = control
+        fileOperationProgress = control.progress
+        fileOperationSummary = nil
+        actionError = nil
+        if replacingUndo { fileOperationUndo = [] }
+        Task { [weak self, weak control] in
+            while let control, self?.operationControl === control {
+                let progress = control.progress
+                if self?.fileOperationProgress != progress { self?.fileOperationProgress = progress }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        return control
+    }
+
+    func cancelFileOperation() {
+        operationControl?.cancel()
+        fileOperationProgress = operationControl?.progress
+    }
+
+    private func finishFileOperation(_ control: FileOperationControl, succeeded: Int, failures: [String],
+                                     warnings: [String] = [], unattempted: Int) {
+        let state = control.progress
+        operationControl = nil
+        fileOperationProgress = nil
+        let details = failures + warnings
+        fileOperationSummary = "\(state.title)\(state.cancellationRequested ? "已停止" : "完成")：成功 \(succeeded)，失败 \(failures.count)，未执行 \(unattempted)，共 \(state.total) 项。"
+            + (details.isEmpty ? "" : "\n" + details.joined(separator: "\n"))
+    }
+
+    func dismissFileOperationSummary() { fileOperationSummary = nil }
+
+    /// 只撤销最近一批成功项；冲突、被替换项目和取消后未执行的项目保留，允许用户排除问题后重试。
+    func undoLastFileOperation() async {
+        guard !isFileOperationBusy, !fileOperationUndo.isEmpty else { return }
+        let records = fileOperationUndo
+        isImporting = true
+        let control = beginFileOperation("撤销文件操作", total: records.count, replacingUndo: false)
+        let result = await Task.detached(priority: .userInitiated) {
+            FileOperationUndo.perform(records, control: control)
+        }.value
+        fileOperationUndo = result.remaining
+        finishFileOperation(control, succeeded: result.succeeded, failures: result.failures,
+                            unattempted: records.count - control.progress.completed)
+        completeFileRelocation(result.moved)
+        isImporting = false
+    }
+
+    /// 移入废纸篓不回退为永久删除；一项失败不阻止其他项，并保持用户操作期间的新导航。
+    @discardableResult
+    func trashFiles(_ files: [FileEntry], using trashItem: WorkspaceFileTrash.TrashItem? = nil,
+                    trashAndLocate: @escaping WorkspaceFileTrash.LocatedTrashItem = WorkspaceFileTrash.systemTrash) async -> WorkspaceFileTrash.Result? {
+        guard !files.isEmpty else { return nil }
+        guard !isFileOperationBusy else { actionError = "正在处理文件，请稍后再试。"; return nil }
+        let files = WorkspaceFileTrash.unique(files)
+        isTrashing = true
+        let control = beginFileOperation("移到废纸篓", total: files.count)
+        let result = await Task.detached(priority: .userInitiated) {
+            WorkspaceFileTrash.perform(files, using: trashItem, trashAndLocate: trashAndLocate, control: control)
+        }.value
+        fileOperationUndo = result.undo
+        finishFileOperation(control, succeeded: result.succeeded.count, failures: result.failures.map { "\($0.file.name)：\($0.message)" },
+                            warnings: result.warnings, unattempted: result.unattempted)
+        actionError = result.failureSummary
+        // 只刷新最新浏览位置，失败项仅在身份仍匹配时保留选择。
+        refresh()
+        isTrashing = false
+        return result
+    }
 
     /// 只有磁盘重命名成功才同步工作区；完成时读取最新导航状态，不跳回发起操作的目录。
     @discardableResult
@@ -651,34 +1087,64 @@ final class BrowserStore: ObservableObject {
 
     private func transferFiles(_ files: [BrowserFileReference], into directory: URL, move: Bool, renameConflicts: Bool = false) {
         guard !files.isEmpty else { return }
-        guard !isImporting else { actionError = "正在处理文件，请稍后再试。"; return }
+        guard !isFileOperationBusy else { actionError = "正在处理文件，请稍后再试。"; return }
         guard directory.isFileURL, let identity = try? FileSystem.identity(at: directory) else {
             actionError = "目标文件夹不可访问，请重新选择。"
             return
         }
+        let files = WorkspaceFileTransfer.unique(files)
         isImporting = true
-        actionError = nil
+        let control = beginFileOperation(move ? "移动" : "复制", total: files.count)
         Task {
             let result = await Task.detached(priority: .userInitiated) {
-                WorkspaceFileTransfer.perform(files, into: directory, expectedIdentity: identity, move: move, renameConflicts: renameConflicts)
+                WorkspaceFileTransfer.perform(files, into: directory, expectedIdentity: identity, move: move,
+                                              renameConflicts: renameConflicts, control: control)
             }.value
-            self.isImporting = false
-            if !result.failures.isEmpty { self.actionError = "部分文件未能\(move ? "移动" : "复制")：\n" + result.failures.joined(separator: "\n") }
-            // 刷新来源与落点的树缓存，但不抢回用户在操作期间切换到的目录。
+            self.fileOperationUndo = result.undo
+            self.finishFileOperation(control, succeeded: result.succeeded, failures: result.failures,
+                                     warnings: result.warnings, unattempted: result.unattempted)
+            if !result.failures.isEmpty { self.actionError = result.failures.joined(separator: "\n") }
+            // 状态同步期间继续持有忙碌门禁，防止被动目录同步插入旧路径快照。
             if move { self.completeFileRelocation(result.moved) }
             else { self.refresh(); self.saveWorkspace() }
+            self.isImporting = false
         }
     }
 
     /// 重命名与拖动移动共用同一次状态提交，旧路径缓存和在途恢复不能再次带回已失效的位置。
-    private func completeFileRelocation(_ moved: [(source: URL, destination: URL)]) {
+    private func completeFileRelocation(_ moved: [(source: URL, destination: URL)], preservingList: Bool = false) {
         guard !moved.isEmpty else { refresh(); return }
         func relocated(_ url: URL) -> URL {
             guard let change = moved.first(where: { Self.contains(url, in: $0.source) }) else { return url }
             let suffix = String(url.path.dropFirst(change.source.path.count))
             return URL(fileURLWithPath: change.destination.path + suffix, isDirectory: url.hasDirectoryPath)
         }
-        let loadedDirectories = Set(treeChildren.keys).union(treeLoading).map(relocated)
+        cancelExternalRequests()
+        func relocatedEntry(_ entry: FileEntry) -> FileEntry {
+            let url = relocated(entry.url)
+            return FileEntry(url: url, name: url.lastPathComponent, isDirectory: entry.isDirectory,
+                             isPackage: entry.isPackage, isSymbolicLink: entry.isSymbolicLink, size: entry.size,
+                             modifiedAt: entry.modifiedAt, typeIdentifier: entry.typeIdentifier, identity: entry.identity)
+        }
+        func relocatedEntries(_ entries: [FileEntry]) -> [FileEntry] {
+            // 真实迁移项覆盖目标路径旧缓存，避免同一 URL 两行导致索引构造崩溃。
+            let destinations = Set(entries.compactMap { relocated($0.url) == $0.url ? nil : relocated($0.url) })
+            return entries.compactMap { entry in
+                if relocated(entry.url) == entry.url && destinations.contains(entry.url) { return nil }
+                return relocatedEntry(entry)
+            }
+        }
+        let previousTree = treeChildren
+        var mappedTree = previousTree.filter { relocated($0.key) == $0.key }.mapValues(relocatedEntries)
+        for (url, children) in previousTree where relocated(url) != url {
+            mappedTree[Self.directoryURL(relocated(url))] = relocatedEntries(children)
+        }
+        let previousIdentities = directoryIdentities
+        directoryIdentities = previousIdentities.filter { relocated($0.key) == $0.key }
+        for (url, identity) in previousIdentities where relocated(url) != url {
+            directoryIdentities[Self.directoryURL(relocated(url))] = identity
+        }
+        entries = relocatedEntries(entries)
         let previousBookmarks = bookmarks
         // 目标路径可能已有失效的管理引用。先保留未迁移项，再让真实迁移对象覆盖同路径旧书签。
         bookmarks = previousBookmarks.filter { relocated($0.key) == $0.key }
@@ -718,9 +1184,16 @@ final class BrowserStore: ObservableObject {
         if activeFileDrag?.files.contains(where: { relocated($0.url) != $0.url }) == true { activeFileDrag = nil }
         // 先作废旧请求，再按新路径加载树；直接 refresh 会重新枚举缓存中的旧目录名称。
         clearTree()
-        loadDirectory()
-        for url in Set(loadedDirectories).union(managedRoots) { loadChildren(of: url) }
-        if let rootURL { loadChildren(of: rootURL) }
+        if preservingList {
+            treeChildren = mappedTree
+            updateSearchSelection()
+            updateObservationTargets()
+            for url in observedPrimaryDirectories { markExternalChange(url) }
+        } else {
+            loadDirectory()
+            reloadVisibleTree()
+            updateObservationTargets()
+        }
         saveWorkspace()
     }
 
@@ -744,26 +1217,35 @@ final class BrowserStore: ObservableObject {
         treeErrors[url] = nil
         let generation = treeGeneration
         let hidden = showHidden
-        Task {
-            let result = await Task.detached(priority: .userInitiated) {
-                Result { try FileSystem.folders(at: url, showHidden: hidden) }
-            }.value
-            guard generation == self.treeGeneration else { return }
+        let version = externalVersion
+        treeTickets[url] = directoryLoader.request(url, hidden: hidden, generation: generation) { [weak self] result in
+            guard let self, generation == self.treeGeneration else { return }
+            self.treeTickets[url] = nil
             self.treeLoading.remove(url)
-            // 列表枚举若先完成，以它的更新快照为准，防止较早的树请求覆盖结果。
             guard self.treeChildren[url] == nil else { return }
             switch result {
-            case .success(let folders): self.treeChildren[url] = folders
-            case .failure(let error): self.treeErrors[url] = Self.message(for: error)
+            case .success(let snapshot):
+                self.treeChildren[url] = snapshot.entries.filter(\.isBrowsableDirectory)
+                if let identity = snapshot.identity { self.directoryIdentities[url] = identity }
+                self.consumeExternalChange(url, through: version)
+                self.updateObservationTargets()
+            case .failure(let error): if !(error is CancellationError) { self.treeErrors[url] = Self.message(for: error) }
             }
         }
     }
 
     func toggleExpanded(_ location: URL) {
         let url = Self.directoryURL(location)
-        if expandedDirectories.contains(url) { expandedDirectories.remove(url) }
-        else { expandedDirectories.insert(url); loadChildren(of: url) }
+        if expandedDirectories.contains(url) {
+            expandedDirectories.remove(url)
+            // 收起祖先时，保留后代展开意图，但取消现在看不见的排队读取。
+            cancelInvisibleTreeLoads()
+        } else {
+            expandedDirectories.insert(url)
+            reloadVisibleTree()
+        }
         saveWorkspace()
+        updateObservationTargets()
     }
 
     private func expandAncestors(of url: URL) {
@@ -778,9 +1260,34 @@ final class BrowserStore: ObservableObject {
 
     private func clearTree() {
         treeGeneration = UUID()
+        for ticket in treeTickets.values { directoryLoader.cancel(ticket) }
+        treeTickets = [:]
         treeChildren = [:]
         treeErrors = [:]
         treeLoading = []
+    }
+
+    private func isVisibleExpandedDirectory(_ url: URL) -> Bool {
+        guard expandedDirectories.contains(url),
+              let root = (managedRoots + (rootURL.map { [$0] } ?? []))
+                .filter({ Self.contains(url, in: $0) }).max(by: { $0.path.count < $1.path.count }) else { return false }
+        var ancestor = url
+        while ancestor != root {
+            ancestor.deleteLastPathComponent()
+            guard expandedDirectories.contains(ancestor) else { return false }
+        }
+        return true
+    }
+
+    private func cancelInvisibleTreeLoads() {
+        for pending in Array(treeTickets.keys) where !isVisibleExpandedDirectory(pending) {
+            directoryLoader.cancel(treeTickets.removeValue(forKey: pending))
+            treeLoading.remove(pending)
+        }
+    }
+
+    private func reloadVisibleTree() {
+        for url in expandedDirectories where isVisibleExpandedDirectory(url) { loadChildren(of: url) }
     }
 
     private func loadDirectory() {
@@ -793,37 +1300,202 @@ final class BrowserStore: ObservableObject {
         directoryIsTrulyEmpty = false
         let previousSelection = selectedURL.map(fileReference)
         let previousSelections = Set(selectedURLs.map(fileReference))
+        pendingSelectionReferences = Dictionary(uniqueKeysWithValues: previousSelections.map { ($0.url, $0) })
         entries = []
         let hidden = showHidden
-        Task {
-            let result = await Task.detached(priority: .userInitiated) {
-                Result {
-                    let items = try FileSystem.entries(at: currentDirectory, showHidden: hidden)
-                    // 隐藏文件被过滤后仍不是空文件夹；只在空列表时额外确认，避免日常双重枚举。
-                    let trulyEmpty: Bool
-                    if items.isEmpty && !hidden { trulyEmpty = try FileSystem.entries(at: currentDirectory, showHidden: true).isEmpty }
-                    else { trulyEmpty = items.isEmpty }
-                    return (items, trulyEmpty)
-                }
-            }.value
-            guard self.loadID == request else { return }
+        let version = externalVersion
+        directoryLoader.cancel(listTicket)
+        listTicket = directoryLoader.request(currentDirectory, hidden: hidden, generation: treeGeneration, foreground: true) { [weak self] result in
+            guard let self, self.loadID == request else { return }
+            self.listTicket = nil
+            self.pendingSelectionReferences = [:]
             self.isLoading = false
             self.startupPhase = .ready
             self.revision = UUID()
             switch result {
             case .success(let snapshot):
-                let (items, trulyEmpty) = snapshot
+                let items = snapshot.entries
+                let trulyEmpty = snapshot.trulyEmpty
                 self.directoryIsTrulyEmpty = trulyEmpty
                 self.entries = items
+                if let identity = snapshot.identity { self.directoryIdentities[currentDirectory] = identity }
+                self.consumeExternalChange(currentDirectory, through: version)
                 self.treeChildren[currentDirectory] = items.filter(\.isBrowsableDirectory)
                 self.treeErrors[currentDirectory] = nil
                 self.restoreSelection(previousSelections, primary: previousSelection)
+                self.updateObservationTargets()
             case .failure(let error):
                 self.selectedURL = nil
                 self.directoryIssue = Self.classify(error)
                 self.directoryError = Self.message(for: error)
                 self.treeErrors[currentDirectory] = Self.message(for: error)
+                self.updateObservationTargets()
             }
+        }
+    }
+
+    /// vnode 不保证所有卷的通知可靠；回到前台始终做一次合并校验，并重试失败的订阅。
+    func checkForExternalChanges() {
+        guard observesExternalChanges else { return }
+        updateObservationTargets(retry: true)
+        for url in observedPrimaryDirectories { markExternalChange(url) }
+    }
+
+    private var observedPrimaryDirectories: Set<URL> {
+        guard observesExternalChanges, startupPhase == .ready else { return [] }
+        var paths = Set(expandedDirectories.filter(isVisibleExpandedDirectory))
+        if let currentDirectory { paths.insert(currentDirectory) }
+        return paths
+    }
+
+    private func updateObservationTargets(retry: Bool = false) {
+        guard let directoryObserver else { return }
+        let primary = observedPrimaryDirectories
+        // 优先当前目录和父目录，再按深度分配可见分支，避免极大展开树耗尽 fd。
+        // 超出上限的分支仍在回前台时校验；父目录只监听，不枚举其内容。
+        var ordered: [URL] = []
+        var seen: Set<URL> = []
+        func append(_ url: URL) {
+            if seen.insert(url).inserted { ordered.append(url) }
+            let parent = Self.directoryURL(url.deletingLastPathComponent())
+            if seen.insert(parent).inserted { ordered.append(parent) }
+        }
+        if let currentDirectory { append(currentDirectory) }
+        for url in primary.sorted(by: { ($0.pathComponents.count, $0.path) < ($1.pathComponents.count, $1.path) }) { append(url) }
+        let paths = Array(ordered.prefix(BrowserDirectoryObserver.maximumSubscriptions))
+        observedDirectories = Set(paths)
+        directoryIdentities = directoryIdentities.filter { primary.contains($0.key) || observedDirectories.contains($0.key) }
+        for (url, request) in externalRequests where !primary.contains(url) {
+            externalRequests[url] = nil
+            directoryLoader.cancel(request.ticket)
+        }
+        externalDirty = externalDirty.filter { primary.contains($0.key) }
+        directoryObserver.setTargets(paths.map { BrowserDirectoryObserver.Target(url: $0, identity: directoryIdentities[$0]) }, retry: retry)
+        isSynchronizingExternalChanges = !externalRequests.isEmpty
+    }
+
+    private func receiveDirectoryEvent(_ event: BrowserDirectoryObserver.Event) {
+        let url = Self.directoryURL(event.url)
+        guard observedDirectories.contains(url) else { return }
+        if let identity = event.identity {
+            guard directoryIdentities[url] == nil || directoryIdentities[url] == identity else { return }
+            directoryIdentities[url] = identity
+            if let destination = event.destination {
+                externalMoves[url] = (identity, Self.directoryURL(destination))
+            }
+        }
+        for primary in observedPrimaryDirectories where primary == url || primary.deletingLastPathComponent().path == url.path {
+            markExternalChange(primary)
+        }
+        scheduleExternalSynchronization()
+    }
+
+    private func markExternalChange(_ url: URL) {
+        externalVersion &+= 1
+        externalDirty[url] = externalVersion
+        scheduleExternalSynchronization()
+    }
+
+    private func scheduleExternalSynchronization() {
+        guard observesExternalChanges, !externalDirty.isEmpty || !externalMoves.isEmpty else { return }
+        externalDebounce?.cancel()
+        externalDebounce = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(180)) } catch { return }
+            guard !Task.isCancelled, let self else { return }
+            self.externalDebounce = nil
+            self.synchronizeExternalChanges()
+        }
+    }
+
+    private func cancelExternalRequests() {
+        externalEpoch = UUID()
+        let requests = externalRequests.values
+        externalRequests = [:]
+        for request in requests { directoryLoader.cancel(request.ticket) }
+        isSynchronizingExternalChanges = false
+    }
+
+    private func consumeExternalChange(_ url: URL, through version: UInt64) {
+        if let dirty = externalDirty[url], dirty <= version { externalDirty[url] = nil }
+    }
+
+    private func synchronizeExternalChanges() {
+        // 打开的预览/草稿由文档自己的冲突门处理；仅暂存目录变化，关闭后才校验浏览快照。
+        guard !isLoading, !isFileOperationBusy, activePreviewSnapshotID == nil else { return }
+        let moves = externalMoves.sorted { $0.key.path.count < $1.key.path.count }
+        externalMoves = [:]
+        var accepted: [(source: URL, destination: URL)] = []
+        for (source, move) in moves where directoryIdentities[source] == move.identity {
+            if !accepted.contains(where: { Self.contains(source, in: $0.source) }) {
+                accepted.append((source, move.destination))
+            }
+        }
+        if !accepted.isEmpty { completeFileRelocation(accepted, preservingList: true) }
+        let epoch = externalEpoch
+        let generation = UUID()
+        for url in observedPrimaryDirectories where externalDirty[url] != nil && externalRequests[url] == nil {
+            let version = externalVersion
+            let expectedIdentity = directoryIdentities[url]
+            let requestID = UUID()
+            let ticket = directoryLoader.request(url, hidden: showHidden, generation: generation,
+                                                foreground: currentDirectory == url, expectedIdentity: expectedIdentity) { [weak self] result in
+                guard let self, self.externalEpoch == epoch,
+                      self.externalRequests[url]?.id == requestID else { return }
+                self.externalRequests[url] = nil
+                defer {
+                    self.isSynchronizingExternalChanges = !self.externalRequests.isEmpty
+                    if !self.externalDirty.isEmpty || !self.externalMoves.isEmpty { self.scheduleExternalSynchronization() }
+                }
+                // 请求途中打开编辑器或开始文件操作时，结果也必须暂存，不能只在发起阶段检查。
+                guard !self.isLoading, !self.isFileOperationBusy, self.activePreviewSnapshotID == nil else { return }
+                self.consumeExternalChange(url, through: version)
+                guard self.observedPrimaryDirectories.contains(url) else { return }
+                self.applyExternalSnapshot(result, at: url)
+            }
+            externalRequests[url] = (requestID, ticket)
+        }
+        isSynchronizingExternalChanges = !externalRequests.isEmpty
+    }
+
+    private func applyExternalSnapshot(_ result: Result<BrowserDirectorySnapshot, Error>, at url: URL) {
+        switch result {
+        case .success(let snapshot):
+            let oldFolders = url == currentDirectory ? entries.filter(\.isBrowsableDirectory) : treeChildren[url] ?? []
+            let folders = snapshot.entries.filter(\.isBrowsableDirectory)
+            let newURLs = Set(folders.map(\.url))
+            let byIdentity = Dictionary(grouping: folders.compactMap { entry in entry.identity.map { ($0, entry.url) } }, by: { $0.0 })
+            let moves = oldFolders.compactMap { entry -> (source: URL, destination: URL)? in
+                guard !newURLs.contains(entry.url), let identity = entry.identity,
+                      let candidates = byIdentity[identity], candidates.count == 1 else { return nil }
+                return (entry.url, candidates[0].1)
+            }
+            if !moves.isEmpty { completeFileRelocation(moves, preservingList: true) }
+            if let identity = snapshot.identity { directoryIdentities[url] = identity }
+            if currentDirectory == url {
+                // 用户可在后台读取期间继续改选/筛选，提交时捕获最新选择，不使用请求开始时的旧快照。
+                let selection = Set(selectedURLs.map(fileReference))
+                let primary = selectedURL.map(fileReference)
+                let anchor = selectionAnchor.map(fileReference)
+                let changed = entries != snapshot.entries || directoryIssue != nil || directoryIsTrulyEmpty != snapshot.trulyEmpty
+                if entries != snapshot.entries { entries = snapshot.entries }
+                if directoryIsTrulyEmpty != snapshot.trulyEmpty { directoryIsTrulyEmpty = snapshot.trulyEmpty }
+                if directoryError != nil { directoryError = nil }
+                if directoryIssue != nil { directoryIssue = nil }
+                restoreSelection(selection, primary: primary, anchor: anchor)
+                if changed { revision = UUID() }
+            }
+            if treeChildren[url] != folders { treeChildren[url] = folders }
+            if treeErrors[url] != nil { treeErrors[url] = nil }
+            updateObservationTargets()
+        case .failure(let error):
+            // 读取失败不是空目录；保留最后快照和选择，显示已有错误面板，前台/后续事件可以重试。
+            if currentDirectory == url {
+                let issue = Self.classify(error), message = Self.message(for: error)
+                if directoryIssue != issue { directoryIssue = issue }
+                if directoryError != message { directoryError = message }
+            }
+            let message = Self.message(for: error)
+            if treeErrors[url] != message { treeErrors[url] = message }
         }
     }
 
@@ -990,81 +1662,296 @@ final class BrowserStore: ObservableObject {
     }
 }
 
-/// 磁盘操作共用边界检查；符号链接作为项目本身移动，不递归跟随其内容。
+/// 工作线程只写一个快照，主线程定时读取；大批次不会为每个项目排队发布 SwiftUI 更新。
+final class FileOperationControl: @unchecked Sendable {
+    struct Progress: Equatable, Sendable {
+        let title: String
+        let total: Int
+        var completed = 0
+        var current: String? = nil
+        var cancellationRequested = false
+    }
+    private let lock = NSLock()
+    private var value: Progress
+    init(title: String, total: Int) { value = Progress(title: title, total: total) }
+    var progress: Progress { lock.lock(); defer { lock.unlock() }; return value }
+    var isCancelled: Bool { progress.cancellationRequested }
+    func cancel() { lock.lock(); value.cancellationRequested = true; lock.unlock() }
+    func begin(_ name: String) { lock.lock(); value.current = name; lock.unlock() }
+    func complete() { lock.lock(); value.completed += 1; value.current = nil; lock.unlock() }
+}
+
+/// 只保留最近一批成功项，随窗口关闭或下一批操作开始失效；不扫描用户废纸篓推测恢复路径。
+struct FileOperationUndo: Sendable {
+    enum Kind: Sendable { case copy, relocation }
+    let kind: Kind
+    let original: URL
+    let current: URL
+    let identity: FileIdentity
+    let originalParentIdentity: FileIdentity
+    let currentParentIdentity: FileIdentity
+
+    static func capture(kind: Kind, original: URL, current: URL, originalParent: FileIdentity, expectedIdentity: FileIdentity) throws -> Self {
+        guard try FileSystem.identity(at: current) == expectedIdentity else {
+            throw WorkspaceFileTransfer.failure("操作后的项目已被替换，未登记撤销。")
+        }
+        return Self(kind: kind, original: original, current: current, identity: expectedIdentity,
+             originalParentIdentity: originalParent,
+             currentParentIdentity: try FileSystem.identity(at: current.deletingLastPathComponent()))
+    }
+
+    struct Result: Sendable {
+        var remaining: [FileOperationUndo] = []
+        var moved: [(source: URL, destination: URL)] = []
+        var failures: [String] = []
+        var succeeded = 0
+    }
+
+    static func perform(_ records: [Self], control: FileOperationControl,
+                        trash: WorkspaceFileTrash.LocatedTrashItem = WorkspaceFileTrash.systemTrash) -> Result {
+        var result = Result()
+        let reversed = Array(records.reversed())
+        for (index, record) in reversed.enumerated() {
+            if control.isCancelled { result.remaining += reversed[index...]; break }
+            control.begin(record.current.lastPathComponent)
+            defer { control.complete() }
+            let accessed = record.current.startAccessingSecurityScopedResource()
+            defer { if accessed { record.current.stopAccessingSecurityScopedResource() } }
+            do {
+                guard try FileSystem.identity(at: record.current) == record.identity,
+                      try FileSystem.identity(at: record.current.deletingLastPathComponent()) == record.currentParentIdentity else {
+                    throw WorkspaceFileTransfer.failure("项目或所在文件夹已变化，未执行撤销。")
+                }
+                if record.kind == .copy {
+                    // 撤销副本采用系统废纸篓，不永久删除；复制后原地修改的内容也能由 Finder 找回。
+                    _ = try trash(record.current)
+                } else {
+                    guard try FileSystem.identity(at: record.original.deletingLastPathComponent()) == record.originalParentIdentity else {
+                        throw WorkspaceFileTransfer.failure("原文件夹已变化，请手动恢复。")
+                    }
+                    _ = try WorkspaceFileTransfer.move(record.current, to: record.original, expectedIdentity: record.identity)
+                    result.moved.append((record.current, record.original))
+                }
+                result.succeeded += 1
+            } catch {
+                result.remaining.append(record)
+                result.failures.append("\(record.current.path) → \(record.original.path)：\(error.localizedDescription)")
+            }
+        }
+        // 重试仍从上次撤销的顺序继续，不重复触碰已经完成的项目。
+        result.remaining.reverse()
+        return result
+    }
+}
+
+/// 冻结的逐项废纸篓批次。只按路径去重，硬链接共享 inode 仍是两个可单独移走的目录项。
+enum WorkspaceFileTrash {
+    typealias TrashItem = @Sendable (URL) throws -> Void
+    typealias LocatedTrashItem = @Sendable (URL) throws -> URL
+    static let systemTrash: LocatedTrashItem = { url in
+        var location: NSURL?
+        try FileManager.default.trashItem(at: url, resultingItemURL: &location)
+        guard let location else { throw WorkspaceFileTransfer.failure("系统已移走项目，但未返回恢复位置；请在 Finder 废纸篓中检查。") }
+        return location as URL
+    }
+    struct Failure: Sendable { let file: FileEntry; let message: String }
+    struct Result: Sendable {
+        var succeeded: [FileEntry] = []
+        var failures: [Failure] = []
+        var undo: [FileOperationUndo] = []
+        var warnings: [String] = []
+        var unattempted = 0
+        var count: Int { succeeded.count + failures.count + unattempted }
+        var failureSummary: String? {
+            guard !failures.isEmpty else { return nil }
+            return "已将 \(succeeded.count) 个项目移到废纸篓，\(failures.count) 个项目未完成（共 \(count) 个）。\n"
+                + failures.map { "\($0.file.name)：\($0.message)" }.joined(separator: "\n")
+        }
+    }
+
+    static func unique(_ files: [FileEntry]) -> [FileEntry] {
+        var seen: Set<String> = []
+        return files.filter { seen.insert($0.url.isFileURL ? $0.url.standardizedFileURL.path : $0.url.absoluteString).inserted }
+    }
+    static func perform(_ files: [FileEntry], using trashItem: TrashItem? = nil,
+                        trashAndLocate: LocatedTrashItem = systemTrash, control: FileOperationControl? = nil) -> Result {
+        var result = Result()
+        let files = unique(files)
+        for (index, file) in files.enumerated() {
+            if control?.isCancelled == true { result.unattempted = files.count - index; break }
+            control?.begin(file.name)
+            defer { control?.complete() }
+            let url = file.url
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+            do {
+                // 身份必须来自菜单快照，不能在点击后补 stat 接管同名替换文件。
+                guard url.isFileURL, let identity = file.identity, try FileSystem.identity(at: url) == identity else {
+                    throw WorkspaceFileTransfer.failure("文件已发生变化，请刷新后重试。")
+                }
+                let parent = try FileSystem.identity(at: url.deletingLastPathComponent())
+                if let trashItem { try trashItem(url); result.succeeded.append(file) }
+                else {
+                    let location = try trashAndLocate(url)
+                    result.succeeded.append(file)
+                    do { result.undo.append(try .capture(kind: .relocation, original: url, current: location, originalParent: parent, expectedIdentity: identity)) }
+                    catch { result.warnings.append("\(file.name)：已移到 \(location.path)，无法登记撤销：\(error.localizedDescription)") }
+                }
+            } catch { result.failures.append(Failure(file: file, message: error.localizedDescription)) }
+        }
+        return result
+    }
+}
+
+/// 排他提交副本。复制失败只清理本次创建的隔离目录，绝不删除同名目标或其他批次的项目。
 enum WorkspaceFileTransfer {
+    struct IO: Sendable {
+        var rename: @Sendable (URL, URL) throws -> Void = { source, destination in
+            guard renamex_np(source.path, destination.path, UInt32(RENAME_EXCL)) == 0 else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
+        }
+        var copy: @Sendable (URL, URL) throws -> Void = { try FileManager.default.copyItem(at: $0, to: $1) }
+        var remove: @Sendable (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+    }
     struct Result: Sendable {
         var moved: [(source: URL, destination: URL)] = []
         var failures: [String] = []
+        var undo: [FileOperationUndo] = []
+        var warnings: [String] = []
+        var succeeded = 0
+        var unattempted = 0
     }
 
+    static func unique(_ files: [BrowserFileReference]) -> [BrowserFileReference] {
+        var seen: Set<URL> = []
+        return files.filter { seen.insert($0.url.standardizedFileURL).inserted }
+    }
     static func perform(_ files: [BrowserFileReference], into directory: URL,
-                        expectedIdentity: FileIdentity, move: Bool, renameConflicts: Bool = false) -> Result {
+                        expectedIdentity: FileIdentity, move: Bool, renameConflicts: Bool = false,
+                        control: FileOperationControl? = nil, io: IO = IO()) -> Result {
         var result = Result()
-        for file in files {
+        let files = unique(files)
+        for (index, file) in files.enumerated() {
+            if control?.isCancelled == true { result.unattempted = files.count - index; break }
             let source = file.url
+            control?.begin(source.lastPathComponent)
             let accessed = source.startAccessingSecurityScopedResource()
             defer { if accessed { source.stopAccessingSecurityScopedResource() } }
             do {
-                guard source.isFileURL, directory.isFileURL else { throw failure("只能拖动本机文件。") }
-                guard try FileSystem.identity(at: directory) == expectedIdentity else {
-                    throw failure("目标文件夹已变化，请重新拖放。")
-                }
+                guard source.isFileURL, directory.isFileURL else { throw failure("只能处理本机文件。") }
+                guard try FileSystem.identity(at: directory) == expectedIdentity else { throw failure("目标文件夹已变化，请重新拖放。") }
                 let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isPackageKey])
                 guard values.isDirectory == true, values.isSymbolicLink != true,
-                      !FileSystem.isPackageDirectory(directory, values: values) else {
-                    throw FileSystemError.notBrowsableDirectory(directory)
-                }
+                      !FileSystem.isPackageDirectory(directory, values: values) else { throw FileSystemError.notBrowsableDirectory(directory) }
+                let identity = try FileSystem.identity(at: source)
                 if move || file.identity != nil {
-                    guard let identity = file.identity, try FileSystem.identity(at: source) == identity else {
-                        throw failure("文件已变化，请刷新后重试。")
-                    }
+                    guard identity == file.identity else { throw failure("文件已变化，请刷新后重试。") }
                 }
+                let parent = try FileSystem.identity(at: source.deletingLastPathComponent())
                 let resolvedSource = source.standardizedFileURL.resolvingSymlinksInPath().path
                 let target = directory.resolvingSymlinksInPath().path
-                // 同时检查路径边界和链接解析结果，拒绝把祖先复制/移动到自己的后代。
                 guard target != resolvedSource,
                       !target.hasPrefix(resolvedSource.hasSuffix("/") ? resolvedSource : resolvedSource + "/") else {
                     throw failure("不能将文件夹拖到自身或其子目录中。")
                 }
                 let destination = directory.appendingPathComponent(source.lastPathComponent)
-                if !renameConflicts && source.standardizedFileURL.path == destination.standardizedFileURL.path { continue }
+                if !renameConflicts && source.standardizedFileURL.path == destination.standardizedFileURL.path { throw failure("来源与目标相同，未执行。") }
+                let completed: URL
+                let completedIdentity: FileIdentity
                 if move {
-                    // 同卷使用内核排他重命名；跨卷由 Foundation 复制后删除，失败保留错误信息。
-                    if renamex_np(source.path, destination.path, UInt32(RENAME_EXCL)) != 0 {
-                        let code = errno
-                        guard code == EXDEV else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(code)) }
-                        try FileManager.default.moveItem(at: source, to: destination)
-                    }
+                    // 单个移动/废纸篓调用不可安全中断：取消只阻止下一个项目，当前项完成后仍登记撤销。
+                    completedIdentity = try self.move(source, to: destination, expectedIdentity: identity, io: io)
+                    completed = destination
                     result.moved.append((source, destination))
                 } else {
-                    try copy(source, to: destination, renameConflicts: renameConflicts)
+                    let copied = try stagedCopy(source, to: destination, expectedParent: expectedIdentity,
+                                                renameConflicts: renameConflicts, control: control, io: io)
+                    if let warning = copied.warning { result.warnings.append(warning) }
+                    guard let destination = copied.destination, let identity = copied.identity else {
+                        result.unattempted = files.count - index
+                        break
+                    }
+                    completed = destination
+                    completedIdentity = identity
                 }
+                result.succeeded += 1
+                do { result.undo.append(try .capture(kind: move ? .relocation : .copy, original: source, current: completed, originalParent: parent, expectedIdentity: completedIdentity)) }
+                catch { result.warnings.append("\(completed.path)：已完成但无法登记撤销：\(error.localizedDescription)") }
             } catch { result.failures.append("\(source.lastPathComponent)：\(error.localizedDescription)") }
+            control?.complete()
         }
         return result
     }
 
-    /// 粘贴遇到冲突时生成副本名；由 copyItem 排他创建，包含悬空链接和并发创建的同名目标。
-    private static func copy(_ source: URL, to destination: URL, renameConflicts: Bool) throws {
-        var target = destination
-        var duplicate = 0
-        while true {
-            do { try FileManager.default.copyItem(at: source, to: target); return }
-            catch {
-                let value = error as NSError
-                let exists = (value.domain == NSCocoaErrorDomain && value.code == NSFileWriteFileExistsError)
-                    || (value.domain == NSPOSIXErrorDomain && value.code == EEXIST)
-                guard renameConflicts && exists else { throw error }
-                duplicate += 1
-                let suffix = duplicate == 1 ? " 副本" : " 副本 \(duplicate)"
-                let ext = source.pathExtension
-                let stem = ext.isEmpty ? source.lastPathComponent : source.deletingPathExtension().lastPathComponent
-                target = destination.deletingLastPathComponent().appendingPathComponent(stem + suffix + (ext.isEmpty ? "" : "." + ext))
-            }
+    /// 跨卷移动先提交完整副本，再删除原件；删除失败明确列出两端残留，不冒险自动删除完整副本。
+    static func move(_ source: URL, to destination: URL, expectedIdentity: FileIdentity? = nil, io: IO = IO()) throws -> FileIdentity {
+        let identity = try FileSystem.identity(at: source)
+        if let expectedIdentity, identity != expectedIdentity { throw failure("原件已变化，未移动。") }
+        do { try io.rename(source, destination); return identity }
+        catch {
+            let error = error as NSError
+            guard error.domain == NSPOSIXErrorDomain, error.code == Int(EXDEV) else { throw error }
         }
+        let parent = try FileSystem.identity(at: destination.deletingLastPathComponent())
+        let copy = try stagedCopy(source, to: destination, expectedParent: parent, renameConflicts: false, control: nil, io: io)
+        do {
+            if let warning = copy.warning { throw failure(warning) }
+            guard try FileSystem.identity(at: source) == identity else { throw failure("原件已变化，未删除原件。") }
+            try io.remove(source)
+        } catch { throw failure("跨卷副本已保留于 \(destination.path)；原件可能仍有残留于 \(source.path)，请检查后手动处理：\(error.localizedDescription)") }
+        guard let copiedIdentity = copy.identity else { throw failure("跨卷副本未提交，请检查两端路径。") }
+        return copiedIdentity
     }
 
-    private static func failure(_ message: String) -> NSError {
+    private static func stagedCopy(_ source: URL, to destination: URL, expectedParent: FileIdentity,
+                                   renameConflicts: Bool, control: FileOperationControl?, io: IO) throws -> (destination: URL?, identity: FileIdentity?, warning: String?) {
+        let directory = destination.deletingLastPathComponent()
+        let staging = directory.appendingPathComponent(".FileDeck-transfer-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let identity: FileIdentity
+        do { identity = try FileSystem.identity(at: staging) }
+        catch { throw failure("无法核验隔离目录，未尝试清理；临时残留位置：\(staging.path)：\(error.localizedDescription)") }
+        let payload = staging.appendingPathComponent("payload")
+        var outcome: URL?
+        var committedIdentity: FileIdentity?
+        var warning: String?
+        var problem: Error?
+        do {
+            try io.copy(source, payload)
+            let payloadIdentity = try FileSystem.identity(at: payload)
+            if control?.isCancelled != true {
+                guard try FileSystem.identity(at: directory) == expectedParent else { throw failure("目标文件夹已变化，未提交副本。") }
+                var target = destination, duplicate = 0
+                while true {
+                    if control?.isCancelled == true { break }
+                    do { try io.rename(payload, target); outcome = target; committedIdentity = payloadIdentity; break }
+                    catch {
+                        let error = error as NSError
+                        guard renameConflicts && error.domain == NSPOSIXErrorDomain && error.code == Int(EEXIST) else { throw error }
+                    }
+                    duplicate += 1
+                    let suffix = duplicate == 1 ? " 副本" : " 副本 \(duplicate)"
+                    let ext = source.pathExtension
+                    let stem = ext.isEmpty ? source.lastPathComponent : source.deletingPathExtension().lastPathComponent
+                    target = directory.appendingPathComponent(stem + suffix + (ext.isEmpty ? "" : "." + ext))
+                }
+            }
+        } catch { problem = error }
+        do {
+            guard try FileSystem.identity(at: staging) == identity else { throw failure("隔离目录身份已变化，未清理。") }
+            try io.remove(staging)
+        } catch {
+            // 即使最终文件已经提交，也不能把清理失败静默当成功；完整路径供用户核对残留。
+            let detail = "临时残留：\(staging.path)，清理失败：\(error.localizedDescription)"
+            if outcome != nil { warning = detail }
+            else { throw failure("\(problem?.localizedDescription ?? "复制已取消")；\(detail)") }
+        }
+        if let problem { throw problem }
+        return (outcome, committedIdentity, warning)
+    }
+
+    static func failure(_ message: String) -> NSError {
         NSError(domain: "FileDeck.FileTransfer", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 }

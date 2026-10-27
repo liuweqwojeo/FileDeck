@@ -28,6 +28,11 @@ final class FWPreviewModal: NSObject {
     private var locationWarning: String?
     private var observedIdentity: FileIdentity?
     private var didFinish = false
+    private var wantsInitialEditing = false
+    private var savingAndReturning = false
+    private var openingEditor = false
+    private var loadingPreview = false
+    private var requestedLine: Int?
     var didClose: (() -> Void)?
     var legacyCommand: ((String) -> Void)?
     private let titleLabel = NSTextField(labelWithString: "正在读取文件…")
@@ -35,18 +40,22 @@ final class FWPreviewModal: NSObject {
     private let statusLabel = NSTextField(labelWithString: "正在读取文件…")
     private let editButton = NSButton(title: "编辑", target: nil, action: nil)
     private let saveButton = NSButton(title: "保存", target: nil, action: nil)
+    private let saveAndReturnButton = NSButton(title: "保存并返回", target: nil, action: nil)
     private let saveAsButton = NSButton(title: "另存为…", target: nil, action: nil)
     private let expandButton = NSButton()
     private let closeButton = NSButton()
     private let revealButton = NSButton()
     private let contentView = NSView()
+    private var keyboardDocument: FWDocumentHost? { mode == .file ? documentHost : owner?.legacyDocument }
 
-    init(owner: FWBrowserHost, url: URL?, source: String, mode: Mode = .file) {
+    init(owner: FWBrowserHost, url: URL?, source: String, mode: Mode = .file, initialLine: Int? = nil) {
         self.owner = owner
         self.store = owner.browserStore
         self.url = url
         self.source = source
+        self.wantsInitialEditing = source == "edit"
         self.mode = mode
+        requestedLine = initialLine
         snapshot = owner.browserStore.capturePreviewSnapshot(source: source)
         originalResponder = owner.view.window?.firstResponder
         scrollPositions = FWScrollPosition.capture(in: owner.view)
@@ -108,12 +117,20 @@ final class FWPreviewModal: NSObject {
         titleStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
         configureIcon(expandButton, symbol: "arrow.up.left.and.arrow.down.right", label: "最大化预览", action: #selector(toggleExpanded))
         configureIcon(closeButton, symbol: "xmark", label: "关闭预览", action: #selector(closeAction))
+        closeButton.title = "返回浏览"; closeButton.imagePosition = .imageLeading
+        closeButton.toolTip = "返回浏览（Esc / ⌘W）"; closeButton.setAccessibilityLabel("返回浏览")
+        closeButton.constraints.filter { $0.firstAttribute == .width }.forEach { $0.isActive = false }
+        closeButton.widthAnchor.constraint(equalToConstant: 90).isActive = true
         closeButton.setAccessibilityIdentifier("FileDeck.preview.close")
         configureIcon(revealButton, symbol: "folder", label: "在 Finder 中显示", action: #selector(reveal))
         editButton.target = self; editButton.action = #selector(edit)
         editButton.toolTip = "进入源码编辑模式"; editButton.setAccessibilityIdentifier("FileDeck.preview.edit")
         saveButton.target = self; saveButton.action = #selector(save)
         saveButton.bezelStyle = .rounded; saveButton.setAccessibilityIdentifier("FileDeck.preview.save")
+        saveAndReturnButton.target = self; saveAndReturnButton.action = #selector(saveAndReturn)
+        saveAndReturnButton.bezelStyle = .rounded
+        saveAndReturnButton.toolTip = "保存成功后返回原列表（⌘↩）；失败或仍有未保存修改时保留编辑器"
+        saveAndReturnButton.setAccessibilityIdentifier("FileDeck.preview.save-and-return")
         saveAsButton.target = self; saveAsButton.action = #selector(saveAs)
         let toolbar = NSStackView(views: [titleStack, editButton, revealButton, expandButton, closeButton])
         toolbar.spacing = 10; toolbar.edgeInsets = NSEdgeInsets(top: 10, left: 18, bottom: 10, right: 14)
@@ -123,7 +140,7 @@ final class FWPreviewModal: NSObject {
         statusLabel.lineBreakMode = .byTruncatingMiddle
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let footer = NSStackView(views: [statusLabel, spacer, saveAsButton, saveButton])
+        let footer = NSStackView(views: [statusLabel, spacer, saveAsButton, saveButton, saveAndReturnButton])
         footer.spacing = 10; footer.edgeInsets = NSEdgeInsets(top: 8, left: 18, bottom: 8, right: 18)
         for child in [toolbar, divider, contentView, bottomDivider, footer] {
             child.translatesAutoresizingMaskIntoConstraints = false; dialog.addSubview(child)
@@ -151,16 +168,16 @@ final class FWPreviewModal: NSObject {
         let token = requestID
         let kind = FWDocumentHost.kind(for: url)
         let safeTextKinds = ["text", "code", "json", "yaml", "markdown"]
-        if safeTextKinds.contains(kind) {
+        if safeTextKinds.contains(kind) || (kind == "csv" && requestedLine != nil) {
+            guard !loadingPreview else { return }
+            loadingPreview = true
             FWDocumentHost.openPreview(at: url) { [weak self] host, error in
                 guard let self, self.requestID == token, !self.didFinish, !self.isClosing else {
                     host?.disposePreview(); return
                 }
+                self.loadingPreview = false
                 if let host {
-                    self.documentHost = host
-                    host.stateDidChange = { [weak self] in self?.updateChrome() }
-                    self.owner?.addChild(host)
-                    self.mount(host.view)
+                    self.mountDocument(host)
                     self.updateChrome()
                 } else {
                     // 安全解码失败时仍提供真实只读预览，不把二进制内容送入编辑器。
@@ -195,7 +212,9 @@ final class FWPreviewModal: NSObject {
         self.url = url; titleLabel.stringValue = title; titleLabel.toolTip = url?.path ?? title
         detailLabel.stringValue = modified ? "编辑 · 未保存" : "文件编辑"
         statusLabel.stringValue = busy ? "正在处理…" : modified ? "尚未保存修改" : "本地文件编辑"
-        editButton.isHidden = true; saveButton.isHidden = !canSave; saveAsButton.isHidden = !canSaveAs
+        saveAndReturnButton.isHidden = !(canSave || canSaveAs) && !busy
+        saveAndReturnButton.isEnabled = (canSave || canSaveAs) && !busy
+        editButton.isHidden = true; saveButton.isHidden = !canSave && !busy; saveAsButton.isHidden = !canSaveAs && !busy
         saveButton.isEnabled = !busy; saveAsButton.isEnabled = !busy
     }
 
@@ -204,17 +223,30 @@ final class FWPreviewModal: NSObject {
         titleLabel.stringValue = documentHost?.documentTitle ?? url?.lastPathComponent ?? "文件预览"
         titleLabel.toolTip = documentHost?.documentURL?.path ?? url?.path
         overlay.dialog.setAccessibilityLabel("文件预览：" + titleLabel.stringValue)
+        // WK 就绪前不强行切换模式；只消费一次显式编辑请求，状态回调继续驱动原宿主。
+        if wantsInitialEditing, documentHost?.canBeginEditing == true {
+            wantsInitialEditing = false
+            documentHost?.beginEditing()
+        }
+        if let line = requestedLine, let text = documentHost?.content as? FWTextContent, text.canFind {
+            requestedLine = nil
+            text.revealLine(line)
+        }
         let editing = documentHost?.isEditing == true
-        editButton.isHidden = editing || documentHost == nil
-        editButton.isEnabled = documentHost?.canBeginEditing == true && !isClosing
+        editButton.isHidden = editing || (documentHost == nil && !canOpenEditor)
+        editButton.isEnabled = (documentHost?.canBeginEditing == true || canOpenEditor) && !isClosing && !openingEditor
         saveButton.isHidden = !editing
         saveAsButton.isHidden = !editing
+        saveAndReturnButton.isHidden = !editing
+        saveAndReturnButton.isEnabled = (documentHost?.canSave == true || documentHost?.canSaveAs == true) && !isClosing && !savingAndReturning
         saveButton.isEnabled = documentHost?.canSave == true && !isClosing
         saveAsButton.isEnabled = documentHost?.canSaveAs == true && !isClosing
         let labels = ["LOADING": "正在读取", "PREVIEW": "只读预览", "EDITING": "编辑", "DIRTY": "编辑 · 未保存",
                       "SAVING": "正在保存", "SAVE_ERROR": "保存未完成", "LOAD_ERROR": "读取失败", "CONFLICT": "磁盘内容已变化"]
         detailLabel.stringValue = documentHost.flatMap { labels[$0.sessionState] } ?? "只读预览"
-        statusLabel.stringValue = locationWarning ?? documentHost?.statusText ?? "本地只读预览"
+        detailLabel.textColor = documentHost?.modified == true ? .systemOrange : .secondaryLabelColor
+        if documentHost?.modified == true { detailLabel.stringValue = "● " + detailLabel.stringValue }
+        statusLabel.stringValue = openingEditor ? "正在打开编辑器…" : locationWarning ?? documentHost?.statusText ?? "本地只读预览"
         statusLabel.toolTip = statusLabel.stringValue
         statusLabel.textColor = locationWarning != nil || documentHost?.lastError != nil ? .systemOrange : .secondaryLabelColor
     }
@@ -230,18 +262,79 @@ final class FWPreviewModal: NSObject {
         updateChrome()
     }
 
-    @objc private func edit() { documentHost?.beginEditing(); updateChrome() }
+    private var canOpenEditor: Bool {
+        guard mode == .file, let url else { return false }
+        // 输入状态回调频繁；已在编辑的宿主直接退出，避免每次键入都读取文件类型元数据。
+        guard documentHost == nil || (documentHost?.content is FWTextContent && documentHost?.isEditing == false) else { return false }
+        let kind = FWDocumentHost.kind(for: url)
+        let csvSourcePreview = kind == "csv" && documentHost?.content is FWTextContent && documentHost?.isEditing == false
+        guard documentHost == nil || csvSourcePreview else { return false }
+        return ["word", "spreadsheet", "presentation", "csv", "pdf", "png", "jpeg", "heic"].contains(kind)
+    }
+
+    func revealLine(_ line: Int) {
+        requestedLine = line
+        if documentHost == nil, let url, FWDocumentHost.kind(for: url) == "csv" { load(url) }
+        else { updateChrome() }
+    }
+
+    private func mountDocument(_ host: FWDocumentHost) {
+        previewSession.cancel()
+        documentHost?.stateDidChange = nil
+        documentHost?.disposePreview()
+        documentHost?.removeFromParent()
+        if let hosting = previewController as? NSHostingController<AnyView> { hosting.rootView = AnyView(EmptyView()) }
+        previewController?.removeFromParent()
+        previewController = nil
+        documentHost = host
+        host.stateDidChange = { [weak self] in self?.updateChrome() }
+        owner?.addChild(host)
+        mount(host.view)
+    }
+
+    @objc private func edit() {
+        if let documentHost, !canOpenEditor { documentHost.beginEditing(); updateChrome(); return }
+        guard canOpenEditor, !openingEditor, !isClosing, let url, let owner else { return }
+        let kind = FWDocumentHost.kind(for: url)
+        if ["word", "spreadsheet", "presentation"].contains(kind) {
+            // Office 继续复用已有标签与 CEF 保存链；先正常关闭只读层，再打开同一文件。
+            requestClose { [weak owner] closed in if closed { owner?.editorBridge.open(url) } }
+            return
+        }
+        openingEditor = true
+        loadingPreview = false
+        requestedLine = nil
+        requestID = UUID() // 显式编辑替代尚在读取的 CSV 文本预览，旧完成回调不能再覆盖新编辑器。
+        updateChrome()
+        let token = requestID
+        FWDocumentHost.openDocument(at: url, kind: kind) { [weak self] host, error in
+            guard let self, self.requestID == token, !self.didFinish, !self.isClosing else { host?.disposePreview(); return }
+            self.openingEditor = false
+            if let host {
+                self.mountDocument(host)
+            } else { self.locationWarning = error?.localizedDescription ?? "无法打开编辑器，请重试。" }
+            self.updateChrome()
+        }
+    }
     @objc private func save() { performSave(saveAs: false) }
     @objc private func saveAs() { performSave(saveAs: true) }
-    private func performSave(saveAs: Bool) {
-        guard !isClosing else { return }
-        if mode == .legacy { legacyCommand?(saveAs ? "saveAs" : "save"); return }
-        documentHost?.save(in: store.currentDirectory, saveAs: saveAs) { [weak self] success in
-            guard let self else { return }
+    @objc private func saveAndReturn() { performSave(saveAs: false, returning: true) }
+    /// 成功返回仍经过关闭门禁；失败、另存取消或保存期间新输入均保留同一编辑会话。
+    private func performSave(saveAs: Bool, returning: Bool = false) {
+        guard !isClosing, !savingAndReturning else { return }
+        if mode == .legacy { legacyCommand?(returning ? "saveAndReturn" : saveAs ? "saveAs" : "save"); return }
+        guard let host = documentHost, !returning || host.canSave || host.canSaveAs else { return }
+        savingAndReturning = returning; updateChrome()
+        // HEIC 等格式不能原样编码；保存返回沿用现有另存流程，不能绕过格式与目标确认。
+        let requiresSaveAs = saveAs || (returning && !host.canSave && host.canSaveAs)
+        host.save(in: store.currentDirectory, saveAs: requiresSaveAs) { [weak self, weak host] success in
+            guard let self, let host else { return }
+            self.savingAndReturning = false
             if success {
-                self.savedURL = self.documentHost?.documentURL
+                self.savedURL = host.documentURL
                 self.observedIdentity = self.savedURL.flatMap { try? FileSystem.identity(at: $0) }
                 self.locationWarning = nil
+                if returning && !host.modified && !host.busy { self.requestClose { _ in }; return }
             }
             self.updateChrome()
         }
@@ -349,7 +442,7 @@ final class FWPreviewModal: NSObject {
             let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
             if event.keyCode == 53 {
                 self.trace("Esc received")
-                if let host = self.documentHost {
+                if let host = self.keyboardDocument {
                     host.consumeEscape { [weak self] consumed in
                         self?.trace("Esc consumed=\(consumed)")
                         if !consumed { self?.requestClose { closed in self?.trace("Esc closed=\(closed)") } }
@@ -357,14 +450,43 @@ final class FWPreviewModal: NSObject {
                 } else { self.requestClose { _ in } }
                 return nil
             }
+            if command && event.keyCode == 36 { self.saveAndReturn(); return nil }
+            if command && key == "e", self.documentHost?.canBeginEditing == true { self.edit(); return nil }
+            if event.keyCode == 49, !command, self.mode == .file, self.documentHost?.isEditing != true,
+               window.firstResponder === self.overlay.dialog { self.requestClose { _ in }; return nil }
             if command && key == "w" { self.requestClose { _ in }; return nil }
             if command && key == "s" { self.performSave(saveAs: event.modifierFlags.contains(.shift)); return nil }
-            if command && ["f", "z"].contains(key), let host = self.documentHost {
+            // 打开时焦点留在弹窗容器；首次全选显式交给正文，避免被容器吞掉或落到背景文件列表。
+            if key == "a", event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
+               window.firstResponder === self.overlay.dialog {
+                if let text = self.keyboardDocument?.content as? FWTextContent, text.selectAll() { return nil }
+                if let text = self.contentView.allDescendants.compactMap({ $0 as? NSTextView }).first(where: { $0.isSelectable }) {
+                    window.makeFirstResponder(text)
+                    text.selectAll(nil)
+                    return nil
+                }
+            }
+            if command && ["f", "z"].contains(key), let host = self.keyboardDocument {
+                // DOM 才知道 WK 当前焦点属于正文还是查找输入；不要按文档 canUndo 抢走输入框历史。
+                if key == "z", let responder = window.firstResponder as? NSView {
+                    if responder is NSTextView { return event }
+                    if let text = host.content as? FWTextContent, self.contentView.allDescendants.contains(where: {
+                       guard let web = $0 as? WKWebView else { return false }
+                       return responder === web || responder.isDescendant(of: web)
+                    }) {
+                        text.handleHistoryKey(redo: event.modifierFlags.contains(.shift)); return nil
+                    }
+                }
                 if key == "f" { host.find() }
                 else if event.modifierFlags.contains(.shift) { host.redo() } else { host.undo() }
                 return nil
             }
-            if event.keyCode == 48 { self.advanceFocus(backward: event.modifierFlags.contains(.shift)); return nil }
+            if event.keyCode == 48 {
+                // 普通 Tab 留给正文缩进；Ctrl+Tab 明确离开编辑器，保留可访问的模态焦点环。
+                self.advanceFocus(backward: event.modifierFlags.contains(.shift),
+                                  allowTextIndent: event.modifierFlags.intersection([.command, .control, .option]).isEmpty)
+                return nil
+            }
             if let responder = window.firstResponder as? NSView,
                responder !== self.overlay.dialog && !responder.isDescendant(of: self.overlay.dialog) {
                 window.makeFirstResponder(self.overlay.dialog)
@@ -378,14 +500,14 @@ final class FWPreviewModal: NSObject {
         if ProcessInfo.processInfo.environment["FW_OFFICE_SMOKE_DIR"] != nil { print("MODAL", message) }
     }
 
-    private func advanceFocus(backward: Bool) {
+    private func advanceFocus(backward: Bool, allowTextIndent: Bool) {
         guard let window = owner?.view.window else { return }
         let request = UUID()
         focusRequestID = request
         if let responder = window.firstResponder as? NSView,
            let web = overlay.dialog.allDescendants.compactMap({ $0 as? WKWebView }).first(where: { responder === $0 || responder.isDescendant(of: $0) }) {
             // WK 是一个原生 key view，但内部仍有模式按钮和查找控件；先走完网页焦点再回到原生环。
-            advanceWebFocus(web, backward: backward, entering: false, request: request) { [weak self] handled in
+            advanceWebFocus(web, backward: backward, entering: false, request: request, allowTextIndent: allowTextIndent) { [weak self] handled in
                 if !handled { self?.advanceNativeFocus(backward: backward, request: request) }
             }
         } else { advanceNativeFocus(backward: backward, request: request) }
@@ -408,11 +530,12 @@ final class FWPreviewModal: NSObject {
         }
     }
 
-    private func advanceWebFocus(_ web: WKWebView, backward: Bool, entering: Bool, request: UUID,
+    private func advanceWebFocus(_ web: WKWebView, backward: Bool, entering: Bool, request: UUID, allowTextIndent: Bool = false,
                                  completion: @escaping (Bool) -> Void) {
         Task { @MainActor [weak self, weak web] in
             guard let self, let web, self.focusRequestID == request, !self.isClosing, !self.didFinish else { return }
             let script = """
+            if (!entering && allowTextIndent && window.workbench?.indentSelection?.({backward}) === true) return true;
             const nodes = [...document.querySelectorAll('button,input,textarea,select,[contenteditable="true"],[tabindex]')]
               .filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length > 0);
             const current = nodes.findIndex(node => node === document.activeElement || node.contains(document.activeElement));
@@ -421,7 +544,7 @@ final class FWPreviewModal: NSObject {
             nodes[next].focus({preventScroll: true});
             return document.activeElement === nodes[next] || nodes[next].contains(document.activeElement);
             """
-            let handled = (try? await web.callAsyncJavaScript(script, arguments: ["backward": backward, "entering": entering],
+            let handled = (try? await web.callAsyncJavaScript(script, arguments: ["backward": backward, "entering": entering, "allowTextIndent": allowTextIndent],
                                                               in: nil, contentWorld: .page)) as? Bool ?? false
             // 关闭、点击其他控件或更新的 Tab 已使旧请求失效时，不能再抢走焦点。
             guard self.focusRequestID == request, !self.isClosing, !self.didFinish,
@@ -457,12 +580,18 @@ final class FWModalOverlay: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true; layer?.backgroundColor = NSColor.black.withAlphaComponent(0.25).cgColor
-        dialog.wantsLayer = true; dialog.layer?.backgroundColor = NSColor.white.cgColor
+        dialog.wantsLayer = true; dialog.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         dialog.layer?.cornerRadius = 12
         dialog.shadow = NSShadow(); dialog.shadow?.shadowBlurRadius = 24; dialog.shadow?.shadowColor = NSColor.black.withAlphaComponent(0.22)
         addSubview(dialog)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            dialog.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        }
+    }
     override func layout() {
         super.layout()
         let margin: CGFloat = 20

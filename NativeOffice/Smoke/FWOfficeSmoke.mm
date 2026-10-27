@@ -38,6 +38,9 @@
 @property(nonatomic) BOOL finished;
 @property(nonatomic) BOOL savePathIssued;
 @property(nonatomic) BOOL savedEvent;
+@property(nonatomic) NSString *lastLoggedPhase;
+@property(nonatomic, strong) id inputGuard;
+@property(nonatomic) NSUInteger ignoredExternalKeys;
 @property(nonatomic) BOOL profileVerified;
 @property(nonatomic) ino_t directoryInode;
 @property(nonatomic) dev_t directoryDevice;
@@ -214,6 +217,17 @@ static void FWCollectWebViews(NSView *view, NSMutableArray<WKWebView *> *editors
         return;
     }
     self.profileVerified = YES;
+    // SDK 驱动负责样本输入；只屏蔽本测试主窗口的外来文字按键，避免窗口激活时误写样本。
+    // 其他应用、系统保存面板以及关闭/退出快捷键不受影响，也不记录按键内容。
+    __weak FWOfficeSmoke *inputOwner = self;
+    self.inputGuard = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:^NSEvent *(NSEvent *event) {
+        FWOfficeSmoke *owner = inputOwner;
+        if (!owner || owner.finished || event.window != owner.controller.view.window) return event;
+        NSString *key = event.charactersIgnoringModifiers.lowercaseString;
+        if (event.keyCode == 53 || ((event.modifierFlags & NSEventModifierFlagCommand) && [@[@"q", @"w"] containsObject:key])) return event;
+        owner.ignoredExternalKeys++;
+        return nil;
+    }];
     NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
     [center addObserver:self selector:@selector(documentReady:) name:CEFEventNameEditorDocumentReady object:nil];
     [center addObserver:self selector:@selector(editorEvent:) name:CEFEventNameEditorEvent object:nil];
@@ -529,6 +543,11 @@ static void FWCollectWebViews(NSView *view, NSMutableArray<WKWebView *> *editors
 
 - (void)tick {
     if (self.finished) return;
+    if (![self.lastLoggedPhase isEqualToString:self.phase]) {
+        self.lastLoggedPhase = self.phase;
+        fprintf(stderr, "FW_SMOKE_PHASE %s\n", self.phase.UTF8String ?: "unset");
+        fflush(stderr);
+    }
     NSTimeInterval now = NSDate.date.timeIntervalSince1970;
     if (now >= self.deadline) { [self finish:@"超过验收截止时间。"]; return; }
     if (![self directoryUnchanged]) { [self finish:@"验收目录已被替换或权限发生变化。"]; return; }
@@ -552,6 +571,13 @@ static void FWCollectWebViews(NSView *view, NSMutableArray<WKWebView *> *editors
         [self.view apply:new NSEditorApi::CAscMenuEvent(ASC_MENU_EVENT_TYPE_CEF_SAVE)];
     } else if ([self.phase isEqual:@"saving"] && self.savedEvent && self.savePathIssued &&
                !self.view.data.hasChanges && !self.view.isSaveLocked) {
+#if FW_WORKBENCH_ENABLED
+        if (self.index == 0 && self.workbenchRequested) {
+            FWBrowserHost *browser = FWBrowserForWindow(self.controller, self.controller.view.window);
+            if (!browser || browser.hasAnyPreview) return;
+            self.workbenchResult[@"officeSaveAndReturnVerified"] = @YES;
+        }
+#endif
         NSString *path = [self.directory stringByAppendingPathComponent:self.current[@"file"]];
         struct stat output;
         if (lstat(path.fileSystemRepresentation, &output) != 0) return;
@@ -655,11 +681,18 @@ static void FWCollectWebViews(NSView *view, NSMutableArray<WKWebView *> *editors
         }
         self.workbenchResult[@"editorStillInBrowserWindow"] = @YES;
         self.workbenchResult[@"nativeSaveRoutedWhileSwitching"] = @YES;
+        self.phase = @"mixed-text-returning";
+        [self.controller.tabsControl selectTab:textTab];
+    } else if ([self.phase isEqual:@"mixed-text-returning"]) {
+        if (self.controller.tabsControl.selectedTab != textTab || textHost.busy) return;
+        NSButton *saveReturn = FWModalSheetButton(self.controller.view, @"保存并返回");
+        if (!saveReturn) return;
         self.phase = @"mixed-text-closing";
-        [coordinator requestCloseTab:textTab];
+        [saveReturn performClick:nil];
     } else if ([self.phase isEqual:@"mixed-text-closing"]) {
         if (textTab) return;
         self.workbenchResult[@"nativeCloseVerified"] = @YES;
+        self.workbenchResult[@"nativeSaveAndReturnVerified"] = @YES;
         self.phase = @"mixed-pdf-loading";
         [coordinator openURL:[NSURL fileURLWithPath:[self.directory stringByAppendingPathComponent:@"mixed.pdf"]] pinned:YES];
     } else if ([self.phase isEqual:@"mixed-pdf-loading"]) {
@@ -682,7 +715,9 @@ static void FWCollectWebViews(NSView *view, NSMutableArray<WKWebView *> *editors
         self.workbenchResult[@"officeRetainedUnsavedChanges"] = @YES;
         self.workbenchResult[@"passed"] = @YES;
         self.phase = @"saving";
-        [(AppDelegate *)NSApp.delegate onMenuSave:nil];
+        NSButton *saveReturn = FWModalSheetButton(self.controller.view, @"保存并返回");
+        if (!saveReturn) { [self finish:@"Office 工作层缺少可用的保存并返回按钮。"]; return; }
+        [saveReturn performClick:nil];
     }
 }
 
@@ -949,12 +984,14 @@ static void FWCollectWebViews(NSView *view, NSMutableArray<WKWebView *> *editors
     if (self.finished) return;
     self.finished = YES;
     [self.timer invalidate];
+    if (self.inputGuard) { [NSEvent removeMonitor:self.inputGuard]; self.inputGuard = nil; }
     [NSNotificationCenter.defaultCenter removeObserver:self];
     NSMutableDictionary *result = [@{@"schemaVersion": @1, @"token": self.token,
                                      @"status": error ? @"failed" : @"passed", @"phase": self.phase,
                                      @"cases": self.results, @"finishedUnix": @(NSDate.date.timeIntervalSince1970),
                                      @"profileIsolated": @(self.profileVerified),
-                                     @"inputMethod": @"SDK pluginMethod_InputText; system IME not tested"} mutableCopy];
+                                     @"inputMethod": @"SDK pluginMethod_InputText; system IME not tested",
+                                     @"ignoredExternalKeyEvents": @(self.ignoredExternalKeys)} mutableCopy];
     if (self.workbenchRequested) result[@"workbench"] = self.workbenchResult;
     if (self.recoveryPanelRequested) result[@"recoveryPanel"] = self.recoveryPanelResult;
     if (error) { result[@"error"] = error; if (self.current) result[@"currentCase"] = self.current; }
