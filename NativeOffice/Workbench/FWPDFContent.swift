@@ -83,6 +83,14 @@ final class FWPDFContent: NSViewController, FWNativeContent {
             editButtons.append(button)
             toolbar.addArrangedSubview(button)
         }
+        // PDFKit 原生处理捏合和平移；按钮保留鼠标/键盘的同等入口。
+        for (name, selector, key) in [("缩小", #selector(zoomOut), "-"), ("适合窗口", #selector(fitPage), "0"), ("放大", #selector(zoomIn), "+")] {
+            let button = NSButton(title: name, target: self, action: selector)
+            button.keyEquivalent = key; button.keyEquivalentModifierMask = .command
+            toolbar.addArrangedSubview(button)
+        }
+        pdfView.minScaleFactor = 0.1
+        pdfView.maxScaleFactor = 8
         pdfView.autoScales = true
         pdfView.displayMode = .singlePageContinuous
         status.font = .systemFont(ofSize: 11)
@@ -90,6 +98,10 @@ final class FWPDFContent: NSViewController, FWNativeContent {
         view = FWMediaUI.layout(toolbar: toolbar, body: pdfView, status: status)
         refreshPDF()
     }
+
+    @objc private func zoomOut() { pdfView.zoomOut(nil) }
+    @objc private func zoomIn() { pdfView.zoomIn(nil) }
+    @objc private func fitPage() { pdfView.autoScales = true }
 
     func save(overwriteExternalChanges: Bool) async throws {
         guard !processing else { throw DocumentSessionError.busy }

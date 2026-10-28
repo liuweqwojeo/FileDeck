@@ -1,9 +1,205 @@
 import AppKit
 import SwiftUI
+import PDFKit
+import ApplicationServices
 @preconcurrency import WebKit
 
 /// 八项交互修复使用独立窗口、偏好域和 UUID 样本，禁止将测试数据写入用户文档。
 extension NativeTextTests {
+    /// 经窗口服务器进入 NSApplication 与本地事件监视器，不能直接调用 handle 或伪造完成回调。
+    func navigationSwipeChecks() async throws {
+        let directory = output.appendingPathComponent("swipe-" + UUID().uuidString, isDirectory: true)
+        let first = directory.appendingPathComponent("A", isDirectory: true)
+        let second = directory.appendingPathComponent("B", isDirectory: true)
+        let third = directory.appendingPathComponent("C", isDirectory: true)
+        let nested = first.appendingPathComponent("Nested", isDirectory: true)
+        for target in [directory, first, second, third, nested] {
+            try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+            for index in 0..<60 { try Data("fixture".utf8).write(to: target.appendingPathComponent("sample-\(index).swift")) }
+        }
+        let browser = FWBrowserHost(editorView: NSView(), openHandler: { _, _ in }, commandHandler: { _ in })
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1440, height: 900),
+                          styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.title = "FileDeck 触控板交互验收（自动关闭）"
+        window.contentViewController = browser
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        let store = browser.browserStore
+        let eventSource = CGEventSource(stateID: .hidSystemState)
+        eventSource?.localEventsSuppressionInterval = 0
+        print("SWIPE_ACCESS post=\(CGPreflightPostEventAccess()),accessibility=\(AXIsProcessTrusted())")
+        store.openRoot(directory, remember: false)
+        try await waitUntil("工作区加载") { !store.isLoading }
+        try await Task.sleep(for: .milliseconds(150))
+        NSApp.activate(ignoringOtherApps: true)
+        try await waitUntil("验收窗口激活") { NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier && self.window.isKeyWindow }
+        guard let probe = browser.backgroundView.allDescendants.compactMap({ $0 as? WorkspaceBrowserNavigationGestures.GestureProbe }).first else { throw Failed.assertion("原生手势监视器未挂载") }
+        let systemSetting = probe.scrollSwipeEnabled
+        probe.scrollSwipeEnabled = { true }
+        defer { probe.scrollSwipeEnabled = systemSetting }
+        func open(_ target: URL) async throws {
+            store.navigate(to: target)
+            try await waitUntil("目录加载") { !store.isLoading }
+            try await Task.sleep(for: .milliseconds(70))
+        }
+        func scroll(_ deltas: [(Int64, Int32, Int32)], momentum: Int64 = 0) async throws {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            try await waitUntil("验收手势窗口激活") { NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier && self.window.isKeyWindow }
+            try await waitUntil("文件列表挂载") { browser.backgroundView.allDescendants.contains { $0 is NSTableView } }
+            guard let table = browser.backgroundView.allDescendants.compactMap({ $0 as? NSTableView }).first else {
+                throw Failed.assertion("未挂载真实文件列表")
+            }
+            let visible = table.visibleRect
+            let point = table.convert(NSPoint(x: min(table.bounds.width - 20, 200), y: visible.midY), to: nil)
+            let screenPoint = window.convertPoint(toScreen: point)
+            let location = NSPoint(x: screenPoint.x, y: NSScreen.screens[0].frame.height - screenPoint.y)
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier,
+                  window.isKeyWindow, NSEvent.pressedMouseButtons == 0 else { throw Failed.assertion("拒绝投递：前台=\(NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier)，key=\(window.isKeyWindow)，按钮=\(NSEvent.pressedMouseButtons)") }
+            CGWarpMouseCursorPosition(location)
+            CGEvent(mouseEventSource: eventSource, mouseType: .mouseMoved, mouseCursorPosition: location, mouseButton: .left)?.post(tap: .cghidEventTap)
+            try await Task.sleep(for: .milliseconds(100))
+            for (phase, x, y) in deltas {
+                guard NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier,
+                      window.isKeyWindow else { throw Failed.assertion("验收窗口失去前台，拒绝投递") }
+                guard let event = CGEvent(scrollWheelEvent2Source: eventSource, units: .pixel, wheelCount: 2,
+                                          wheel1: y, wheel2: x, wheel3: 0) else { throw Failed.assertion("不能创建滚动事件") }
+                event.location = location; event.flags = []
+                event.setIntegerValueField(.eventSourceUserData, value: 101414)
+                event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(window.windowNumber))
+                event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(window.windowNumber))
+                event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+                event.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+                event.setIntegerValueField(.scrollWheelEventMomentumPhase, value: momentum)
+                event.post(tap: .cghidEventTap)
+                try await Task.sleep(for: .milliseconds(70))
+            }
+            try await waitUntil("导航结束") { !store.isLoading }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let initialDelta = Int32(ProcessInfo.processInfo.environment["FW_NATIVE_GESTURE_INITIAL_DELTA"] ?? "5") ?? 5
+        func back() async throws { try await scroll([(1,initialDelta,0),(2,0,0),(2,35,0),(2,35,0),(4,0,0)]) }
+        func forward() async throws { try await scroll([(1,-initialDelta,0),(2,-35,0),(2,-35,0),(4,0,0)]) }
+        try await open(first); try await open(second); try await open(third)
+        var traceSamples = 0
+        let trace = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard traceSamples < 8, event.window === self?.window else { return event }
+            traceSamples += 1
+            var classes: [String] = []
+            if let content = self?.window.contentView {
+                var hit = content.hitTest(content.convert(event.locationInWindow, from: nil))
+                while let view = hit {
+                    if let scroll = view as? NSScrollView { classes.append("scroll:doc=\(scroll.documentView?.frame.width ?? 0),clip=\(scroll.contentSize.width),h=\(scroll.hasHorizontalScroller),v=\(scroll.hasVerticalScroller)") }
+                    if let field = view as? NSTextField { classes.append("text:edit=\(field.isEditable),select=\(field.isSelectable)") }
+                    hit = view.superview
+                }
+            }
+            print("SWIPE_SAMPLE tag=\(event.cgEvent?.getIntegerValueField(.eventSourceUserData) ?? 0),phase=\(event.phase.rawValue),dx=\(event.scrollingDeltaX),precise=\(event.hasPreciseScrollingDeltas),canBack=\(store.canGestureGoBack),enabled=\(probe.isEnabled?() == true),inside=\(probe.bounds.contains(probe.convert(event.locationInWindow, from: nil))),\(classes)")
+            return event
+        }
+        defer { if let trace { NSEvent.removeMonitor(trace) } }
+        try await back()
+        print("SWIPE_RESULT current=\(store.currentDirectory?.path ?? "nil"),expected=\(directory.path),forward=\(store.gestureForwardChain.map { $0.url.lastPathComponent })")
+        try check("同级 C 手势只退到直接父目录", store.currentDirectory == directory)
+        try await back()
+        try check("工作区根目录停止后退", store.currentDirectory == directory)
+        try await forward()
+        try check("多个子目录只前进到刚退出的 C", store.currentDirectory == third)
+        try await scroll([(0,90,0)], momentum: 1); try await scroll([(0,90,0)], momentum: 3)
+        try check("横向惯性不重复切换目录", store.currentDirectory == third)
+        let selected = third.appendingPathComponent("sample-0.swift")
+        store.selectedURL = selected
+        guard let fileTable = browser.backgroundView.allDescendants.compactMap({ $0 as? NSTableView }).first else { throw Failed.assertion("文件列表不存在") }
+        let beforeScroll = fileTable.visibleRect.minY
+        try await scroll([(1,0,0),(2,0,-40),(2,0,-40),(4,0,0)])
+        try check("零位移起始纵向滚动移动列表", abs(fileTable.visibleRect.minY - beforeScroll) > 1)
+        let middleScroll = fileTable.visibleRect.minY
+        try await scroll([(1,0,0),(2,0,-40),(2,0,-40),(4,0,0)])
+        try check("列表中部继续原生纵向滚动", fileTable.visibleRect.minY > middleScroll)
+        let beforeMomentum = fileTable.visibleRect.minY
+        try await scroll([(0,0,-25)], momentum: 1); try await scroll([(0,0,0)], momentum: 3)
+        try check("纵向惯性继续滚动且不导航", fileTable.visibleRect.minY > beforeMomentum && store.currentDirectory == third)
+        try await scroll([(1,80,0),(8,0,0)])
+        try check("纵向滚动和取消保留目录与选择", store.currentDirectory == third && store.selectedURL == selected)
+        try await back(); try await forward()
+        try check("父子链往返恢复文件选择", store.currentDirectory == third && store.selectedURL == selected)
+        try await open(nested)
+        try await back(); try check("嵌套目录每次只退一级", store.currentDirectory == first)
+        try await back(); try await forward()
+        try check("多层前进先回直接子目录 A", store.currentDirectory == first)
+        try await forward(); try check("再次前进回嵌套子目录", store.currentDirectory == nested)
+        try await back(); try await open(second)
+        try check("点击切换分支清空手势前进记录", !store.canGestureGoForward)
+        try await forward(); try check("无前进记录不自动选兄弟分支", store.currentDirectory == second)
+        probe.scrollSwipeEnabled = { false }
+        try await back(); try check("系统禁用滚动轻扫时保持目录", store.currentDirectory == second)
+        probe.scrollSwipeEnabled = { true }
+        window.setContentSize(NSSize(width: 860, height: 660))
+        try await Task.sleep(for: .milliseconds(150))
+        try await back(); try await forward()
+        try check("860 窄窗父子链往返正常", store.currentDirectory == second)
+        store.selectedURL = second.appendingPathComponent("sample-0.swift")
+        store.gridView = true
+        try await Task.sleep(for: .milliseconds(150))
+        try captureBrowser(browser, name: "trackpad-narrow-grid.png")
+        try check("图标网格保留原选择模型", store.currentDirectory == second && store.selectedURL == second.appendingPathComponent("sample-0.swift"))
+        window.close()
+        try await previewZoomChecks(in: directory)
+    }
+
+    func previewZoomChecks(in directory: URL) async throws {
+        guard let context = CGContext(data: nil, width: 2048, height: 1536, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw Failed.assertion("无法创建图片样本") }
+        context.setFillColor(NSColor.systemTeal.cgColor); context.fill(CGRect(x: 0, y: 0, width: 2048, height: 1536))
+        guard let pixels = context.makeImage() else { throw Failed.assertion("无法生成图片样本") }
+        let original = try ImageOperations.export(pixels, format: .png)
+        let imageURL = directory.appendingPathComponent("zoom.png"); try original.write(to: imageURL)
+        let image = try await FWImageContent.open(url: imageURL)
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.title = "FileDeck 图片/PDF 缩放验收（自动关闭）"
+        window.contentViewController = image; window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        try await Task.sleep(for: .milliseconds(120))
+        guard let scroll = image.view.allDescendants.compactMap({ $0 as? NSScrollView }).first,
+              let document = scroll.documentView else { throw Failed.assertion("图片没有原生滚动容器") }
+        let frame = window.frame
+        let point = NSPoint(x: scroll.contentView.bounds.midX, y: scroll.contentView.bounds.midY)
+        let before = document.convert(point, to: nil)
+        scroll.setMagnification(2, centeredAt: point)
+        let after = document.convert(point, to: nil)
+        try check("图片原生缩放保持中心位置", scroll.allowsMagnification && hypot(before.x - after.x, before.y - after.y) < 2)
+        button(image.view, title: "放大")?.performClick(nil)
+        try check("图片鼠标缩放按钮有效", scroll.magnification > 2)
+        let imageBeforeKey = scroll.magnification
+        try await event("-", keyCode: 27, flags: .command)
+        try check("图片键盘缩小有效", scroll.magnification < imageBeforeKey)
+        button(image.view, title: "实际大小")?.performClick(nil)
+        try check("图片实际大小恢复且不缩放窗口", scroll.magnification == 1 && window.frame == frame)
+        try check("图片缩放不修改磁盘与撤销历史", !image.isModified && !image.canUndo && (try Data(contentsOf: imageURL)) == original)
+        let pdfURL = directory.appendingPathComponent("zoom.pdf")
+        let pdfData = try PDFOperations.imageToPDF(pixels); try pdfData.write(to: pdfURL)
+        let pdf = try await FWPDFContent.open(url: pdfURL)
+        window.contentViewController = pdf
+        window.setContentSize(NSSize(width: 900, height: 700))
+        try await Task.sleep(for: .milliseconds(120))
+        guard let view = pdf.view.allDescendants.compactMap({ $0 as? PDFView }).first else { throw Failed.assertion("没有 PDFKit 视图") }
+        let pdfFrame = window.frame
+        view.autoScales = false; view.scaleFactor = 1
+        button(pdf.view, title: "放大")?.performClick(nil)
+        try check("PDF 复用 PDFKit 缩放按钮", view.scaleFactor > 1)
+        let pdfBeforeKey = view.scaleFactor
+        try await event("-", keyCode: 27, flags: .command)
+        try check("PDF 键盘缩小有效", view.scaleFactor < pdfBeforeKey)
+        button(pdf.view, title: "适合窗口")?.performClick(nil)
+        try await Task.sleep(for: .milliseconds(100))
+        print("PDF_FIT auto=\(view.autoScales),modified=\(pdf.isModified),frame=\(window.frame),baseline=\(pdfFrame),scale=\(view.scaleFactor),fit=\(view.scaleFactorForSizeToFit)")
+        try check("PDF 适合窗口", view.autoScales)
+        try check("PDF 缩放保持窗口尺寸", window.frame == pdfFrame)
+        try check("PDF 缩放不修改文档", !pdf.isModified && (try Data(contentsOf: pdfURL)) == pdfData)
+        window.close()
+    }
+
     func fixJS(_ web: WKWebView, _ script: String) async throws -> Any? {
         try await web.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page)
     }
@@ -251,7 +447,7 @@ extension NativeTextTests {
         }
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         let rect = table.rect(ofRow: row)
-        try await mouseClick(at: table.convert(NSPoint(x: rect.minX + 110, y: rect.midY), to: nil), right: true)
+        try await mouseClick(at: table.convert(NSPoint(x: rect.minX + 110, y: rect.midY), to: nil), right: true, nativeMouse: true)
         try await choose.value
     }
 

@@ -422,8 +422,15 @@ final class BrowserStore: ObservableObject {
     private var updatingDisplayState = false
     private var updatingSelection = false
     private var selectionAnchor: URL?
+    private struct NavigationSelection {
+        let files: Set<BrowserFileReference>
+        let primary: BrowserFileReference?
+    }
+    private var navigationSelections: [URL: NavigationSelection] = [:]
+    @Published private(set) var gestureForwardChain: [BrowserFileReference] = []
     private var activePreviewSnapshotID: UUID? { didSet { if activePreviewSnapshotID == nil { scheduleExternalSynchronization() } } }
     private var activeFileDrag: (id: UUID, files: [BrowserFileReference])?
+    private var copiedFiles: (board: NSPasteboard.Name, change: Int, files: [BrowserFileReference])?
 
     private var entriesByURL: [URL: FileEntry] = [:]
     // 列表加载时会清空 entries；连续刷新仍须沿用第一次捕获的身份，不能重新 stat 后继承同名替换项。
@@ -458,7 +465,16 @@ final class BrowserStore: ObservableObject {
     var hasActiveFilters: Bool { !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || typeFilter != .all || (!isLoading && directoryIssue == nil && currentDirectory != nil && entries.isEmpty && !directoryIsTrulyEmpty) }
     var canGoBack: Bool { historyIndex > 0 }
     var canGoForward: Bool { historyIndex >= 0 && historyIndex + 1 < history.count }
-    var canGoUp: Bool { currentDirectory != nil && currentDirectory != rootURL }
+    // 加载完成后才有当前目录的身份；连续点击或快捷键不能把无身份的目录压入返回链。
+    var canGoUp: Bool { !isLoading && currentDirectory != nil && currentDirectory != rootURL }
+    var canGestureGoBack: Bool {
+        guard !isLoading, let currentDirectory, let rootURL, currentDirectory != rootURL else { return false }
+        return Self.contains(currentDirectory, in: rootURL)
+    }
+    var canGestureGoForward: Bool {
+        guard !isLoading, let currentDirectory, let child = gestureForwardChain.last, child.identity != nil else { return false }
+        return Self.directoryURL(child.url.deletingLastPathComponent()) == currentDirectory
+    }
     var hasPreviousWorkspace: Bool {
         pendingWorkspace.map { !$0.roots.isEmpty || $0.currentPath != nil } ?? false
     }
@@ -606,10 +622,17 @@ final class BrowserStore: ObservableObject {
         loadChildren(of: url)
     }
 
-    func navigate(to url: URL, recordHistory: Bool = true, selecting file: URL? = nil) {
+    func navigate(to url: URL, recordHistory: Bool = true, selecting file: URL? = nil, restoringSelection: Bool = false) {
         guard url.isFileURL else { return }
+        // 返回历史目录时按文件身份恢复多选；同名替换文件不能继承之前的选择。
+        if let currentDirectory, !isLoading, directoryError == nil {
+            navigationSelections[currentDirectory] = NavigationSelection(files: Set(selectedURLs.map(fileReference)),
+                                                                         primary: selectedURL.map(fileReference))
+        }
+        gestureForwardChain = []
         activePreviewSnapshotID = nil
         let target = Self.directoryURL(url)
+        let savedSelection = (!recordHistory || restoringSelection) && file == nil ? navigationSelections[target] : nil
         currentRestoreID = nil
         if let rememberedRoot = navigationRoots[target], !recordHistory {
             rootURL = rememberedRoot
@@ -622,6 +645,8 @@ final class BrowserStore: ObservableObject {
             history = Array(history.prefix(historyIndex + 1))
             history.append(target)
             historyIndex = history.count - 1
+            let retained = Set(history)
+            navigationSelections = navigationSelections.filter { retained.contains($0.key) }
         }
         cancelExternalRequests()
         directoryIdentities[target] = nil
@@ -629,7 +654,10 @@ final class BrowserStore: ObservableObject {
         navigationRoots[target] = rootURL
         // 先进入加载态再清除过滤，避免 didSet 把待恢复的文件选择当作旧快照清空。
         isLoading = true
-        selectedURL = file
+        if let savedSelection {
+            pendingSelectionReferences = Dictionary(uniqueKeysWithValues: savedSelection.files.map { ($0.url, $0) })
+            setSelection(Set(savedSelection.files.map(\.url)), primary: savedSelection.primary?.url)
+        } else { selectedURL = file }
         query = ""
         typeFilter = .all
         expandAncestors(of: target)
@@ -651,7 +679,29 @@ final class BrowserStore: ObservableObject {
     }
     func goUp() {
         guard canGoUp, let currentDirectory else { return }
-        navigate(to: currentDirectory.deletingLastPathComponent())
+        let chain = gestureForwardChain
+        let child = BrowserFileReference(url: currentDirectory, identity: directoryIdentities[currentDirectory])
+        navigate(to: currentDirectory.deletingLastPathComponent(), restoringSelection: true)
+        gestureForwardChain = chain + [child]
+    }
+
+    /// 手势与上级目录按钮/快捷键共用父子链；浏览历史仍由独立的历史按钮管理。
+    func gestureGoBack() {
+        guard canGestureGoBack else { return }
+        goUp()
+    }
+
+    func gestureGoForward() {
+        guard canGestureGoForward, let child = gestureForwardChain.last else { return }
+        // 刚退出的目录若被删除/替换，要求重新点击选择，不能进入同路径的另一个对象。
+        guard let identity = child.identity, (try? FileSystem.identity(at: child.url)) == identity else {
+            gestureForwardChain = []
+            actionError = "刚刚退出的子目录已变更，请在列表中重新打开。"
+            return
+        }
+        let remaining = Array(gestureForwardChain.dropLast())
+        navigate(to: child.url, restoringSelection: true)
+        gestureForwardChain = remaining
     }
 
     func refresh() {
@@ -684,6 +734,8 @@ final class BrowserStore: ObservableObject {
         typeFilter = .all
         history = []
         historyIndex = -1
+        navigationSelections = [:]
+        gestureForwardChain = []
         navigationRoots = [:]
         startupPhase = .ready
         saveWorkspace()
@@ -1013,17 +1065,43 @@ final class BrowserStore: ObservableObject {
     @discardableResult
     func copyFiles(_ urls: [URL], to pasteboard: NSPasteboard = .general) -> Bool {
         guard !urls.isEmpty, urls.allSatisfy(\.isFileURL) else { return false }
+        let files = urls.map(fileReference)
         pasteboard.clearContents()
-        return pasteboard.writeObjects(urls.map { $0 as NSURL })
+        guard pasteboard.writeObjects(urls.map { $0 as NSURL }) else { copiedFiles = nil; return false }
+        copiedFiles = (pasteboard.name, pasteboard.changeCount, files)
+        return true
     }
 
-    func pasteFiles(from pasteboard: NSPasteboard = .general, into target: URL? = nil) {
+    /// 原生复制菜单写入提供器后再记下剪贴板代次；身份在用户发起复制时冻结。
+    func copyFileItems() -> [NSItemProvider] {
+        let files = selectedFileURLs.map(fileReference)
+        guard !files.isEmpty else { return [] }
+        DispatchQueue.main.async { [weak self] in
+            let board = NSPasteboard.general
+            let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+            guard urls == files.map(\.url) else { return }
+            self?.copiedFiles = (board.name, board.changeCount, files)
+        }
+        return files.map { NSItemProvider(object: $0.url as NSURL) }
+    }
+
+    func pasteFiles(from pasteboard: NSPasteboard = .general, into target: URL? = nil, move: Bool = false) {
         guard let directory = target ?? currentDirectory else {
             actionError = "请先选择可访问的目标文件夹。"
             return
         }
         let urls = (pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
         guard !urls.isEmpty else { actionError = "剪贴板中没有可粘贴的文件。"; return }
+        if move {
+            // 移动只认本窗口复制时冻结的身份，不能把外部剪贴板路径或同名替换项当成原文件。
+            guard let copiedFiles, copiedFiles.board == pasteboard.name, copiedFiles.change == pasteboard.changeCount,
+                  copiedFiles.files.map(\.url) == urls, copiedFiles.files.allSatisfy({ $0.identity != nil }) else {
+                actionError = "请先在 FileDeck 中重新复制要移动的文件，再执行“移动到此处”。"
+                return
+            }
+            transferFiles(copiedFiles.files, into: directory, move: true)
+            return
+        }
         transferFiles(urls.map { BrowserFileReference(url: $0, identity: nil) }, into: directory, move: false, renameConflicts: true)
     }
 

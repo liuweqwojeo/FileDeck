@@ -8,28 +8,26 @@ FileDeck 是面向 **macOS 14+、Apple Silicon（ARM64）** 的本地文件工�
 
 ## 下载与安装
 
-完整应用从已发布的 [GitHub Releases · v0.1.2 预览版](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build8) 下载：
+完整应用从 [GitHub Releases · v0.1.2 构建14预览版](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build14) 下载：
 
-- [FileDeck v0.1.2 · 构建 8 · macOS ARM64 下载包](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2-build8/FileDeck-v0.1.2-build8-macOS-arm64.zip)
-- [SHA-256 校验文件](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2-build8/SHA256SUMS.txt)
+- [FileDeck v0.1.2 · 构建14 · macOS ARM64 下载包](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2-build14/FileDeck-0.1.2-build14-macOS-arm64.zip)
+- [SHA-256 校验文件](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2-build14/SHA256SUMS.txt)
 
-当前版本为 **v0.1.2（构建号 8）**，安装包对应修复源码提交 [854d9f6](https://github.com/liuweqwojeo/FileDeck/commit/854d9f6416b393673f846e4f5e0113b23076ab4e)。本版修复 PDF/图片变换的保存大小边界、查找/撤销/重做菜单能力，以及系统另存明确重建已删除原路径的冲突；保留此前的 JPEG 保真、内存草稿恢复、目录路径同步和编辑资源/打包门禁。
+当前版本为 **v0.1.2（构建号14），Release / ARM64**，源码标签为 [v0.1.2-build14](https://github.com/liuweqwojeo/FileDeck/tree/v0.1.2-build14)。本版补齐触控板父子目录导航、原生缩放与拖放反馈，并包含此前的常见语言支持、八项交互修复、递归搜索、草稿恢复和文件操作进度/撤销。
 
-本轮通过 146 项 Swift、155 项 Python（0 跳过）、23 项 Node、11 组真实媒体/CSV 回归和完整文档 45 项断言，并从依赖锁安装后只读重建比较资源。系统另存由外部 Accessibility 实际按保存按钮并核对回调及落盘；已安装构建 8 通过完整清单、签名和禁网运行，恢复草稿的真实系统面板取消/保存及独立文件复核均通过。详见[构建 8 发布说明](docs/release-build8.md)和[验收报告](docs/code-review-and-roadmap.md#15-系统另存确认修复与构建-8-验收2026-10-25)。
+293项Swift测试、零/非零起始各27项原生手势/缩放检查及37项既有交互回归通过。正式安装路径另通过16项手势/按钮、2项目录快捷键，以及禁网Office三格式编辑、保存、重开和关闭保护。完整内容和验证边界见[构建14发布说明](docs/release-build14.md)及[触控板规范](docs/trackpad-interactions.md)。
 
-当前 ZIP 安装包为 **793,612,924 字节，约 793.61 MB（756.85 MiB）**，解压后的 `FileDeck.app` 文件总量约 **1.367 GB**；两者分别表示下载体积和应用文件总量，实际磁盘占用会因文件系统而异。
-
-构建 8 ZIP 的 SHA-256：`65dd899f1db7be446863c46314b83fa872e7c4ea8e09224d147b4aa203fedb20`。将 ZIP 和 `SHA256SUMS.txt` 下载到同一目录，在该目录执行：
+ZIP为 **792,398,782 字节，约792.40 MB（755.69 MiB）**。SHA-256：`d358fc43be562589ac126dda68b589bfc1fef8090f6afbb3d4bd96dc3453d48c`。将ZIP和`SHA256SUMS.txt`下载到同一目录，执行：
 
 ```bash
 shasum -a 256 -c SHA256SUMS.txt
 ```
 
-确认输出 `FileDeck-v0.1.2-build8-macOS-arm64.zip: OK` 后，用 macOS 内置归档工具解压，将其中的整个 `FileDeck.app` 拖入“应用程序”后打开。升级前保存文档并正常退出旧版；需要回退时从[构建 7 Release](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build7)下载旧包及配套校验文件，退出新版后替换。同包附有安装说明、第三方许可证及源码获取入口。
+确认输出 `FileDeck-0.1.2-build14-macOS-arm64.zip: OK` 后，用macOS内置归档工具解压，将整个`FileDeck.app`拖入“应用程序”。升级前保存文档并正常退出旧版；回退可使用[构建8 Release](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build8)及配套校验文件。Release另附安装说明和准确源码获取入口。
 
 当前为开发预览版，使用临时签名，尚未完成 Developer ID 签名与 Apple 公证。如果系统阻止打开，请先确认下载来源和校验值，再参考 [Apple 官方打开说明](https://support.apple.com/zh-cn/102445)。
 
-此包保留现有编辑器、语言、拼写字典、文档模板和插件。打包时对完全相同的静态资源使用包内相对链接去重，并无损压缩离线帮助和拼写字典，按需读取且不创建完整解压缓存。压缩实现与历史体积对比见 [离线资源压缩说明](docs/onlyoffice-build.md#离线帮助与拼写字典压缩)；本版更新、验证结果及升级回退方法见 [v0.1.2 发布说明](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build8)。
+此包保留现有编辑器、语言、拼写字典、文档模板和插件。打包时对完全相同的静态资源使用包内相对链接去重，并无损压缩离线帮助和拼写字典，按需读取且不创建完整解压缓存。压缩实现与历史体积对比见 [离线资源压缩说明](docs/onlyoffice-build.md#离线帮助与拼写字典压缩)；本版更新、验证结果及升级回退方法见 [构建14发布说明](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build14)。
 
 ## 功能介绍
 
@@ -82,7 +80,9 @@ shasum -a 256 -c SHA256SUMS.txt
 
 | 按钮 | 用途 |
 | --- | --- |
-| 后退 / 前进 | 在本次浏览的目录历史之间切换。 |
+| 后退 / 前进 | 在本次浏览的目录历史之间切换（⌘[ / ⌘]）。 |
+| 触控板父子导航（构建14） | 双指水平后退每次只到直接父目录，前进只回刚退出的直接子目录；点击打开新分支后清空前进链，到工作区根目录停止。上级目录（⌘↑）和返回子目录（⌥⌘↓）也有按钮。 |
+| 图标与文档缩放（构建14） | 图标网格支持捏合及大小控制；图片/PDF 原生编辑界面提供缩放按钮及 ⌘− / ⌘+，使用原生缩放和平移且不改变文件内容。普通只读预览继续使用系统 Quick Look，其控件由系统提供。 |
 | 上级 | 进入当前目录的父目录。 |
 | 刷新 | 重新读取当前目录。 |
 | 添加目录 | 把本地文件夹加入左侧管理列表。 |
@@ -119,11 +119,11 @@ Office 使用应用内的真实空白模板，PDF 和 PNG/JPEG 生成可解码�
 
 有未保存内容时，关闭弹窗、按 Esc/`⌘W`、切换文件、关闭窗口或退出应用都会进入保存确认。取消关闭会保留当前草稿与编辑器状态。文本、CSV、PDF 和图片在外部被修改时会阻止静默覆盖；文件已被删除时保留草稿，通过系统“另存为”选择新目标。Office 的保存与未保存状态由内置 ONLYOFFICE 内核处理。
 
-当前工作树已增加**非 Office 草稿持久化与崩溃恢复（未发布）**：欢迎页或“工作台 → 恢复未保存草稿…”可恢复文本、CSV、PDF 和图片为独立未命名文档，首次保存要求另存。副本保留 30 天，单份正文 256 MiB、已提交副本总量 512 MiB、最多 20 份；清理、临时空间和恢复边界见[审查第 22 节](docs/code-review-and-roadmap.md#22-f3-非-office-草稿持久化与崩溃恢复2026-10-26)。上方构建 8 下载包尚未包含此功能。
+构建14包含**非 Office 草稿持久化与崩溃恢复**：欢迎页或“工作台 → 恢复未保存草稿…”可恢复文本、CSV、PDF 和图片为独立未命名文档，首次保存要求另存。副本保留 30 天，单份正文 256 MiB、已提交副本总量 512 MiB、最多 20 份；清理、临时空间和恢复边界见[审查第 22 节](docs/code-review-and-roadmap.md#22-f3-非-office-草稿持久化与崩溃恢复2026-10-26)。
 
-当前工作树还增加**文件操作进度、取消和撤销（未发布）**：复制、移动与移到废纸篓显示数量/当前文件和失败详情，可取消后续项目、撤销本窗口最近一批成功项。副本撤销移到废纸篓，移动/废纸篓撤销按身份恢复原位且不覆盖冲突；单项系统调用需等待结束。残留处理、跨卷边界及撤销失效条件见[审查第 23 节](docs/code-review-and-roadmap.md#23-f4-文件操作进度取消与撤销2026-10-26)。构建 8 下载包尚未包含此功能。
+构建14包含**文件操作进度、取消和撤销**：复制、移动与移到废纸篓显示数量/当前文件和失败详情，可取消后续项目、撤销本窗口最近一批成功项。副本撤销移到废纸篓，移动/废纸篓撤销按身份恢复原位且不覆盖冲突；单项系统调用需等待结束。残留处理、跨卷边界及撤销失效条件见[审查第 23 节](docs/code-review-and-roadmap.md#23-f4-文件操作进度取消与撤销2026-10-26)。
 
-当前工作树增加**限定目录的递归名称/文本搜索（未发布）**：工具栏“递归搜索”中选择范围，支持取消、大小写和隐藏项选项，可调整依赖/构建目录排除规则；默认跳过文档包、链接和其他卷，文本结果显示首命中行并可定位。扫描/读取有上限，超限或部分失败会说明，不解析 PDF、Office 或图片正文。规则与验收见[审查第 24 节](docs/code-review-and-roadmap.md#24-f5-限定目录的递归名称与内容搜索2026-10-26)。构建 8 下载包尚未包含此功能。
+构建14包含**限定目录的递归名称/文本搜索**：工具栏“递归搜索”中选择范围，支持取消、大小写和隐藏项选项，可调整依赖/构建目录排除规则；默认跳过文档包、链接和其他卷，文本结果显示首命中行并可定位。扫描/读取有上限，超限或部分失败会说明，不解析 PDF、Office 或图片正文。规则与验收见[审查第 24 节](docs/code-review-and-roadmap.md#24-f5-限定目录的递归名称与内容搜索2026-10-26)。
 
 ## 源码结构图
 

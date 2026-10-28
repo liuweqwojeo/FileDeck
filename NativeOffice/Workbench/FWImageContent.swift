@@ -33,6 +33,7 @@ final class FWImageContent: NSViewController, FWNativeContent {
     private var pixelStorageBytes: Int
     private var processing = false
     private let imageView = NSImageView()
+    private let imageScroll = NSScrollView()
     private let status = NSTextField(labelWithString: "")
     private let history: FWMediaHistory
     private var editButtons: [NSButton] = []
@@ -90,7 +91,17 @@ final class FWImageContent: NSViewController, FWNativeContent {
             editButtons.append(button)
             toolbar.addArrangedSubview(button)
         }
-        let scroll = NSScrollView()
+        // NSScrollView 原生捏合会保持手势中心，滚动仅作用于图片文档，不缩放工具栏。
+        let scroll = imageScroll
+        scroll.allowsMagnification = true
+        scroll.minMagnification = 0.1
+        scroll.maxMagnification = 8
+        for (name, selector, key) in [("缩小", #selector(zoomOut), "-"), ("实际大小", #selector(actualSize), "0"), ("放大", #selector(zoomIn), "+")] {
+            let button = NSButton(title: name, target: self, action: selector)
+            button.keyEquivalent = key; button.keyEquivalentModifierMask = .command
+            toolbar.addArrangedSubview(button)
+        }
+        NotificationCenter.default.addObserver(self, selector: #selector(zoomDidChange), name: NSScrollView.didEndLiveMagnifyNotification, object: scroll)
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
@@ -231,6 +242,16 @@ final class FWImageContent: NSViewController, FWNativeContent {
         refreshState()
     }
 
+    @objc private func zoomOut() { zoom(to: imageScroll.magnification / 1.25) }
+    @objc private func zoomIn() { zoom(to: imageScroll.magnification * 1.25) }
+    @objc private func actualSize() { zoom(to: 1) }
+    private func zoom(to scale: CGFloat) {
+        let visible = imageScroll.contentView.bounds
+        imageScroll.setMagnification(scale, centeredAt: NSPoint(x: visible.midX, y: visible.midY))
+        zoomDidChange()
+    }
+    @objc private func zoomDidChange() { refreshState() }
+
     private func refreshImage() {
         let size = NSSize(width: pixels.width, height: pixels.height)
         imageView.image = NSImage(cgImage: pixels, size: size)
@@ -240,7 +261,7 @@ final class FWImageContent: NSViewController, FWNativeContent {
 
     private func refreshState() {
         for button in editButtons { button.isEnabled = state.canEdit && !processing }
-        status.stringValue = "\(pixels.width) × \(pixels.height) 像素 · \(kind.rawValue.uppercased())"
+        status.stringValue = "\(pixels.width) × \(pixels.height) 像素 · \(kind.rawValue.uppercased()) · \(Int(imageScroll.magnification * 100))%"
             + (kind == .heic ? " · 修改后请另存为 PNG/JPEG" : "") + (isBusy ? " · 正在处理…" : "")
         onStateChanged?()
     }

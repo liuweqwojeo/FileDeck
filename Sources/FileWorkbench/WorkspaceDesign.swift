@@ -175,6 +175,290 @@ struct WorkspaceBrowserShortcuts: NSViewRepresentable {
     }
 }
 
+/// 双指轻扫直接跟踪精确滚动的 began/changed/ended，避免本地事件监视器依赖系统翻页动画回调。
+struct WorkspaceSwipeIntent {
+    enum Direction: Equatable { case back, forward }
+    struct Feedback: Equatable {
+        var direction: Direction?
+        var progress: CGFloat = 0
+    }
+    struct Observation {
+        var feedback = Feedback()
+        var consumesEvent = false
+        var navigation: Direction?
+    }
+    private enum Axis { case pending, vertical, horizontal }
+    private var axis = Axis.pending
+    private var horizontal: CGFloat = 0
+    private var vertical: CGFloat = 0
+    private var began = false
+    private var initialDirection: Direction?
+    var isActive: Bool { began }
+
+    mutating func reset() {
+        axis = .pending; horizontal = 0; vertical = 0; began = false; initialDirection = nil
+    }
+
+    mutating func observe(horizontal x: CGFloat, vertical y: CGFloat, phase: NSEvent.Phase,
+                          momentum: NSEvent.Phase, precise: Bool,
+                          canNavigate: (Direction) -> Bool) -> Observation {
+        if phase.contains(.began) { reset(); began = true }
+        guard precise, x.isFinite, y.isFinite else { reset(); return Observation() }
+        if phase.contains(.cancelled) {
+            let consumed = axis == .horizontal
+            reset()
+            return Observation(consumesEvent: consumed)
+        }
+        // 松手后的惯性只延续事件归属，不再次推进历史；新一轮 began 会清除归属。
+        guard momentum.isEmpty else { return Observation(consumesEvent: axis == .horizontal) }
+        guard began else { return Observation() }
+        guard phase.contains(.began) || phase.contains(.changed) || phase.contains(.ended) else { return Observation() }
+        horizontal += x; vertical += y
+        guard horizontal.isFinite, vertical.isFinite else { reset(); return Observation() }
+        if axis == .pending, max(abs(horizontal), abs(vertical)) >= 8 {
+            let direction: Direction = horizontal > 0 ? .back : .forward
+            if abs(horizontal) > abs(vertical) * 1.5, canNavigate(direction) {
+                axis = .horizontal; initialDirection = direction
+            } else { axis = .vertical }
+        }
+        let consumed = axis == .horizontal
+        guard phase.contains(.ended) else {
+            let direction: Direction = horizontal > 0 ? .back : .forward
+            let feedback = consumed && direction == initialDirection
+                ? Feedback(direction: direction, progress: min(1, abs(horizontal) / 60)) : Feedback()
+            return Observation(feedback: feedback, consumesEvent: consumed)
+        }
+        began = false
+        let direction: Direction = horizontal > 0 ? .back : .forward
+        // 60pt 净位移区分轻扫与抖动；松手前折返、斜向滚动和不可用历史不会导航。
+        let accepted = consumed && abs(horizontal) >= 60 && abs(horizontal) > abs(vertical) * 1.5 &&
+            direction == initialDirection && canNavigate(direction)
+        return Observation(consumesEvent: consumed, navigation: accepted ? direction : nil)
+    }
+
+}
+
+/// 只处理浏览区域的原生滚动，不占据命中区域；网页/原生文档与系统 sheet 保留自己的手势。
+struct WorkspaceBrowserNavigationGestures: NSViewRepresentable {
+    var isEnabled: () -> Bool
+    var canNavigate: (WorkspaceSwipeIntent.Direction) -> Bool
+    var navigate: (WorkspaceSwipeIntent.Direction) -> Void
+    var onFeedback: ((WorkspaceSwipeIntent.Feedback) -> Void)? = nil
+    var location: [URL?] = []
+
+    func makeNSView(context: Context) -> GestureProbe { GestureProbe() }
+    func updateNSView(_ view: GestureProbe, context: Context) {
+        view.isEnabled = isEnabled; view.canNavigate = canNavigate; view.navigate = navigate; view.onFeedback = onFeedback
+        view.updateLocation(location)
+        if !isEnabled() { view.cancelGesture() }
+    }
+    static func dismantleNSView(_ view: GestureProbe, coordinator: ()) { view.stop() }
+
+    final class GestureProbe: NSView {
+        var isEnabled: (() -> Bool)?
+        var canNavigate: ((WorkspaceSwipeIntent.Direction) -> Bool)?
+        var navigate: ((WorkspaceSwipeIntent.Direction) -> Void)?
+        var onFeedback: ((WorkspaceSwipeIntent.Feedback) -> Void)?
+        private var feedback = WorkspaceSwipeIntent.Feedback()
+        private var feedbackGeneration: UInt64 = 0
+        private weak var lastEvent: NSEvent?
+        private var lastConsumed = false
+        private var lastTimestamp: TimeInterval = 0
+        private var lastPhase: NSEvent.Phase = []
+        private var scrollResponders: [ObjectIdentifier: ScrollResponder] = [:]
+        private weak var activeScrollView: NSScrollView?
+        private var deferredScrollStart = false
+        // 实时读取系统设置；测试注入隔离值，不写用户的触控板偏好。
+        var scrollSwipeEnabled: () -> Bool = { NSEvent.isSwipeTrackingFromScrollEventsEnabled }
+        private var monitor: Any?
+        private var resignObservers: [NSObjectProtocol] = []
+        private var intent = WorkspaceSwipeIntent()
+        private var location: [URL?] = []
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            stop()
+            guard let window else { return }
+            // 切走窗口/应用时立即废弃半途手势，避免重新激活后的 ended 使用旧位移。
+            for (name, object) in [(NSWindow.didResignKeyNotification, window as AnyObject),
+                                   (NSApplication.didResignActiveNotification, NSApp as AnyObject)] {
+                resignObservers.append(NotificationCenter.default.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.cancelGesture() }
+                })
+            }
+            // 不监听 swipe：离散 swipe 可能来自三指系统手势，不应被文件浏览抢占。
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self else { return event }
+                var dispatched = event
+                if self.deferredScrollStart, event.phase.contains(.changed),
+                   event.scrollingDeltaX == 0, event.scrollingDeltaY == 0 {
+                    _ = self.handle(event)
+                    return self.deferredScrollStart ? nil : event
+                }
+                if self.deferredScrollStart, event.phase.contains(.changed),
+                   event.scrollingDeltaX != 0 || event.scrollingDeltaY != 0 {
+                    self.deferredScrollStart = false
+                    // 把延迟的原生开始阶段附在首个位移上；纵向弹性和惯性仍有完整生命周期。
+                    if let copy = event.cgEvent?.copy() {
+                        copy.setIntegerValueField(.scrollWheelEventScrollPhase, value: 1)
+                        dispatched = NSEvent(cgEvent: copy) ?? event
+                    }
+                }
+                self.prepareScrollResponder(for: dispatched)
+                let routed = self.activeScrollView != nil
+                let consumed = self.handle(dispatched)
+                // 静止 changed 同样没有内容位移；不让它重置原生已经判定的滚动轴。
+                if routed, event.phase.contains(.changed), event.momentumPhase.isEmpty,
+                   event.scrollingDeltaX == 0, event.scrollingDeltaY == 0 { return nil }
+                // 零位移 began 没有滚动内容，却会让 NSScrollView 提前进入纵向内部跟踪，
+                // 吞掉尚未判向的后续事件。留待首个位移交给原生滚动，不修改方向或位移。
+                if routed, event.phase.contains(.began), event.scrollingDeltaX == 0, event.scrollingDeltaY == 0 {
+                    self.deferredScrollStart = true
+                    return nil
+                }
+                if event.phase.contains(.ended) || event.phase.contains(.cancelled) { self.deferredScrollStart = false }
+                // 具体滚动视图必须收到完整阶段，尤其 ended；只在其转发的水平事件上截获。
+                return routed || !consumed ? dispatched : nil
+            }
+        }
+
+        func stop() {
+            if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
+            for responder in scrollResponders.values {
+                if let scroll = responder.scroll, scroll.nextResponder === responder {
+                    scroll.nextResponder = responder.nextResponder
+                }
+            }
+            scrollResponders = [:]
+            lastEvent = nil
+            activeScrollView = nil
+            resignObservers.forEach(NotificationCenter.default.removeObserver)
+            resignObservers = []
+            cancelGesture()
+        }
+
+        func cancelGesture() {
+            intent.reset()
+            activeScrollView = nil
+            deferredScrollStart = false
+            guard feedback != WorkspaceSwipeIntent.Feedback() else { return }
+            feedback = .init(); feedbackGeneration &+= 1
+            let generation = feedbackGeneration
+            // 取消可能来自 SwiftUI 正在更新视图；下一轮清理提示，且不覆盖新一轮手势。
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.feedbackGeneration == generation else { return }
+                self.onFeedback?(.init())
+            }
+        }
+
+        func updateLocation(_ value: [URL?]) {
+            // 按钮/键盘切换目录后，旧的半途手势不能继续作用于新分支。
+            if value != location, intent.isActive { cancelGesture() }
+            location = value
+        }
+
+        private var acceptsNavigation: Bool {
+            guard let window, window.isKeyWindow, window.attachedSheet == nil, NSEvent.pressedMouseButtons == 0,
+                  NSApp.modalWindow == nil, !isHiddenOrHasHiddenAncestor else { return false }
+            return isEnabled?() == true
+        }
+
+        func handle(_ event: NSEvent) -> Bool {
+            // 同一事件可能先经过本地监视器、再由滚动视图转发，不能累计两次位移。
+            if event.type == .scrollWheel, event.timestamp > 0, lastEvent === event,
+               lastTimestamp == event.timestamp, lastPhase == event.phase { return lastConsumed }
+            prepareScrollResponder(for: event)
+            let consumed = process(event)
+            if event.type == .scrollWheel, event.timestamp > 0 {
+                lastEvent = event; lastConsumed = consumed; lastTimestamp = event.timestamp; lastPhase = event.phase
+            }
+            return consumed
+        }
+
+        private func process(_ event: NSEvent) -> Bool {
+            guard event.type == .scrollWheel,
+                  acceptsNavigation, event.window === window,
+                  event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+                  bounds.contains(convert(event.locationInWindow, from: nil)),
+                  !hitsScrollableInput(event) else { cancelGesture(); return false }
+            guard scrollSwipeEnabled() else { cancelGesture(); return false }
+            if event.phase.contains(.ended) || event.phase.contains(.cancelled) { activeScrollView = nil }
+            let observation = intent.observe(horizontal: event.scrollingDeltaX, vertical: event.scrollingDeltaY,
+                                             phase: event.phase, momentum: event.momentumPhase,
+                                             precise: event.hasPreciseScrollingDeltas,
+                                             canNavigate: { self.canNavigate?($0) == true })
+            if observation.feedback != feedback {
+                feedback = observation.feedback; feedbackGeneration &+= 1
+                onFeedback?(feedback)
+            }
+            if let direction = observation.navigation { navigate?(direction) }
+            return observation.consumesEvent
+        }
+
+        private func prepareScrollResponder(for event: NSEvent) {
+            guard event.type == .scrollWheel, event.phase.contains(.began) else { return }
+            activeScrollView = nil
+            guard acceptsNavigation, scrollSwipeEnabled(), event.hasPreciseScrollingDeltas, event.momentumPhase.isEmpty,
+                  event.window === window, bounds.contains(convert(event.locationInWindow, from: nil)),
+                  event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+                  !hitsScrollableInput(event), let content = window?.contentView else { return }
+            scrollResponders = scrollResponders.filter { $0.value.scroll != nil }
+            var hit = content.hitTest(content.convert(event.locationInWindow, from: nil))
+            while let view = hit {
+                if let scroll = view as? NSScrollView {
+                    let key = ObjectIdentifier(scroll)
+                    activeScrollView = scroll
+                    if let existing = scrollResponders[key], scroll.nextResponder === existing { return }
+                    // 弹性滚动可能在 NSScrollView 内部跟踪后续阶段，故在具体滚动视图的
+                    // 原响应者前接入水平转发；纵向滚动、键盘与菜单仍沿原链处理。
+                    let responder = ScrollResponder()
+                    responder.owner = self; responder.scroll = scroll
+                    responder.nextResponder = scroll.nextResponder
+                    scroll.nextResponder = responder
+                    scrollResponders[key] = responder
+                    return
+                }
+                hit = view.superview
+            }
+        }
+
+        private final class ScrollResponder: NSResponder {
+            weak var owner: GestureProbe?
+            weak var scroll: NSScrollView?
+            override func wantsForwardedScrollEvents(for axis: NSEvent.GestureAxis) -> Bool {
+                guard axis == .horizontal, let owner, let scroll, owner.acceptsNavigation, owner.scrollSwipeEnabled(),
+                      (scroll.documentView?.frame.width ?? 0) <= scroll.contentSize.width + 1 else {
+                    return nextResponder?.wantsForwardedScrollEvents(for: axis) ?? false
+                }
+                return owner.canNavigate?(.back) == true || owner.canNavigate?(.forward) == true ||
+                    nextResponder?.wantsForwardedScrollEvents(for: axis) == true
+            }
+            override var undoManager: UndoManager? { nextResponder?.undoManager }
+            override func scrollWheel(with event: NSEvent) {
+                let consumed = owner?.handle(event) == true
+                if !consumed || event.phase.contains(.ended) || event.phase.contains(.cancelled) {
+                    super.scrollWheel(with: event)
+                }
+            }
+        }
+
+        private func hitsScrollableInput(_ event: NSEvent) -> Bool {
+            guard let content = window?.contentView else { return true }
+            var hit = content.hitTest(content.convert(event.locationInWindow, from: nil))
+            while let view = hit {
+                // 普通文件名标签也可能由 NSTextField 承载；仅把可编辑/可选文字留给文字交互。
+                if let field = view as? NSTextField, field.isEditable || field.isSelectable { return true }
+                if let text = view as? NSTextView, text.isEditable || text.isSelectable { return true }
+                if let scroll = view as? NSScrollView, let document = scroll.documentView,
+                   document.frame.width > scroll.contentSize.width + 1 { return true }
+                hit = view.superview
+            }
+            return false
+        }
+    }
+}
+
 /// 仅决定图标外观，不扩大编辑器支持范围；分类使用目录快照和扩展名，不读取文件正文或链接目标。
 struct WorkspaceFileIconDescriptor {
     enum Kind: CaseIterable {

@@ -58,6 +58,113 @@ final class BrowserStoreTests: XCTestCase {
         XCTAssertEqual(store.history, [root, second])
     }
 
+    func testHistoryRestoresMultipleSelectionAndRejectsReplacementFiles() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let child = root.appendingPathComponent("Child", isDirectory: true)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        let first = root.appendingPathComponent("first.txt"), second = root.appendingPathComponent("second.txt")
+        try Data("first".utf8).write(to: first); try Data("second".utf8).write(to: second)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
+        store.openRoot(root, remember: false); try await settled(store)
+        store.setSelection([first, second], primary: second)
+        store.navigate(to: child); try await settled(store)
+        store.goBack(); try await settled(store)
+        XCTAssertEqual(store.selectedURLs, [first, second]); XCTAssertEqual(store.selectedURL, second)
+        store.goForward(); try await settled(store)
+        try FileManager.default.moveItem(at: first, to: child.appendingPathComponent("old.txt"))
+        try Data("replacement".utf8).write(to: first)
+        store.goBack(); try await settled(store)
+        XCTAssertEqual(store.selectedURLs, [second]); XCTAssertEqual(store.selectedURL, second)
+    }
+
+    func testMultipleSiblingAndNestedDirectoriesUseHistoryRatherThanChildOrder() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let a = root.appendingPathComponent("A", isDirectory: true), b = root.appendingPathComponent("B", isDirectory: true)
+        let c = root.appendingPathComponent("C", isDirectory: true), nested = a.appendingPathComponent("Nested", isDirectory: true)
+        for directory in [nested, b, c] { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
+        store.openRoot(root, remember: false); try await settled(store)
+        for directory in [a, b, nested] { store.navigate(to: directory); try await settled(store) }
+        store.goBack(); try await settled(store); XCTAssertEqual(store.currentDirectory, b)
+        store.goBack(); try await settled(store); XCTAssertEqual(store.currentDirectory, a)
+        store.navigate(to: c); try await settled(store)
+        XCTAssertFalse(store.canGoForward); XCTAssertEqual(store.history, [root, a, c])
+    }
+
+    func testGestureNavigationStaysOnParentChainAndClearsForwardOnBranchChange() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let a = root.appendingPathComponent("A", isDirectory: true), b = root.appendingPathComponent("B", isDirectory: true)
+        let c = root.appendingPathComponent("C", isDirectory: true), nested = a.appendingPathComponent("Nested", isDirectory: true)
+        for directory in [nested, b, c] { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) }
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
+        store.openRoot(root, remember: false); try await settled(store)
+        for directory in [a, b, c] { store.navigate(to: directory); try await settled(store) }
+        store.gestureGoBack(); try await settled(store)
+        XCTAssertEqual(store.currentDirectory, root, "同级 C 只能退到父目录，不能跳到 A/B")
+        store.gestureGoBack(); XCTAssertEqual(store.currentDirectory, root)
+        store.gestureGoForward(); try await settled(store); XCTAssertEqual(store.currentDirectory, c)
+        store.navigate(to: nested); try await settled(store)
+        XCTAssertFalse(store.canGestureGoForward)
+        store.gestureGoBack(); try await settled(store); XCTAssertEqual(store.currentDirectory, a)
+        store.gestureGoBack(); try await settled(store); XCTAssertEqual(store.currentDirectory, root)
+        store.gestureGoForward(); try await settled(store); XCTAssertEqual(store.currentDirectory, a)
+        store.gestureGoForward(); try await settled(store); XCTAssertEqual(store.currentDirectory, nested)
+        store.gestureGoBack(); try await settled(store)
+        store.navigate(to: b); try await settled(store)
+        XCTAssertFalse(store.canGestureGoForward)
+        store.gestureGoForward(); XCTAssertEqual(store.currentDirectory, b)
+    }
+
+    func testRepeatedGoUpDuringLoadingPreservesParentReturnChain() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let parent = root.appendingPathComponent("Parent", isDirectory: true)
+        let child = parent.appendingPathComponent("Child", isDirectory: true)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
+        store.openRoot(root, remember: false); try await settled(store)
+        store.navigate(to: child); try await settled(store)
+
+        store.goUp()
+        XCTAssertTrue(store.isLoading)
+        XCTAssertFalse(store.canGoUp)
+        XCTAssertFalse(store.canGestureGoBack)
+        // 不让出主执行器，稳定覆盖第一次加载尚未返回时连续点击/按键的窗口。
+        store.goUp()
+        store.gestureGoBack()
+        XCTAssertEqual(store.currentDirectory, parent)
+        XCTAssertEqual(store.gestureForwardChain.map(\.url), [child])
+        try await settled(store)
+
+        store.goUp(); try await settled(store)
+        XCTAssertEqual(store.currentDirectory, root)
+        XCTAssertFalse(store.canGoUp)
+        XCTAssertTrue(store.canGestureGoForward)
+        store.gestureGoForward(); try await settled(store)
+        XCTAssertEqual(store.currentDirectory, parent)
+        store.gestureGoForward(); try await settled(store)
+        XCTAssertEqual(store.currentDirectory, child)
+    }
+
+    func testGestureForwardRejectsReplacedChildDirectory() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let child = root.appendingPathComponent("Child", isDirectory: true)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
+        store.openRoot(root, remember: false); try await settled(store)
+        store.navigate(to: child); try await settled(store)
+        store.gestureGoBack(); try await settled(store)
+        try FileManager.default.moveItem(at: child, to: root.appendingPathComponent("Old"))
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: false)
+        store.gestureGoForward()
+        XCTAssertEqual(store.currentDirectory, root); XCTAssertFalse(store.canGestureGoForward)
+        XCTAssertNotNil(store.actionError)
+    }
+
     func testFilterClearsHiddenSelection() async throws {
         let root = try makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }

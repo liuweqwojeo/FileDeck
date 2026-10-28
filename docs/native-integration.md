@@ -1,10 +1,10 @@
 # 居中预览与原生编辑集成
 
-更新时间：2026-10-27。适用于锁定的 `desktop-apps` 提交 `8f452c7f703b795dcc09012ba6517df4ca47f9bc`；运行证据见 [弹窗验收](modal-preview-acceptance.md)、[文本性能回归](code-review-and-roadmap.md#17-o2-可见预览合并与版本差量桥接2026-10-26)、[媒体性能回归](code-review-and-roadmap.md#18-o3-图片像素复用后台变换与-pdf-批量高亮2026-10-26)及[目录性能回归](code-review-and-roadmap.md#19-o4-大目录显示快照选择索引与受控枚举2026-10-26)。
+更新时间：2026-10-28。适用于锁定的 `desktop-apps` 提交 `8f452c7f703b795dcc09012ba6517df4ca47f9bc`；运行证据见 [弹窗验收](modal-preview-acceptance.md)、[文本性能回归](code-review-and-roadmap.md#17-o2-可见预览合并与版本差量桥接2026-10-26)、[媒体性能回归](code-review-and-roadmap.md#18-o3-图片像素复用后台变换与-pdf-批量高亮2026-10-26)及[目录性能回归](code-review-and-roadmap.md#19-o4-大目录显示快照选择索引与受控枚举2026-10-26)。
 
 ## 工作台与临时会话
 
-`FWBrowserHost` 常驻一个 SwiftUI `ContentView`，目录树与文件列表始终挂载。`WorkspaceEditorBridge.preview` 传递稳定文件引用、触发来源和可选命中行号；单击仅选中，双击文件、Space/Return 和右键预览进入独立 `FWPreviewModal`。它在原窗口内容上叠加遮罩与 AppKit 对话框，不更换窗口控制器或重建工作台。当前本机安装为 v0.1.2 构建11，安装/源码辅助宿主证据分别见 [实施状态](implementation-status.md) 和 [八项交互修复](interaction-fixes.md)。
+`FWBrowserHost` 常驻一个 SwiftUI `ContentView`，目录树与文件列表始终挂载。`WorkspaceEditorBridge.preview` 传递稳定文件引用、触发来源和可选命中行号；单击仅选中，双击文件、Space/Return 和右键预览进入独立 `FWPreviewModal`。它在原窗口内容上叠加遮罩与 AppKit 对话框，不更换窗口控制器或重建工作台。当前本机安装为 v0.1.2 构建14，16项安装路径手势/按钮、2项目录快捷键以及禁网Office编辑/保存、重开和关闭保护检查已通过；最新状态见 [实施状态](implementation-status.md)。[八项交互修复](interaction-fixes.md) 保留构建11安装及同源码辅助宿主的历史证据。
 
 打开前，`BrowserStore.capturePreviewSnapshot` 保存目录/文件身份、多选、筛选、排序、视图与展开节点；弹窗另外弱引用原响应者及原生滚动容器位置。普通预览默认只读且聚焦中性容器；选区“编辑”/⌘E 对安全文本类型在同一宿主就绪后直接进入源码编辑并聚焦正文。背景不接收输入，可访问性隐藏；正文 Tab/Shift+Tab 缩进，Ctrl+Tab/Shift+Ctrl+Tab 在模态控件中切换焦点，查找/替换输入各自撤销而不改变正文历史。
 
@@ -17,6 +17,18 @@
 整体规则见 [DESIGN.md](../DESIGN.md)，逐项问题、改法与验证见 [交互验收](interaction-verification.md)。顶部精简为导航、当前目录筛选、子目录/内容搜索、视图与工作区菜单；选区条显示预览/编辑/操作，批量操作复用右键菜单捕获的身份与范围。结果面板默认紧凑摘要，展开详情，撤销入口持续可见。侧栏提供添加目录、继续编辑和恢复草稿。
 
 SwiftUI 与 AppKit 工作层跟随系统浅深色；移除窗口强制 Aqua，使用动态语义色。最小工作窗 860×660，⌥⌘S 折叠侧栏并把焦点交给可见筛选框；⌘F 聚焦当前目录筛选，⇧⌘F 打开递归搜索。隐藏的内容面和侧栏同时禁用交互、快捷键与可访问性。浏览快捷键通过 `WorkspaceBrowserShortcuts` 的当前窗口事件分发，`isPresented`/`isPreviewPresented` 排除原生工作层，系统 sheet 直接放行。Office、PDF、图片的实际文档纸张色仍由各内核管理。
+
+## 触控板与原生滚动
+
+以下父子手势、图标捏合和原生编辑缩放控件包含于[构建14](release-build14.md)。
+
+父子链、事件边界、缩放和验收矩阵见 [触控板交互](trackpad-interactions.md)。`WorkspaceBrowserNavigationGestures` 在完整 AppKit/CEF 宿主和独立 SwiftUI 入口中共用本地滚动监视器，只处理所属 key 窗口的浏览区域；不替换 SwiftUI 的滚动容器；在具体滚动视图原响应者前接入水平转发，并保留完整结束阶段，卸载后恢复原链。三指可能产生的离散 `swipe` 不被拦截。
+
+手势复用 `BrowserStore.gestureGoBack/gestureGoForward` 的直接父子链，上级目录按钮/⌘↑ 使用相同返回链；历史按钮仍为 `goBack/goForward`。新分支清空旧的手势前进记录，子目录身份变更后要求显式重新打开。返回目录时按身份恢复选区，不继承同名替换文件的选择。
+
+图标使用 SwiftUI 原生 `MagnifyGesture` 与滚动锚点；图片原生编辑界面使用允许放大的 `NSScrollView`，PDF 原生编辑界面沿用 PDFKit，两者提供缩放按钮和快捷键。普通只读预览继续 Quick Look，控件由系统提供。所有缩放都限制在内容容器内。
+
+接口依据：[NSEvent 滚动阶段](https://developer.apple.com/documentation/appkit/nsevent/phase)、[NSScrollView 缩放](https://developer.apple.com/documentation/appkit/nsscrollview/allowsmagnification)。构建12的受控动画完成回调测试不足以确认物理双指可用；旧结果只保留历史范围，当前以完整宿主、原生事件和实机反馈为准。
 
 ## 大目录显示与读取调度
 

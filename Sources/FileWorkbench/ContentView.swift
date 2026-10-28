@@ -23,6 +23,14 @@ struct ContentView: View {
     @FocusState private var filterFocused: Bool
     @StateObject private var directorySearch = DirectorySearchSession()
     @FocusState private var gridFocused: Bool
+    @AppStorage("FileWorkbench.gridIconSize") private var savedIconSize = 52.0
+    @GestureState private var gridMagnification: CGFloat = 1
+    @GestureState private var gridIsMagnifying = false
+    @State private var showsIconOptions = false
+    @State private var gridScrollAnchor: URL?
+    @State private var navigationFeedback = WorkspaceSwipeIntent.Feedback()
+    private var gridIconSize: CGFloat { CGFloat(min(100, max(36, savedIconSize.isFinite ? savedIconSize * Double(gridMagnification) : 52))) }
+    private var gridCellWidth: CGFloat { gridIconSize + 58 }
 
     init(store: BrowserStore, editor: WorkspaceEditorBridge? = nil) {
         self.store = store
@@ -86,6 +94,13 @@ struct ContentView: View {
             showsDirectorySearch = true; return true
         }
         if key == "s", flags == [.command, .option] { showsSidebar.toggle(); return true }
+        if !showsDirectorySearch, !(event.window?.firstResponder is NSTextView), !(event.window?.firstResponder is NSTextField) {
+            if key == "c", flags == .command, !store.selectedURLs.isEmpty { return store.copySelectedFiles() }
+            if key == "v", flags == [.command, .option], store.currentDirectory != nil { store.pasteFiles(move: true); return true }
+        }
+        if [125, 126].contains(event.keyCode), event.window?.firstResponder is NSTextView { return false }
+        if event.keyCode == 126, flags == .command { store.goUp(); return true }
+        if event.keyCode == 125, flags == [.command, .option] { store.gestureGoForward(); return true }
         if key == "e", flags == .command, !showsDirectorySearch,
            store.selectedURLs.count == 1, let entry = store.selectedEntry, editor.supportsEditing(entry) {
             editEntry(entry); return true
@@ -114,6 +129,26 @@ struct ContentView: View {
                 }
             } preview: {
                 EmptyView()
+            }
+            .background(WorkspaceBrowserNavigationGestures(
+                isEnabled: { store.startupPhase == .ready && store.currentDirectory != nil &&
+                    !showsDirectorySearch && !editor.isPresented && !editor.isPreviewPresented && !gridIsMagnifying },
+                canNavigate: { $0 == .back ? store.canGestureGoBack : store.canGestureGoForward },
+                navigate: { direction in if direction == .back { store.gestureGoBack() } else { store.gestureGoForward() } },
+                onFeedback: { navigationFeedback = $0 },
+                location: [store.rootURL, store.currentDirectory]
+            ))
+            .overlay(alignment: navigationFeedback.direction == .forward ? .trailing : .leading) {
+                if let direction = navigationFeedback.direction, navigationFeedback.progress > 0 {
+                    VStack(spacing: 5) {
+                        Image(systemName: direction == .back ? "arrow.up" : "arrow.down")
+                        Text(direction == .back ? "上一级：" + (store.currentDirectory?.deletingLastPathComponent().lastPathComponent ?? "")
+                             : "返回：" + (store.gestureForwardChain.last?.url.lastPathComponent ?? "子目录"))
+                            .font(.system(size: 10)).lineLimit(1).truncationMode(.middle)
+                        ProgressView(value: navigationFeedback.progress).frame(width: 38)
+                    }.frame(maxWidth: 140).padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                        .padding(12).allowsHitTesting(false).accessibilityHidden(true)
+                }
             }
             Divider()
             statusBar
@@ -177,7 +212,9 @@ struct ContentView: View {
             Button(action: store.goForward) { Image(systemName: "chevron.right") }.disabled(!store.canGoForward)
                 .keyboardShortcut("]", modifiers: .command).help("前进（⌘]）").accessibilityLabel("前进")
             Button(action: store.goUp) { Image(systemName: "arrow.up") }.disabled(!store.canGoUp)
-                .help("上级目录").accessibilityLabel("上级目录")
+                .help("上级目录（⌘↑）").accessibilityLabel("上级目录")
+            Button(action: store.gestureGoForward) { Image(systemName: "arrow.down") }.disabled(!store.canGestureGoForward)
+                .help("返回刚退出的子目录：" + (store.gestureForwardChain.last?.url.lastPathComponent ?? "无") + "（⌥⌘↓）").accessibilityLabel("返回子目录")
             Divider().frame(height: 18)
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(WorkspacePalette.secondary)
@@ -204,6 +241,20 @@ struct ContentView: View {
                 Image(systemName: "list.bullet").tag(false)
                 Image(systemName: "square.grid.2x2").tag(true)
             }.pickerStyle(.segmented).labelsHidden().frame(width: 68)
+            if gridView {
+                Button { showsIconOptions.toggle() } label: {
+                    Label("图标 \(Int(gridIconSize))", systemImage: "arrow.up.left.and.arrow.down.right")
+                }.help("双指捏合调整图标大小，也可在此调整")
+                    .accessibilityIdentifier("grid-icon-size")
+                    .popover(isPresented: $showsIconOptions) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("图标大小：\(Int(gridIconSize))")
+                            Slider(value: Binding(get: { Double(gridIconSize) }, set: { savedIconSize = $0 }), in: 36...100, step: 1)
+                                .accessibilityLabel("图标大小").frame(width: 180)
+                            Button("恢复默认大小") { savedIconSize = 52 }
+                        }.padding(14)
+                    }
+            }
             Menu {
                 Button("添加目录…", action: store.chooseFolder)
                 Button("打开文件…") { if editor.isAvailable { editor.command("open") } else { store.chooseFile() } }
@@ -371,14 +422,13 @@ struct ContentView: View {
                 .contextMenu {
                     NewFileMenu(directory: store.currentDirectory, disabled: !browsable || fileActionsBusy, create: beginCreation)
                     Button("粘贴") { store.pasteFiles() }.disabled(!browsable || store.isFileOperationBusy)
+                    Button("移动到此处") { store.pasteFiles(move: true) }.disabled(!browsable || store.isFileOperationBusy)
                     Button("刷新当前目录", action: store.refresh).disabled(store.currentDirectory == nil)
                 }
                 .modifier(WorkspaceFileDropTarget(store: store, directory: browsable ? store.currentDirectory : nil))
         }.background(WorkspacePalette.surface)
             // 命令仅挂在文件浏览区；搜索框与预览编辑器继续使用各自的文本复制粘贴。
-            .onCopyCommand(perform: store.selectedFileURLs.isEmpty ? nil : {
-                store.selectedFileURLs.map { NSItemProvider(object: $0 as NSURL) }
-            })
+            .onCopyCommand(perform: store.selectedFileURLs.isEmpty ? nil : { store.copyFileItems() })
             .onPasteCommand(of: [.fileURL]) { _ in store.pasteFiles() }
     }
 
@@ -460,6 +510,7 @@ struct ContentView: View {
                     } else {
                         NewFileMenu(directory: store.currentDirectory, disabled: !browsable || fileActionsBusy, create: beginCreation)
                         Button("粘贴") { store.pasteFiles() }.disabled(!browsable || store.isFileOperationBusy)
+                    Button("移动到此处") { store.pasteFiles(move: true) }.disabled(!browsable || store.isFileOperationBusy)
                     }
                 } primaryAction: { urls in
                     if let entry = displayedEntries.first(where: { urls.contains($0.url) }) { activate(entry) }
@@ -481,12 +532,12 @@ struct ContentView: View {
         ScrollViewReader { scroll in
             GeometryReader { geometry in
                 ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 16)], spacing: 16) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: gridCellWidth), spacing: 16)], spacing: 16) {
                         ForEach(displayedEntries) { entry in
                             VStack(spacing: 10) {
-                                WorkspaceFileIcon(entry: entry, size: 52)
+                                WorkspaceFileIcon(entry: entry, size: gridIconSize)
                                 Text(entry.name).font(.system(size: 12)).lineLimit(2).multilineTextAlignment(.center)
-                            }.frame(maxWidth: .infinity).frame(height: 112)
+                            }.frame(maxWidth: .infinity).frame(height: gridIconSize + 60)
                                 .background(store.selectedURLs.contains(entry.url) ? WorkspacePalette.accent.opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: 8))
                                 .overlay {
                                     RoundedRectangle(cornerRadius: 8)
@@ -508,13 +559,19 @@ struct ContentView: View {
                                 .modifier(WorkspaceFileDropTarget(store: store, directory: entry.isBrowsableDirectory ? entry.url : nil))
                                 .id(entry.url)
                         }
-                    }.padding(20)
+                    }.scrollTargetLayout().padding(20)
                 }
+                .scrollPosition(id: $gridScrollAnchor, anchor: .center)
                 .focusable()
                 .focused($gridFocused)
                 .accessibilityLabel("文件网格")
+                // 仅改变图标网格的尺寸；原生滚动、点击、拖动与外层窗口布局各自保留。
+                .simultaneousGesture(MagnifyGesture()
+                    .updating($gridMagnification) { value, state, _ in state = value.magnification }
+                    .updating($gridIsMagnifying) { _, state, _ in state = true }
+                    .onEnded { value in savedIconSize = min(100, max(36, savedIconSize * Double(value.magnification))) })
                 .onKeyPress(keys: [.upArrow, .downArrow, .leftArrow, .rightArrow, .space, .return, "a"], phases: [.down, .repeat]) { press in
-                    handleGridKey(press, columns: max(1, Int((geometry.size.width - 24) / 126)), scroll: scroll)
+                    handleGridKey(press, columns: max(1, Int((geometry.size.width - 24) / (gridCellWidth + 16))), scroll: scroll)
                 }
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -706,6 +763,8 @@ struct ContentView: View {
         // 所有批量动作使用打开菜单时捕获的同一组选项，不能在执行时重新读取变化后的选区。
         Button(multiple ? "复制（\(urls.count) 个项目）" : "复制") { store.copyFiles(urls) }
         Button("粘贴") { store.pasteFiles(into: !multiple && entry.isBrowsableDirectory ? entry.url : store.currentDirectory) }
+            .disabled(store.isFileOperationBusy)
+        Button("移动到此处（⌥⌘V）") { store.pasteFiles(into: !multiple && entry.isBrowsableDirectory ? entry.url : store.currentDirectory, move: true) }
             .disabled(store.isFileOperationBusy)
         Button(multiple ? "复制路径（\(urls.count) 个项目）" : "复制路径") {
             NSPasteboard.general.clearContents()
@@ -974,25 +1033,33 @@ enum WorkspaceFileDrag {
 }
 
 /// 目录行独立命中拖放，避免把落在子目录上的文件复制到列表当前目录。
+private enum WorkspaceDropFeedback {
+    case idle, copy, move, forbidden
+}
+
 struct WorkspaceFileDropTarget: ViewModifier {
     @ObservedObject var store: BrowserStore
     let directory: URL?
-    @State private var targeted = false
+    @State private var feedback = WorkspaceDropFeedback.idle
 
     @ViewBuilder
     func body(content: Content) -> some View {
-        if directory != nil {
+        if let directory {
             content
-                .overlay {
-                    if targeted {
+                .overlay(alignment: .bottomLeading) {
+                    if feedback != .idle {
+                        let invalid = feedback == .forbidden
                         RoundedRectangle(cornerRadius: 6)
-                            .stroke(WorkspacePalette.accent, lineWidth: 2)
-                            .background(WorkspacePalette.accent.opacity(0.08))
-                            .allowsHitTesting(false)
+                            .stroke(invalid ? Color.red : WorkspacePalette.accent, lineWidth: 2)
+                            .background((invalid ? Color.red : WorkspacePalette.accent).opacity(0.08)).allowsHitTesting(false)
+                        Label((invalid ? "不能放入：" : feedback == .copy ? "复制到：" : "移动到：") + directory.lastPathComponent,
+                              systemImage: invalid ? "nosign" : feedback == .copy ? "doc.on.doc" : "folder")
+                            .font(.system(size: 10)).lineLimit(1).padding(5)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 4)).padding(3).allowsHitTesting(false)
                     }
                 }
                 .onDrop(of: [WorkspaceFileDrag.contentType, .fileURL],
-                        delegate: FileDropDelegate(store: store, directory: directory, targeted: $targeted))
+                        delegate: FileDropDelegate(store: store, directory: directory, feedback: $feedback))
         } else { content }
     }
 }
@@ -1001,29 +1068,35 @@ struct WorkspaceFileDropTarget: ViewModifier {
 private struct FileDropDelegate: DropDelegate {
     let store: BrowserStore
     let directory: URL?
-    @Binding var targeted: Bool
+    @Binding var feedback: WorkspaceDropFeedback
 
     private func isInternal(_ info: DropInfo) -> Bool {
         info.hasItemsConforming(to: [WorkspaceFileDrag.type])
     }
 
     func validateDrop(info: DropInfo) -> Bool {
+        // 保留检查无效目标的机会，由 forbidden proposal 拒绝实际落盘，同时显示原因提示。
+        directory != nil && info.hasItemsConforming(to: [WorkspaceFileDrag.type, UTType.fileURL.identifier])
+    }
+
+    private func validDestination(_ info: DropInfo) -> Bool {
         guard let directory, !store.isFileOperationBusy else { return false }
         return !isInternal(info) || store.canDropActiveDrag(into: directory)
     }
 
-    func dropEntered(info: DropInfo) { targeted = validateDrop(info: info) }
-    func dropExited(info: DropInfo) { targeted = false }
+    func dropEntered(info: DropInfo) { _ = dropUpdated(info: info) }
+    func dropExited(info: DropInfo) { feedback = .idle }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        guard validateDrop(info: info) else { targeted = false; return DropProposal(operation: .forbidden) }
-        targeted = true
-        return DropProposal(operation: isInternal(info) && !NSEvent.modifierFlags.contains(.option) ? .move : .copy)
+        guard validDestination(info) else { feedback = .forbidden; return DropProposal(operation: .forbidden) }
+        let moving = isInternal(info) && !NSEvent.modifierFlags.contains(.option)
+        feedback = moving ? .move : .copy
+        return DropProposal(operation: moving ? .move : .copy)
     }
 
     func performDrop(info: DropInfo) -> Bool {
-        targeted = false
-        guard validateDrop(info: info), let directory else { return false }
+        feedback = .idle
+        guard validDestination(info), let directory else { return false }
         let copy = NSEvent.modifierFlags.contains(.option)
         if isInternal(info), let provider = info.itemProviders(for: [WorkspaceFileDrag.type])
             .first(where: { $0.hasItemConformingToTypeIdentifier(WorkspaceFileDrag.type) }) {

@@ -283,6 +283,48 @@ final class FileDragDropTests: XCTestCase {
         }
     }
 
+    func testKeyboardMoveUsesFrozenClipboardAndCanUndo() async throws {
+        try await fixture { root, target, store in
+            let source = root.appendingPathComponent("move.txt")
+            try Data("keep".utf8).write(to: source)
+            store.refresh(); try await self.settled(store)
+            let folder = root.appendingPathComponent("Folder", isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+            try Data("nested".utf8).write(to: folder.appendingPathComponent("inside.txt"))
+            store.refresh(); try await self.settled(store)
+            store.setSelection([source, folder], primary: source)
+            let board = NSPasteboard(name: NSPasteboard.Name("FileDeck-move-" + UUID().uuidString))
+            defer { board.releaseGlobally() }
+            XCTAssertTrue(store.copySelectedFiles(to: board))
+            store.pasteFiles(from: board, into: target, move: true)
+            try await self.settled(store)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+            XCTAssertEqual(try String(contentsOf: target.appendingPathComponent("move.txt")), "keep")
+            XCTAssertEqual(try String(contentsOf: target.appendingPathComponent("Folder/inside.txt")), "nested")
+            await store.undoLastFileOperation(); try await self.settled(store)
+            XCTAssertEqual(try String(contentsOf: source), "keep")
+            XCTAssertEqual(try String(contentsOf: folder.appendingPathComponent("inside.txt")), "nested")
+        }
+    }
+
+    func testKeyboardMoveFailurePreservesReplacementAndConflictingTarget() async throws {
+        try await fixture { root, target, store in
+            let source = root.appendingPathComponent("move.txt"), destination = target.appendingPathComponent("move.txt")
+            try Data("old".utf8).write(to: source); try Data("target".utf8).write(to: destination)
+            store.refresh(); try await self.settled(store)
+            let board = NSPasteboard(name: NSPasteboard.Name("FileDeck-move-" + UUID().uuidString))
+            defer { board.releaseGlobally() }
+            XCTAssertTrue(store.copyFiles([source], to: board))
+            store.pasteFiles(from: board, into: target, move: true); try await self.settled(store)
+            XCTAssertEqual(try String(contentsOf: source), "old"); XCTAssertEqual(try String(contentsOf: destination), "target")
+            try FileManager.default.moveItem(at: source, to: root.appendingPathComponent("old.txt"))
+            try Data("replacement".utf8).write(to: source)
+            store.pasteFiles(from: board, into: target, move: true); try await self.settled(store)
+            XCTAssertEqual(try String(contentsOf: source), "replacement"); XCTAssertEqual(try String(contentsOf: destination), "target")
+            XCTAssertNotNil(store.actionError)
+        }
+    }
+
     private func fixture(_ run: (URL, URL, BrowserStore) async throws -> Void) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("FileDragDrop-\(UUID().uuidString)", isDirectory: true)
             .standardizedFileURL.resolvingSymlinksInPath()
