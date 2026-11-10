@@ -117,6 +117,26 @@ final class WorkspaceStateTests: XCTestCase {
         XCTAssertEqual(relaunched.managedRoots, [root, other])
     }
 
+    func testExplicitOpenWhileBookmarksRestoreKeepsNewNavigation() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let other = root.appendingPathComponent("Other", isDirectory: true)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        let (defaults, name) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let first = BrowserStore(observesExternalChanges: false, defaults: defaults)
+        first.openRoot(root)
+        try await settled(first)
+        let restored = BrowserStore(observesExternalChanges: false, defaults: defaults)
+        restored.skipWelcome()
+        restored.openRoot(other)
+        XCTAssertTrue(restored.isLoading)
+        try await settled(restored)
+        XCTAssertEqual(restored.currentDirectory, other)
+        XCTAssertEqual(restored.rootURL, other)
+        XCTAssertEqual(restored.managedRoots, [root, other])
+    }
+
     func testCommandLineOpenBypassesWelcomeWithoutChangingRememberedWorkspace() async throws {
         let root = try makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -163,6 +183,7 @@ final class WorkspaceStateTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: name) }
         let store = BrowserStore(observesExternalChanges: false, defaults: defaults)
         store.openRoot(root)
+        try await waitUntil { store.managedRoots.contains(root) }
         store.removeManagedRoot(root)
         try await Task.sleep(nanoseconds: 80_000_000)
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
@@ -288,6 +309,7 @@ final class WorkspaceStateTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: name) }
         let store = BrowserStore(observesExternalChanges: false, defaults: defaults)
         store.openRoot(root)
+        try await waitUntil { store.managedRoots.contains(root) }
         store.selectedURL = file
         store.clearCurrentDirectory()
         try await Task.sleep(nanoseconds: 80_000_000)
@@ -329,6 +351,7 @@ final class WorkspaceStateTests: XCTestCase {
         for folder in [first, second, third] { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }
         let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
         store.openQuickLocation(first)
+        try await settled(store)
         store.openQuickLocation(second)
         try await settled(store)
         XCTAssertTrue(store.canGoBack)
@@ -365,7 +388,8 @@ final class WorkspaceStateTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: duplicate), "source")
         XCTAssertEqual(try String(contentsOf: target.appendingPathComponent("new.txt")), "new")
         XCTAssertTrue(FileManager.default.fileExists(atPath: new.path))
-        XCTAssertNotNil(store.actionError)
+        XCTAssertNil(store.actionError)
+        XCTAssertEqual(store.fileOperationFailureURLs, [duplicate])
         XCTAssertEqual(Set(store.entries.map(\.name)), ["exists.txt", "new.txt"])
     }
 
@@ -382,7 +406,8 @@ final class WorkspaceStateTests: XCTestCase {
         try await waitUntil { !store.isImporting }
         XCTAssertNil(store.currentDirectory)
         XCTAssertTrue(store.entries.isEmpty)
-        XCTAssertNotNil(store.actionError)
+        XCTAssertNil(store.actionError)
+        XCTAssertEqual(store.fileOperationFailureURLs, [root, target])
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: target.path), [])
     }
 

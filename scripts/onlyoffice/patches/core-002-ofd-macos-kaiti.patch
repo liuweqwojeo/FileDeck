@@ -1,0 +1,16 @@
+--- a/OFDFile/src/Types/Font.cpp
++++ b/OFDFile/src/Types/Font.cpp
+@@ -106,6 +106,13 @@
+ 	pRenderer->put_FontStyle(nFontStyle);
+ 	pRenderer->put_FontName(m_wsFontName);
+ 
++#if defined(_MAC)
++	// KaiTi is not installed on every Mac; keep invoice labels readable with Songti SC.
++	// Keep embedded font files authoritative so glyph-indexed text is unchanged.
++	if (m_wsFilePath.empty() && (L"楷体" == m_wsFontName || L"KaiTi" == m_wsFontName))
++		pRenderer->put_FontName(L"Songti SC");
++#endif
++
+ 	if (!m_wsFilePath.empty())
+ 		pRenderer->put_FontPath(m_wsFilePath);
+ }

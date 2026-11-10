@@ -20,11 +20,13 @@ protocol FWNativeContent: DocumentSession {
     func restoreInteraction() async
     func dispose()
     var recoveryCapture: DraftRecoveryCapture? { get }
+    var recoveryRevision: UInt64 { get }
 }
 
 extension FWNativeContent {
     // 未实现的命令默认不可用，不能仅因标签存在就把空实现显示为可点击菜单。
     var recoveryCapture: DraftRecoveryCapture? { nil }
+    var recoveryRevision: UInt64 { 0 }
     var canFind: Bool { false }
     var canUndo: Bool { false }
     var canRedo: Bool { false }
@@ -47,6 +49,13 @@ final class FWDraftCheckpoint {
     private weak var content: (any FWNativeContent)?
     private let original: DraftRecoveryHeader?
     private var generation: UInt64 = 0
+    private struct RecoveryState: Equatable {
+        let revision: UInt64
+        let modified: Bool
+        let path: URL?
+        let kind: WorkbenchFileKind
+    }
+    private var observedState: RecoveryState?
     private var debounce: Task<Void, Never>?
     private var maximumDelay: Task<Void, Never>?
     private var finished = false
@@ -65,6 +74,12 @@ final class FWDraftCheckpoint {
     deinit { debounce?.cancel(); maximumDelay?.cancel() }
     func changed() {
         guard !finished, let content else { return }
+        let state = RecoveryState(revision: content.recoveryRevision, modified: content.isModified,
+                                  path: content.path, kind: content.kind)
+        // 缩放、选格、忙闲等展示变化不能让同一份未保存正文再次序列化并 fsync。
+        // 保存变干净和另存路径变化仍参与门禁，确保清理及恢复头同步。
+        guard state != observedState else { return }
+        observedState = state
         generation &+= 1
         debounce?.cancel()
         if !content.isModified {

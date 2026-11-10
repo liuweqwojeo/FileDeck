@@ -12,6 +12,7 @@ struct TextPreviewDocument: Sendable {
 enum PreparedFilePreview: Sendable {
     case text(TextPreviewDocument)
     case media
+    case ofd
     case quickLook
 }
 
@@ -110,6 +111,8 @@ enum TextPreviewLoader {
             let handle = try FileHandle(forReadingFrom: resolvedURL)
             defer { try? handle.close() }
             try Task.checkCancellation()
+            // OFD 使用完整应用自带的转换器，不能交给通常没有 OFD 扩展的系统 Quick Look。
+            if url.pathExtension.lowercased() == "ofd" { return .success(.ofd) }
             guard isTextFile(url) else {
                 // 播放列表可能引用网络或授权范围以外的文件，不交给本地媒体播放器自动解析。
                 let mediaExtensions: Set<String> = ["mp4", "m4v", "mov", "mp3", "m4a", "aac", "wav", "aif", "aiff", "caf", "flac"]

@@ -83,11 +83,12 @@ enum FileSystem {
         .isPackageKey,
         .isSymbolicLinkKey,
         .fileSizeKey,
-        .contentModificationDateKey
+        .contentModificationDateKey,
+        .typeIdentifierKey
     ]
 
     /// 仅读取当前一层。调用方应在后台任务执行，并将权限、文件消失等错误展示给用户。
-    static func entries(at url: URL, showHidden: Bool) throws -> [FileEntry] {
+    static func entries(at url: URL, showHidden: Bool, foldersOnly: Bool = false) throws -> [FileEntry] {
         let directoryURL = url.standardizedFileURL
         guard directoryURL.isFileURL else {
             throw FileSystemError.notBrowsableDirectory(directoryURL)
@@ -102,26 +103,31 @@ enum FileSystem {
             throw FileSystemError.notBrowsableDirectory(directoryURL)
         }
 
+        let keys: Set<URLResourceKey> = foldersOnly
+            ? [.isDirectoryKey, .isPackageKey, .isSymbolicLinkKey] : resourceKeys
         let options: FileManager.DirectoryEnumerationOptions = showHidden ? [] : [.skipsHiddenFiles]
         let urls = try FileManager.default.contentsOfDirectory(
             at: directoryURL,
-            includingPropertiesForKeys: Array(resourceKeys),
+            includingPropertiesForKeys: Array(keys),
             options: options
         )
 
         // 任一读取失败都向上传递，避免把权限错误伪装成空目录或不完整的成功结果。
-        let entries = try urls.map { childURL in
-            let values = try childURL.resourceValues(forKeys: resourceKeys)
+        let entries = try urls.compactMap { childURL -> FileEntry? in
+            let values = try resourceValues(for: childURL, keys: keys)
             let isDirectory = values.isDirectory == true
+            let isPackage = isPackageDirectory(childURL, values: values)
+            // 树分支只需要目录身份；跳过普通文件的大小、时间、类型和 lstat。
+            if foldersOnly && (!isDirectory || isPackage || values.isSymbolicLink == true) { return nil }
             return FileEntry(
                 url: childURL.standardizedFileURL,
                 name: childURL.lastPathComponent,
                 isDirectory: isDirectory,
-                isPackage: isPackageDirectory(childURL, values: values),
+                isPackage: isPackage,
                 isSymbolicLink: values.isSymbolicLink == true,
                 size: isDirectory ? nil : values.fileSize.map(Int64.init),
                 modifiedAt: values.contentModificationDate,
-                typeIdentifier: try typeIdentifier(for: childURL),
+                typeIdentifier: values.typeIdentifier,
                 identity: try identity(at: childURL)
             )
         }
@@ -140,7 +146,7 @@ enum FileSystem {
     }
 
     static func folders(at url: URL, showHidden: Bool) throws -> [FileEntry] {
-        try entries(at: url, showHidden: showHidden).filter(\.isBrowsableDirectory)
+        try entries(at: url, showHidden: showHidden, foldersOnly: true)
     }
 
     static func isPackageDirectory(_ url: URL, values: URLResourceValues) -> Bool {
@@ -148,20 +154,40 @@ enum FileSystem {
         values.isPackage == true || (values.isDirectory == true && url.pathExtension.lowercased() == "rtfd")
     }
 
-    private static func typeIdentifier(for url: URL) throws -> String? {
-        do {
-            return try url.resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier
-        } catch {
+    /// 已完成目录类型校验的快照读取，仅探测首个项目，不为判断空目录构造完整条目。
+    static func hasEntries(at url: URL) throws -> Bool {
+        let descriptor = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        guard let stream = fdopendir(descriptor) else {
+            let code = errno; close(descriptor)
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+        }
+        defer { closedir(stream) }
+        while true {
+            errno = 0
+            guard let entry = readdir(stream) else {
+                guard errno == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+                return false
+            }
+            let name = withUnsafeBytes(of: entry.pointee.d_name) { Array($0.prefix(Int(entry.pointee.d_namlen))) }
+            if name != [46] && name != [46, 46] { return true }
+        }
+    }
+
+    private static func resourceValues(for url: URL, keys: Set<URLResourceKey>) throws -> URLResourceValues {
+        do { return try url.resourceValues(forKeys: keys) }
+        catch {
             let nsError = error as NSError
             let serviceError = (nsError.userInfo[NSUnderlyingErrorKey] as? NSError) ?? nsError
-            // LaunchServices 不可用时仅降级可选类型信息；读目录、权限和文件属性错误仍然抛出。
-            // -10813 是 kLSDataUnavailableErr，常见于不提供系统类型服务的测试环境。
-            if serviceError.domain == NSOSStatusErrorDomain, serviceError.code == -10813 {
-                return nil
+            // 类型信息随基础元数据预取；LaunchServices 不可用时仅降级可选类型。
+            if keys.contains(.typeIdentifierKey), serviceError.domain == NSOSStatusErrorDomain,
+               serviceError.code == -10813 {
+                return try url.resourceValues(forKeys: keys.subtracting([.typeIdentifierKey]))
             }
             throw error
         }
     }
+
 }
 
 extension FileEntry {

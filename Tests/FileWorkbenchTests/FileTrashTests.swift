@@ -85,10 +85,12 @@ final class FileTrashTests: XCTestCase {
             XCTAssertEqual(store.selectedURLs, [rows[1].url])
             XCTAssertEqual(store.selectedURL, rows[1].url)
             XCTAssertEqual(try String(contentsOf: rows[1].url), "b.txt")
-            let summary = try XCTUnwrap(store.actionError)
-            XCTAssertTrue(summary.contains("2 个项目移到废纸篓，1 个项目未完成（共 3 个）"))
+            let summary = try XCTUnwrap(store.fileOperationSummary)
+            XCTAssertTrue(summary.contains("成功 2，失败 1，未执行 0，共 3 项"))
             XCTAssertTrue(summary.contains("b.txt"))
             XCTAssertTrue(summary.contains("测试拒绝"))
+            XCTAssertNil(store.actionError, "批量失败统一在结果区显示，不再重复弹窗")
+            XCTAssertEqual(store.fileOperationFailureURLs, [rows[1].url])
         }
     }
 
@@ -243,12 +245,14 @@ final class FileTrashTests: XCTestCase {
             XCTAssertEqual(first?.failures.count, 3)
             XCTAssertFalse(store.isFileOperationBusy)
             XCTAssertEqual(store.selectedURLs, Set(rows.map(\.url)))
-            XCTAssertTrue(try XCTUnwrap(store.actionError).contains("0 个项目移到废纸篓，3 个项目未完成"))
+            XCTAssertTrue(try XCTUnwrap(store.fileOperationSummary).contains("成功 0，失败 3"))
+            XCTAssertEqual(store.fileOperationFailureURLs, rows.map(\.url))
             let retry = TrashProbe(destination)
             let second = await store.trashFiles(store.fileActionEntries(for: rows[0]), using: { try retry.trash($0) })
             try await settled(store)
             XCTAssertEqual(second?.succeeded.count, 3)
             XCTAssertNil(store.actionError)
+            XCTAssertTrue(store.fileOperationFailureURLs.isEmpty)
             XCTAssertTrue(store.selectedURLs.isEmpty)
         }
     }

@@ -630,3 +630,82 @@ private struct WorkspaceFilePageShape: Shape {
         }
     }
 }
+
+/// 探针采用与 SwiftUI DropInfo 相同的向下坐标，仅用于把拖动位置转换到原生滚动视图。
+@MainActor
+final class WorkspaceDropGeometry: ObservableObject { weak var view: NSView? }
+struct WorkspaceDropGeometryProbe: NSViewRepresentable {
+    let geometry: WorkspaceDropGeometry
+    final class Probe: NSView {
+        override var isFlipped: Bool { true }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+    func makeNSView(context: Context) -> NSView { let view = Probe(); geometry.view = view; return view }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+/// 每个浏览窗口只保留一个拖动辅助任务；离开、落下或松手即清理，不修改文件操作令牌。
+@MainActor
+final class WorkspaceDragAssistance: ObservableObject {
+    private weak var geometry: WorkspaceDropGeometry?
+    private weak var scroll: NSScrollView?
+    private var point = NSPoint.zero
+    private var entered = Date()
+    private var opened = false
+    private var springAction: (() -> Void)?
+    private var task: Task<Void, Never>?
+    func update(_ geometry: WorkspaceDropGeometry, location: CGPoint, springAction: (() -> Void)?) {
+        guard let view = geometry.view, view.window?.attachedSheet == nil else { return }
+        let changedTarget = self.geometry !== geometry
+        if changedTarget { entered = Date(); opened = false }
+        self.geometry = geometry; point = view.convert(location, to: nil); self.springAction = springAction
+        let scrollContainsPoint = scroll.map { $0.window === view.window && $0.bounds.contains($0.convert(point, from: nil)) } ?? false
+        if changedTarget || !scrollContainsPoint {
+            scroll = view.enclosingScrollView
+            var parent: NSView? = view.superview
+            while scroll == nil, let candidate = parent {
+                scroll = findScroll(in: candidate, point: point); parent = candidate.superview
+            }
+        }
+        if task == nil {
+            task = Task { @MainActor [weak self] in
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
+                    guard let self else { return }
+                    guard NSEvent.pressedMouseButtons != 0, self.geometry?.view?.window != nil else { self.stop(); return }
+                    self.tick()
+                }
+            }
+        }
+    }
+    private func findScroll(in view: NSView, point: NSPoint) -> NSScrollView? {
+        if let scroll = view as? NSScrollView, !scroll.isHiddenOrHasHiddenAncestor,
+           scroll.bounds.contains(scroll.convert(point, from: nil)) { return scroll }
+        for child in view.subviews { if let found = findScroll(in: child, point: point) { return found } }
+        return nil
+    }
+    func tick() {
+        guard let view = geometry?.view, view.window?.attachedSheet == nil else { stop(); return }
+        var scrolling = false
+        if let scroll, let document = scroll.documentView {
+            let location = document.convert(point, from: nil), visible = document.visibleRect
+            var origin = scroll.contentView.bounds.origin
+            // 24 pt 边缘区域以小步持续滚动；坐标沿文档本身处理，兼容 List 与 SwiftUI ScrollView。
+            if location.y < visible.minY + 24 { origin.y -= 12 }
+            else if location.y > visible.maxY - 24 { origin.y += 12 }
+            if location.x < visible.minX + 24 { origin.x -= 12 }
+            else if location.x > visible.maxX - 24 { origin.x += 12 }
+            origin.x = max(document.bounds.minX, min(origin.x, max(document.bounds.minX, document.bounds.maxX - visible.width)))
+            origin.y = max(document.bounds.minY, min(origin.y, max(document.bounds.minY, document.bounds.maxY - visible.height)))
+            scrolling = origin != scroll.contentView.bounds.origin
+            if scrolling { scroll.contentView.scroll(to: origin); scroll.reflectScrolledClipView(scroll.contentView) }
+        }
+        // 悬停 650 ms 后展开，滚动导致目标离开鼠标时不能打开旧行。
+        if !opened, !scrolling, Date().timeIntervalSince(entered) >= 0.65,
+           view.bounds.contains(view.convert(point, from: nil)) {
+            opened = true; springAction?()
+        }
+    }
+    func exit(_ geometry: WorkspaceDropGeometry) { if self.geometry === geometry { stop() } }
+    func stop() { task?.cancel(); task = nil; geometry = nil; scroll = nil; springAction = nil }
+}

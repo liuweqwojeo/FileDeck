@@ -75,30 +75,22 @@ static void FWInvalidConfiguration(NSString *reason) {
 }
 
 #if FW_WORKBENCH_ENABLED
-// 校验真实视图树，避免旧版“浏览栏与编辑器并列”布局也误报为浏览页面内编辑。
-static FWBrowserHost *FWEmbeddedBrowser(ASCCommonViewController *controller) {
-    NSWindow *window = controller.view.window;
-    if (!window) return nil;
-    for (NSViewController *child in controller.childViewControllers) {
-        if ([child isKindOfClass:FWBrowserHost.class] && child.view.window == window &&
-            [controller.tabView isDescendantOf:child.view]) return (FWBrowserHost *)child;
-    }
-    return nil;
-}
-
-static BOOL FWEditorIsEmbedded(ASCCommonViewController *controller, NSView *editor) {
-    FWBrowserHost *browser = FWEmbeddedBrowser(controller);
-    return browser && editor.window == browser.view.window &&
-        [editor isDescendantOf:controller.tabView];
-}
-
-// 旧标签容器已经卸载后，现代预览仍属于原来的浏览器和窗口，不能再依赖 tabView 的祖先关系。
+// 工作层覆盖整个窗口，查找所属浏览控制器不能再依赖标签容器位于浏览页内部。
 static FWBrowserHost *FWBrowserForWindow(ASCCommonViewController *controller, NSWindow *window) {
     if (!window || controller.view.window != window) return nil;
     for (NSViewController *child in controller.childViewControllers) {
         if ([child isKindOfClass:FWBrowserHost.class] && child.view.window == window) return (FWBrowserHost *)child;
     }
     return nil;
+}
+
+// 仍要求同一原生标签容器、当前工作层和真实可见性，不能把旁置或隐藏的编辑器计为通过。
+static BOOL FWEditorIsEmbedded(ASCCommonViewController *controller, NSView *editor) {
+    NSWindow *window = controller.view.window;
+    FWBrowserHost *browser = FWBrowserForWindow(controller, window);
+    return browser && browser.hasAnyPreview && editor.window == window &&
+        [editor isDescendantOf:controller.tabView] &&
+        [controller.tabView isDescendantOf:window.contentView] && !editor.isHiddenOrHasHiddenAncestor;
 }
 
 // 仅从本次验收主窗口当前附着的 sheet 向下查找，绝不扫描其他窗口或点击全局同名按钮。
@@ -111,6 +103,22 @@ static NSButton *FWModalSheetButton(NSView *view, NSString *title) {
     for (NSView *child in view.subviews) {
         NSButton *button = FWModalSheetButton(child, title);
         if (button) return button;
+    }
+    return nil;
+}
+
+// 保存返回已移入工作层更多菜单；仍从本窗口实际可用的菜单项分发，不能绕过 UI 命令路由。
+static NSMenuItem *FWPreviewMenuItem(NSView *view, NSString *identifier) {
+    if (!view || view.hidden) return nil;
+    if ([view isKindOfClass:NSPopUpButton.class]) {
+        NSPopUpButton *button = (NSPopUpButton *)view;
+        for (NSMenuItem *item in button.itemArray) {
+            if (button.enabled && item.enabled && !item.hidden && [item.identifier isEqualToString:identifier]) return item;
+        }
+    }
+    for (NSView *child in view.subviews) {
+        NSMenuItem *item = FWPreviewMenuItem(child, identifier);
+        if (item) return item;
     }
     return nil;
 }
@@ -685,10 +693,10 @@ static void FWCollectWebViews(NSView *view, NSMutableArray<WKWebView *> *editors
         [self.controller.tabsControl selectTab:textTab];
     } else if ([self.phase isEqual:@"mixed-text-returning"]) {
         if (self.controller.tabsControl.selectedTab != textTab || textHost.busy) return;
-        NSButton *saveReturn = FWModalSheetButton(self.controller.view, @"保存并返回");
+        NSMenuItem *saveReturn = FWPreviewMenuItem(self.controller.view, @"FileDeck.preview.save-and-return");
         if (!saveReturn) return;
         self.phase = @"mixed-text-closing";
-        [saveReturn performClick:nil];
+        [saveReturn.menu performActionForItemAtIndex:[saveReturn.menu indexOfItem:saveReturn]];
     } else if ([self.phase isEqual:@"mixed-text-closing"]) {
         if (textTab) return;
         self.workbenchResult[@"nativeCloseVerified"] = @YES;
@@ -715,9 +723,9 @@ static void FWCollectWebViews(NSView *view, NSMutableArray<WKWebView *> *editors
         self.workbenchResult[@"officeRetainedUnsavedChanges"] = @YES;
         self.workbenchResult[@"passed"] = @YES;
         self.phase = @"saving";
-        NSButton *saveReturn = FWModalSheetButton(self.controller.view, @"保存并返回");
+        NSMenuItem *saveReturn = FWPreviewMenuItem(self.controller.view, @"FileDeck.preview.save-and-return");
         if (!saveReturn) { [self finish:@"Office 工作层缺少可用的保存并返回按钮。"]; return; }
-        [saveReturn performClick:nil];
+        [saveReturn.menu performActionForItemAtIndex:[saveReturn.menu indexOfItem:saveReturn]];
     }
 }
 

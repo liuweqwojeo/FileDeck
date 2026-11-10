@@ -36,6 +36,7 @@ export function createWorkbench({ editorRoot, previewRoot, statusRoot, nonce, po
   let jsonSourceState = null;
   let previewDocument = null;
   let previewFrame = null;
+  let previewTimer = null;
   const frameWindow = editorRoot.ownerDocument.defaultView;
   let encodeEdits = createTextEditEncoder();
   let generation = 0;
@@ -67,6 +68,14 @@ export function createWorkbench({ editorRoot, previewRoot, statusRoot, nonce, po
   editorRoot.addEventListener("input", captureInputChange);
   const matches = (id) => session !== null && (id === undefined || id === session.id);
   const send = (message) => { try { postMessage?.(message); } catch { /* 原生桥接离线时仍保留当前编辑内容。 */ } };
+  // 仅显式复制按钮向原生剪贴板发消息，地址始终是数据，不创建可导航的 href。
+  const copyLink = (event) => {
+    const button = event.target.closest?.("button.md-copy-link");
+    if (!session || !button || !previewRoot.contains(button)) return;
+    const address = button.closest(".md-link").dataset.linkAddress;
+    send({ type: "copyLink", id: session.id, address });
+  };
+  previewRoot.addEventListener("click", copyLink);
   const sourceState = () => jsonSourceState ?? view.state;
   const historyState = () => ({ canUndo: undoDepth(sourceState()) > 0, canRedo: redoDepth(sourceState()) > 0 });
   const isDirty = () => {
@@ -76,7 +85,9 @@ export function createWorkbench({ editorRoot, previewRoot, statusRoot, nonce, po
   };
   const cancelPreview = () => {
     if (previewFrame !== null) frameWindow.cancelAnimationFrame(previewFrame);
-    previewFrame = null;
+    if (previewTimer !== null) frameWindow.clearTimeout(previewTimer);
+    previewFrame = null; previewTimer = null;
+    previewRoot.removeAttribute("aria-busy");
   };
   const paintPreview = () => {
     cancelPreview();
@@ -88,11 +99,18 @@ export function createWorkbench({ editorRoot, previewRoot, statusRoot, nonce, po
   const queuePreview = () => {
     if (!["markdown", "md"].includes(session.language.toLowerCase()) || session.mode === "source") return;
     if (previewDocument === view.state.doc) { cancelPreview(); return; }
-    if (previewFrame !== null) return;
     const token = generation;
-    previewFrame = frameWindow.requestAnimationFrame(() => {
-      if (token === generation) paintPreview();
-    });
+    // 大正文的完整 Markdown 转换超过单帧预算，改为输入停顿后刷新；小正文仍跟随下一帧。
+    const delay = view.state.doc.length >= 1024 * 1024 ? 400 : view.state.doc.length >= 64 * 1024 ? 180 : 0;
+    if (delay) {
+      cancelPreview();
+      previewRoot.setAttribute("aria-busy", "true");
+      previewTimer = frameWindow.setTimeout(() => { if (token === generation) paintPreview(); }, delay);
+    } else if (previewFrame === null) {
+      if (previewTimer !== null) { frameWindow.clearTimeout(previewTimer); previewTimer = null; }
+      previewRoot.setAttribute("aria-busy", "true");
+      previewFrame = frameWindow.requestAnimationFrame(() => { if (token === generation) paintPreview(); });
+    }
   };
   const updateJSONPreview = () => {
     if (jsonSourceState) {
@@ -161,13 +179,14 @@ export function createWorkbench({ editorRoot, previewRoot, statusRoot, nonce, po
         bridgeMode: document.bridgeMode === "patch-v1" ? "patch-v1" : "full", version: 0,
         mode: ["source", "preview", "split"].includes(document.mode) ? document.mode : "source", suspended: false };
       interaction = null;
+      const original = splitLineEndings(document.text);
       const state = EditorState.create({
-        doc: splitLineEndings(document.text).normalized,
+        doc: original.normalized,
         extensions: [basicSetup, keymap.of([indentWithTab]), EditorState.phrases.of({
           "Find": "查找", "Replace": "替换", "next": "下一个", "previous": "上一个", "all": "全选匹配",
           "match case": "区分大小写", "regexp": "正则", "by word": "全词", "replace": "替换", "replace all": "全部替换",
           "close": "关闭", "No matches": "没有匹配结果", "Search": "查找",
-        }), ...lineEndingExtensions(document.text), language.of([]),
+        }), ...lineEndingExtensions(original), language.of([]),
           ...(session.language.toLowerCase() === "json" ? [syntaxHighlighting(jsonHighlightStyle)] : []),
           ...(["yaml", "yml"].includes(session.language.toLowerCase()) ? [syntaxHighlighting(yamlHighlightStyle)] : []),
           EditorView.cspNonce.of(nonce), editing.of([EditorState.readOnly.of(session.readOnly), EditorView.editable.of(!session.readOnly)]),
@@ -321,17 +340,26 @@ export function createWorkbench({ editorRoot, previewRoot, statusRoot, nonce, po
         return false;
       }
     },
+    linkCopied({ id, address, success }) {
+      if (!matches(id)) return false;
+      for (const link of previewRoot.querySelectorAll(".md-link")) {
+        if (link.dataset.linkAddress === address) link.querySelector("button").textContent = success ? "已复制" : "复制失败，请重试";
+      }
+      return true;
+    },
     markSaved({ id, text }) {
       // 保存期间继续输入时不能把较新的修改误标为已保存；宿主须传实际成功写入的完整文本。
       if (!matches(id) || typeof text !== "string") return false;
-      const current = originalText(sourceState());
       const saved = splitLineEndings(text);
-      session.savedDocument = current === text ? sourceState().doc : Text.of(saved.normalized.split("\n"));
+      const savedDocument = Text.of(saved.normalized.split("\n"));
+      session.savedDocument = sourceState().doc.eq(savedDocument) ? sourceState().doc : savedDocument;
       session.savedEndings = saved.endings;
       const dirty = isDirty();
       statusRoot.textContent = session.readOnly ? "只读" : dirty ? "未保存" : "已保存";
-      send({ type: "state", id: session.id, text: current, dirty,
-        ...(session.bridgeMode === "patch-v1" ? { version: session.version } : {}), ...historyState() });
+      // 差量宿主会在保存后获取版本化快照确认后续输入，回执无需再重复传一次全文。
+      send(session.bridgeMode === "patch-v1"
+        ? { type: "saved", id: session.id, version: session.version, dirty, ...historyState() }
+        : { type: "state", id: session.id, text: originalText(sourceState()), dirty, ...historyState() });
       return true;
     },
   };
@@ -339,6 +367,7 @@ export function createWorkbench({ editorRoot, previewRoot, statusRoot, nonce, po
     editorRoot.removeEventListener("focusin", captureInputStart);
     editorRoot.removeEventListener("beforeinput", captureInputStart);
     editorRoot.removeEventListener("input", captureInputChange);
+    previewRoot.removeEventListener("click", copyLink);
     generation++; cancelPreview(); view?.destroy(); view = null; session = null; interaction = null; jsonSourceState = null; previewDocument = null; encodeEdits = null;
   } };
 }

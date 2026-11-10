@@ -1,0 +1,11 @@
+--- a/OFDFile/src/Types/PenSettings.cpp
++++ b/OFDFile/src/Types/PenSettings.cpp
+@@ -40,6 +40,7 @@
+ CPenSettings::CPenSettings(CXmlReader& oLiteReader)
+ 	: m_dLineWidth(0.353), m_eCap(ECap::Butt),
+-	  m_eJoin(EJoin::Miter), m_dMiterLimit(4.234), m_dDashOffset(0.)
++	  m_eJoin(EJoin::Miter), m_dMiterLimit(4.234), m_dDashOffset(0.),
++	  m_uchAlpha(255) // OFD defaults to opaque when the Alpha attribute is absent.
+ {
+ 	if (0 == oLiteReader.GetAttributesCount() || !oLiteReader.MoveToFirstAttribute())
+ 		return;

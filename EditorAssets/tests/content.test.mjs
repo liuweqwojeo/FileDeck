@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EditorState, Transaction } from "@codemirror/state";
-import { history, undo, redo } from "@codemirror/commands";
+import { history, historyField, undo, redo } from "@codemirror/commands";
 import { JSDOM } from "jsdom";
 import { lineEndingExtensions, originalText, splitLineEndings, restoreLineEndings, lineEndingsForFormattedText } from "../src/line-endings.mjs";
 import { formatJSONLosslessly, assertJSONFormatSize, JSONFormatLimitError, MAX_JSON_FORMAT_BYTES, MAX_JSON_FORMAT_DEPTH } from "../src/json-format.mjs";
@@ -112,4 +112,50 @@ test("只允许有效栅格 data 图片，伪造 PNG 的 SVG 被拒绝", () => {
   assert.equal(safeRasterDataURI("data:image/png;base64,PHN2Zz48L3N2Zz4="), false);
   assert.equal(safeRasterDataURI("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4="), false);
   assert.equal(new JSDOM(renderMarkdown(`![safe](${png})`)).window.document.querySelectorAll("img").length, 1);
+});
+
+test("Markdown 复制地址保留转义字符，说明仅显示且无自动加载入口", () => {
+  const document = new JSDOM(renderMarkdown('[引号](https://example.com/a?x=%22&y=2) [相对](../other.md)')).window.document;
+  const links = [...document.querySelectorAll('.md-link')];
+  assert.equal(links[0].dataset.linkAddress, 'https://example.com/a?x=%22&y=2');
+  assert.equal(links[1].dataset.linkAddress, '../other.md');
+  assert.equal(document.querySelectorAll('a,[href],[src],[onclick]').length, 0);
+  assert.equal(document.querySelectorAll('button[aria-label="复制链接地址"]').length, 2);
+  assert.match(links[0].querySelector('span').title, /不会跳转/);
+});
+
+
+test("大文档换行历史只保存局部反向信息，合并撤销仍还原原字节", () => {
+  const source = "line\r\n".repeat(100_000), target = editor(source);
+  for (let index = 0; index < 30; index++) target.dispatch({ changes: { from: target.state.doc.length, insert: "\n" }, annotations: Transaction.userEvent.of("input.type") });
+  const edited = originalText(target.state);
+  const retained = target.state.field(historyField).done.flatMap((entry) => entry.effects)
+    .reduce((sum, effect) => sum + (effect.value?.endings?.length ?? 0), 0);
+  assert.ok(retained < 100, `不应保留整份行尾数组：${retained}`);
+  while (undo(target)) { /* 撤销全部分组。 */ }
+  assert.equal(originalText(target.state), source);
+  while (redo(target)) { /* 重做全部分组。 */ }
+  assert.equal(originalText(target.state), edited);
+});
+
+test("混合行尾的局部反向信息跨连续编辑、全文排版和非历史位移保持正确", () => {
+  for (let seed = 1; seed <= 24; seed++) {
+    let random = seed;
+    const next = (limit) => { random = (Math.imul(random, 1664525) + 1013904223) >>> 0; return random % limit; };
+    const source = "a\r\nb\rc\nd\r\ne\rf\n", target = editor(source);
+    for (let index = 0; index < 45; index++) {
+      const length = target.state.doc.length, from = next(length + 1), to = from + next(length - from + 1);
+      target.dispatch({ changes: { from, to, insert: ["x", "\n", "a\nb", "", "\n\n"][next(5)] }, annotations: Transaction.userEvent.of("input.type") });
+    }
+    const edited = originalText(target.state);
+    while (undo(target)) { /* 不依赖具体合并分组。 */ }
+    assert.equal(originalText(target.state), source, `seed ${seed}`);
+    while (redo(target)) { /* 重做全部。 */ }
+    assert.equal(originalText(target.state), edited, `seed ${seed}`);
+  }
+  const source = "a\r\nb\rc\nd", target = editor(source);
+  target.dispatch({ changes: { from: 2, to: 4, insert: "B\n" } });
+  target.dispatch({ changes: { from: 0, insert: "prefix\n" }, annotations: Transaction.addToHistory.of(false) });
+  undo(target);
+  assert.equal(originalText(target.state), "prefix\r\n" + source);
 });

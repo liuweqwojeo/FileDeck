@@ -97,6 +97,21 @@ qmake、OpenSSL 和 Xcode 默认最多 4 路编译，可通过 `--jobs` 调整�
 
 OpenSSL 的 macOS 安装采用“完成默认编译目标 → 安装 → 写完成标记”的顺序。原先同时传入 `build_libs install` 在并行 make 下会竞争生成文件；不使用全局 `MAKEFLAGS` 强加并行。安装目录存在不代表安装成功，缺少完成标记时会重新安装，保留已完成的源码获取和编译缓存。
 
+### 已有工作区升级 OFD 预览
+
+首次更新到支持 OFD 的源码时，必须先重新执行上面的 `--phase core`，再构建应用。`scripts/build-app.sh debug/release` 和 `--phase app` 会复用已有内核，不能单独完成此次升级。内核阶段会应用 `core-001-ofd-default-alpha.patch`、`core-002-ofd-macos-kaiti.patch`，修复省略 Alpha 时票据文字透明，以及未安装楷体时模板标签缺字；无内嵌字体的楷体使用 macOS 系统宋体替代，内嵌字体保持优先。
+
+OFD 预览复用应用内 `converter/x2t`，在独立临时目录转换后交给 PDFKit 只读显示，支持多页滚动、缩放和适合窗口。处理在本机完成，不依赖系统 OFD Quick Look 扩展，也不修改原始文件。浏览验证应用和普通 `swift run` 未包含转换内核，会显示缺少组件的提示。
+
+构建、打包后运行真实格式回归，确认测试没有因缺少完整应用而跳过：
+
+```sh
+swift test --filter OFDPreviewTests
+python3 -B -m unittest discover -s Tests/BuildToolsTests -p 'test_ofd_patches.py'
+```
+
+测试使用 `build/FileDeck.app` 中的真实转换器，覆盖中文及特殊字符路径、多页中文、默认透明度的可见像素、原文不变、损坏文件重试、关闭/切换取消和临时文件释放。对已有内核仅重新构建应用而遗漏补丁时，真实中文/像素断言会失败；测试不是实际用户行程单的逐份兼容保证。
+
 ## 打包资源精简
 
 `package_app.py` 在待签名副本中执行静态资源去重：编辑器内的图片、脚本、样式、JSON、HTML、字体，以及顶层文件图标，只有大小、权限、SHA-256 和完整字节均一致时才合并为包内相对链接。原路径保持可读，ZIP 分发必须保留符号链接；不使用文件系统透明压缩，解压后的资源文件总量也会减少。

@@ -9,6 +9,7 @@ final class FWImageContent: NSViewController, FWNativeContent {
     var contentTitle: String { path?.lastPathComponent ?? "未命名图片" }
     var path: URL? { state.path }
     var isModified: Bool { state.isModified }
+    var recoveryRevision: UInt64 { state.revision }
     var isReadOnly: Bool { state.isReadOnly }
     var isBusy: Bool { state.isBusy || processing }
     var canUndo: Bool { state.canEdit && !isBusy && history.canUndo }
@@ -37,6 +38,7 @@ final class FWImageContent: NSViewController, FWNativeContent {
     private let status = NSTextField(labelWithString: "")
     private let history: FWMediaHistory
     private var editButtons: [NSButton] = []
+    private var fitsWindow = true
     override var undoManager: UndoManager? { history.manager }
 
     private struct Snapshot: Sendable {
@@ -96,12 +98,13 @@ final class FWImageContent: NSViewController, FWNativeContent {
         scroll.allowsMagnification = true
         scroll.minMagnification = 0.1
         scroll.maxMagnification = 8
-        for (name, selector, key) in [("缩小", #selector(zoomOut), "-"), ("实际大小", #selector(actualSize), "0"), ("放大", #selector(zoomIn), "+")] {
+        for (name, selector, key) in [("缩小", #selector(zoomOut), "-"), ("适合窗口", #selector(fitWindow), "0"), ("实际大小", #selector(actualSize), "1"), ("放大", #selector(zoomIn), "+")] {
             let button = NSButton(title: name, target: self, action: selector)
             button.keyEquivalent = key; button.keyEquivalentModifierMask = .command
             toolbar.addArrangedSubview(button)
         }
         NotificationCenter.default.addObserver(self, selector: #selector(zoomDidChange), name: NSScrollView.didEndLiveMagnifyNotification, object: scroll)
+        NotificationCenter.default.addObserver(self, selector: #selector(zoomDidChange), name: NSScrollView.willStartLiveMagnifyNotification, object: scroll)
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
@@ -112,6 +115,10 @@ final class FWImageContent: NSViewController, FWNativeContent {
         view = FWMediaUI.layout(toolbar: toolbar, body: scroll, status: status)
         refreshImage()
         refreshState()
+    }
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        if fitsWindow { applyFit() }
     }
 
     func save(overwriteExternalChanges: Bool) async throws {
@@ -186,27 +193,25 @@ final class FWImageContent: NSViewController, FWNativeContent {
     }
 
     @objc private func cropImage() {
-        guard state.canEdit, !processing,
-              let values = FWMediaUI.fields(title: "裁剪图片（左上角为原点）", labels: ["X", "Y", "宽度（像素）", "高度（像素）"],
-                                            values: ["0", "0", "\(pixels.width)", "\(pixels.height)"]) else { return }
-        performAsync {
-            let numbers = values.compactMap(Double.init)
-            guard numbers.count == 4 else { throw MediaOperationError.invalidParameter("请输入整数像素坐标与尺寸。") }
-            let rect = CGRect(x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3])
-            try await self.crop(pixelRect: rect)
-        }
+        guard state.canEdit, !processing else { return }
+        let alert = NSAlert(); alert.messageText = "裁剪图片"
+        alert.informativeText = "拖动四角调整范围，拖动框内移动；按住 Option 可重新框选。数值以左上角为原点。"
+        alert.addButton(withTitle: "确认裁剪"); alert.addButton(withTitle: "取消")
+        let form = FWImageCropForm(image: pixels)
+        form.fields.submitButton = alert.buttons.first; form.fields.validate(); alert.accessoryView = form
+        guard alert.runModal() == .alertFirstButtonReturn, let rect = form.result else { return }
+        performAsync { try await self.crop(pixelRect: rect) }
     }
 
     @objc private func resizeImage() {
-        guard state.canEdit, !processing,
-              let values = FWMediaUI.fields(title: "调整图片尺寸", labels: ["宽度（像素）", "高度（像素）"],
-                                            values: ["\(pixels.width)", "\(pixels.height)"]) else { return }
-        performAsync {
-            guard let width = Int(values[0]), let height = Int(values[1]) else {
-                throw MediaOperationError.invalidParameter("请输入整数像素尺寸。")
-            }
-            try await self.resize(width: width, height: height)
-        }
+        guard state.canEdit, !processing else { return }
+        let alert = NSAlert(); alert.messageText = "调整图片像素尺寸"
+        alert.informativeText = "这会修改文件实际像素；仅查看放大缩小请使用工具栏缩放。"
+        alert.addButton(withTitle: "调整尺寸"); alert.addButton(withTitle: "取消")
+        let form = FWImageResizeForm(width: pixels.width, height: pixels.height)
+        form.fields.submitButton = alert.buttons.first; form.fields.validate(); alert.accessoryView = form
+        guard alert.runModal() == .alertFirstButtonReturn, let size = form.result else { return }
+        performAsync { try await self.resize(width: size.width, height: size.height) }
     }
 
     private func install(_ snapshot: Snapshot, name: String) throws {
@@ -245,17 +250,30 @@ final class FWImageContent: NSViewController, FWNativeContent {
     @objc private func zoomOut() { zoom(to: imageScroll.magnification / 1.25) }
     @objc private func zoomIn() { zoom(to: imageScroll.magnification * 1.25) }
     @objc private func actualSize() { zoom(to: 1) }
+    @objc private func fitWindow() { fitsWindow = true; applyFit() }
+    private func applyFit() {
+        let visible = imageScroll.contentSize
+        guard visible.width > 0, visible.height > 0 else { return }
+        let scale = min(1, visible.width / CGFloat(pixels.width), visible.height / CGFloat(pixels.height))
+        imageScroll.minMagnification = min(0.1, scale)
+        if abs(imageScroll.magnification - scale) > 0.001 {
+            imageScroll.setMagnification(scale, centeredAt: NSPoint(x: imageView.bounds.midX, y: imageView.bounds.midY))
+            refreshState()
+        }
+    }
     private func zoom(to scale: CGFloat) {
+        fitsWindow = false
         let visible = imageScroll.contentView.bounds
         imageScroll.setMagnification(scale, centeredAt: NSPoint(x: visible.midX, y: visible.midY))
         zoomDidChange()
     }
-    @objc private func zoomDidChange() { refreshState() }
+    @objc private func zoomDidChange() { fitsWindow = false; refreshState() }
 
     private func refreshImage() {
         let size = NSSize(width: pixels.width, height: pixels.height)
         imageView.image = NSImage(cgImage: pixels, size: size)
         imageView.frame = CGRect(origin: .zero, size: size)
+        if fitsWindow { applyFit() }
         refreshState()
     }
 
@@ -288,6 +306,201 @@ final class FWImageContent: NSViewController, FWNativeContent {
             if type == (format == .png ? UTType.png.identifier : UTType.jpeg.identifier) { return data }
             return try ImageOperations.export(pixels, format: format == .png ? .png : .jpeg(quality: 0.92),
                                               preservingMetadataFrom: data)
+        }
+    }
+}
+
+/// 宽高和百分比共用一份像素尺寸；联动仅响应用户编辑，避免程序更新再次触发比例计算。
+@MainActor
+final class FWImageResizeForm: NSStackView {
+    let fields: FWValidatedFields
+    let lock = NSButton(checkboxWithTitle: "锁定原始宽高比", target: nil, action: nil)
+    private let original: (width: Int, height: Int)
+    private let summary = NSTextField(labelWithString: "")
+    private var linkageError: String?
+    private(set) var result: (width: Int, height: Int)?
+    init(width: Int, height: Int) {
+        original = (width, height)
+        fields = FWValidatedFields(labels: ["宽度（像素）", "高度（像素）", "缩放百分比（%）"], values: ["\(width)", "\(height)", "100"])
+        super.init(frame: NSRect(x: 0, y: 0, width: 340, height: 310))
+        orientation = .vertical; alignment = .leading; spacing = 8
+        lock.state = .on; lock.target = self; lock.action = #selector(lockChanged)
+        addArrangedSubview(lock); addArrangedSubview(fields); addArrangedSubview(summary)
+        fields.onEdit = { [weak self] index in self?.synchronize(index) }
+        fields.validation = { [weak self] values in
+            guard let self else { return nil }
+            self.result = nil
+            if let error = self.linkageError { return error }
+            guard let w = Int(values[0]), let h = Int(values[1]) else { return "请输入整数像素尺寸。" }
+            do { try ImageOperations.validate(width: w, height: h) } catch { return error.localizedDescription }
+            guard let percent = Double(values[2]), percent.isFinite, percent > 0 else { return "缩放百分比须为正数。" }
+            self.result = (w, h)
+            self.summary.stringValue = "\(width) × \(height) → \(w) × \(h) 像素"
+            return nil
+        }
+        fields.validate()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    @objc private func lockChanged() {
+        if lock.state == .on { synchronize(0) } else { linkageError = nil }
+        fields.validate()
+    }
+    private func synchronize(_ index: Int) {
+        let inputs = fields.inputs
+        linkageError = nil
+        guard let value = Double(inputs[index].stringValue), value.isFinite, value > 0 else { return }
+        if index != 2, lock.state == .off {
+            let fraction = value / Double(index == 0 ? original.width : original.height)
+            inputs[2].stringValue = String(format: "%.2f", fraction * 100)
+            return
+        }
+        var width = Double(original.width), height = Double(original.height)
+        if index == 2 { width *= value / 100; height *= value / 100 }
+        else {
+            guard value <= Double(ImageOperations.maximumDimension) else { return }
+            if index == 0 { width = value; height = value * Double(original.height) / Double(original.width) }
+            else { height = value; width = value * Double(original.width) / Double(original.height) }
+        }
+        guard width >= 1, height >= 1, width <= Double(ImageOperations.maximumDimension), height <= Double(ImageOperations.maximumDimension) else {
+            linkageError = "该比例会使图片尺寸超出允许范围。"; return
+        }
+        if index == 2 || lock.state == .on {
+            inputs[0].stringValue = String(Int(width.rounded())); inputs[1].stringValue = String(Int(height.rounded()))
+        }
+        if index != 2 {
+            let fraction = index == 0 ? value / Double(original.width) : value / Double(original.height)
+            inputs[2].stringValue = String(format: "%.2f", fraction * 100)
+        }
+    }
+}
+
+/// 裁剪坐标始终使用原图左上角像素；画布只映射显示，不对原像素进行缩放或重编码。
+@MainActor
+final class FWImageCropView: NSView {
+    let image: CGImage
+    private let displayImage: NSImage
+    var selection: CGRect { didSet { needsDisplay = true } }
+    var aspect: CGFloat?
+    var selectionChanged: ((CGRect) -> Void)?
+    private enum Drag { case resize(CGPoint), move(CGPoint, CGRect) }
+    private var drag: Drag?
+    override var isFlipped: Bool { true }
+    init(image: CGImage) {
+        self.image = image; selection = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        displayImage = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        super.init(frame: NSRect(x: 0, y: 0, width: 420, height: 290))
+        setAccessibilityLabel("图片裁剪画布；也可使用右侧数值调整")
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    var imageRect: CGRect {
+        let scale = min((bounds.width - 16) / CGFloat(image.width), (bounds.height - 16) / CGFloat(image.height))
+        return CGRect(x: (bounds.width - CGFloat(image.width) * scale) / 2, y: (bounds.height - CGFloat(image.height) * scale) / 2,
+                      width: CGFloat(image.width) * scale, height: CGFloat(image.height) * scale)
+    }
+    func displayRect(_ rect: CGRect) -> CGRect {
+        let display = imageRect, scale = display.width / CGFloat(image.width)
+        return CGRect(x: display.minX + rect.minX * scale, y: display.minY + rect.minY * scale, width: rect.width * scale, height: rect.height * scale)
+    }
+    private func pixelPoint(_ point: CGPoint) -> CGPoint {
+        let display = imageRect, scale = display.width / CGFloat(image.width)
+        return CGPoint(x: min(CGFloat(image.width), max(0, ((point.x - display.minX) / scale).rounded())),
+                       y: min(CGFloat(image.height), max(0, ((point.y - display.minY) / scale).rounded())))
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.controlBackgroundColor.setFill(); bounds.fill()
+        displayImage.draw(in: imageRect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        let selected = displayRect(selection)
+        let mask = NSBezierPath(rect: imageRect); mask.append(NSBezierPath(rect: selected)); mask.windingRule = .evenOdd
+        NSColor.black.withAlphaComponent(0.45).setFill(); mask.fill()
+        NSColor.controlAccentColor.setStroke(); let border = NSBezierPath(rect: selected); border.lineWidth = 2; border.stroke()
+        NSColor.white.setFill()
+        for x in [selected.minX, selected.maxX] { for y in [selected.minY, selected.maxY] { NSRect(x: x - 4, y: y - 4, width: 8, height: 8).fill() } }
+    }
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil), selected = displayRect(selection)
+        guard imageRect.insetBy(dx: -8, dy: -8).contains(point) else { return }
+        if event.modifierFlags.contains(.option) { drag = .resize(pixelPoint(point)); return }
+        for x in [selected.minX, selected.maxX] {
+            for y in [selected.minY, selected.maxY] where hypot(point.x - x, point.y - y) <= 11 {
+                let opposite = CGPoint(x: x == selected.minX ? selection.maxX : selection.minX, y: y == selected.minY ? selection.maxY : selection.minY)
+                drag = .resize(opposite); return
+            }
+        }
+        if selected.contains(point), !event.modifierFlags.contains(.option) { drag = .move(pixelPoint(point), selection) }
+        else { drag = .resize(pixelPoint(point)) }
+    }
+    override func mouseDragged(with event: NSEvent) {
+        let point = pixelPoint(convert(event.locationInWindow, from: nil))
+        switch drag {
+        case .move(let start, let original):
+            selection.origin = CGPoint(x: min(CGFloat(image.width) - original.width, max(0, original.minX + point.x - start.x)),
+                                       y: min(CGFloat(image.height) - original.height, max(0, original.minY + point.y - start.y)))
+        case .resize(let anchor):
+            var w = abs(point.x - anchor.x), h = abs(point.y - anchor.y)
+            if let aspect { if w > h * aspect { w = h * aspect } else { h = w / aspect } }
+            guard w >= 1, h >= 1 else { return }
+            w = w.rounded(.down); h = h.rounded(.down)
+            selection = CGRect(x: point.x >= anchor.x ? anchor.x : anchor.x - w, y: point.y >= anchor.y ? anchor.y : anchor.y - h, width: w, height: h)
+        case nil: return
+        }
+        selectionChanged?(selection)
+    }
+    override func mouseUp(with event: NSEvent) { drag = nil }
+}
+
+@MainActor
+final class FWImageCropForm: NSStackView {
+    let canvas: FWImageCropView
+    let fields: FWValidatedFields
+    let ratio = NSPopUpButton()
+    private let preview = NSImageView()
+    private let sizeLabel = NSTextField(labelWithString: "")
+    private(set) var result: CGRect?
+    init(image: CGImage) {
+        canvas = FWImageCropView(image: image)
+        fields = FWValidatedFields(labels: ["X（像素）", "Y（像素）", "宽度（像素）", "高度（像素）"], values: ["0", "0", "\(image.width)", "\(image.height)"], fieldWidth: 150)
+        super.init(frame: NSRect(x: 0, y: 0, width: 600, height: 390))
+        orientation = .vertical; alignment = .leading; spacing = 8
+        canvas.widthAnchor.constraint(equalToConstant: 420).isActive = true; canvas.heightAnchor.constraint(equalToConstant: 290).isActive = true
+        let body = NSStackView(views: [canvas, fields]); body.alignment = .top; body.spacing = 12; addArrangedSubview(body)
+        ratio.addItems(withTitles: ["自由比例", "原图比例", "1:1", "4:3", "16:9"]); ratio.target = self; ratio.action = #selector(changeRatio)
+        preview.imageScaling = .scaleProportionallyUpOrDown
+        preview.widthAnchor.constraint(equalToConstant: 90).isActive = true; preview.heightAnchor.constraint(equalToConstant: 70).isActive = true
+        addArrangedSubview(NSStackView(views: [ratio, NSTextField(labelWithString: "裁剪结果"), preview, sizeLabel]))
+        canvas.selectionChanged = { [weak self] rect in self?.setFields(rect) }
+        fields.onEdit = { [weak self] index in
+            guard let self, let aspect = self.canvas.aspect, (2...3).contains(index),
+                  let value = Int(self.fields.inputs[index].stringValue), value > 0,
+                  value <= (index == 2 ? image.width : image.height) else { return }
+            let other = index == 2 ? CGFloat(value) / aspect : CGFloat(value) * aspect
+            self.fields.inputs[index == 2 ? 3 : 2].stringValue = String(max(1, Int(other.rounded())))
+        }
+        fields.validation = { [weak self] values in
+            guard let self else { return nil }
+            self.result = nil
+            let numbers = values.compactMap(Int.init)
+            guard numbers.count == 4 else { return "请输入整数像素坐标和尺寸。" }
+            let rect = CGRect(x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3])
+            do { try ImageOperations.validateCrop(image, pixelRect: rect) } catch { return error.localizedDescription }
+            self.result = rect; self.canvas.selection = rect
+            if let cropped = image.cropping(to: rect) { self.preview.image = NSImage(cgImage: cropped, size: rect.size) }
+            self.sizeLabel.stringValue = "\(numbers[2]) × \(numbers[3]) 像素"
+            return nil
+        }
+        fields.validate()
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    private func setFields(_ rect: CGRect) {
+        for (field, number) in zip(fields.inputs, [rect.minX, rect.minY, rect.width, rect.height]) { field.stringValue = String(Int(number)) }
+        fields.validate()
+    }
+    @objc private func changeRatio() {
+        canvas.aspect = [nil, CGFloat(canvas.image.width) / CGFloat(canvas.image.height), 1, 4.0 / 3, 16.0 / 9][ratio.indexOfSelectedItem]
+        if let aspect = canvas.aspect {
+            var rect = canvas.selection
+            if rect.width > rect.height * aspect { rect.size.width = max(1, (rect.height * aspect).rounded(.down)) }
+            else { rect.size.height = max(1, (rect.width / aspect).rounded(.down)) }
+            setFields(rect)
         }
     }
 }

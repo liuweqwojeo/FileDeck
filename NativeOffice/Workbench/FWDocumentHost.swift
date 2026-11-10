@@ -1,6 +1,65 @@
 import AppKit
 import UniformTypeIdentifiers
 
+/// 原路径只用于辨认同名恢复副本；列表选择始终返回草稿 ID，不能将原路径当成保存目标。
+@MainActor
+final class FWDraftRecoveryList: NSScrollView, NSTableViewDataSource, NSTableViewDelegate {
+    private let items: [DraftRecoveryItem]
+    let table = NSTableView()
+    var selectionChanged: ((DraftRecoveryItem?) -> Void)?
+    var selectedItem: DraftRecoveryItem? { items.indices.contains(table.selectedRow) ? items[table.selectedRow] : nil }
+
+    init(items: [DraftRecoveryItem]) {
+        self.items = items
+        super.init(frame: NSRect(x: 0, y: 0, width: 560, height: min(300, max(90, items.count * 82))))
+        hasVerticalScroller = true; borderType = .bezelBorder; autohidesScrollers = true
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("draft"))
+        column.width = 540
+        table.addTableColumn(column); table.headerView = nil; table.rowHeight = 80
+        table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        table.allowsEmptySelection = false; table.allowsMultipleSelection = false
+        table.dataSource = self; table.delegate = self
+        table.setAccessibilityLabel("恢复副本列表，包含原始路径、格式和状态")
+        table.setAccessibilityIdentifier("draft-recovery-list")
+        table.frame = NSRect(x: 0, y: 0, width: contentSize.width, height: CGFloat(items.count * 82))
+        table.autoresizingMask = [.width]
+        documentView = table
+        if !items.isEmpty { table.selectRowIndexes(IndexSet(integer: items.firstIndex(where: { $0.problem == nil }) ?? 0), byExtendingSelection: false) }
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    func numberOfRows(in tableView: NSTableView) -> Int { items.count }
+    func tableViewSelectionDidChange(_ notification: Notification) { selectionChanged?(selectedItem) }
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let item = items[row]
+        let title = NSTextField(labelWithString: item.title)
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        let path = NSTextField(labelWithString: item.header?.originalPath ?? "未命名文档 · 无原始路径")
+        path.font = .systemFont(ofSize: 11); path.textColor = .secondaryLabelColor
+        let date = item.header.map { DateFormatter.localizedString(from: $0.updatedAt, dateStyle: .short, timeStyle: .short) } ?? "时间未知"
+        let kind = item.header?.kind.uppercased() ?? "格式未知"
+        let metadata = NSTextField(labelWithString: "\(kind) · \(date) · \(ByteCountFormatter.string(fromByteCount: Int64(item.bytes), countStyle: .file))")
+        metadata.font = .systemFont(ofSize: 11); metadata.textColor = .secondaryLabelColor
+        let status = NSTextField(labelWithString: item.problem.map { "不可恢复：" + $0 } ?? "可恢复 · 恢复后需另存")
+        status.font = .systemFont(ofSize: 11); status.textColor = item.problem == nil ? .secondaryLabelColor : .systemOrange
+        for field in [title, path, metadata, status] {
+            field.lineBreakMode = .byTruncatingMiddle; field.toolTip = field.stringValue
+            field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
+        let stack = NSStackView(views: [title, path, metadata, status])
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 2
+        let cell = NSTableCellView()
+        stack.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+            stack.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+        ])
+        for field in [title, path, metadata, status] { field.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor).isActive = true }
+        cell.setAccessibilityElement(true); cell.setAccessibilityLabel([title, path, metadata, status].map(\.stringValue).joined(separator: "，"))
+        return cell
+    }
+}
+
 /// Objective-C++ 只接触此门面；面板与异步保存始终捕获创建它们的文档，不能再次查询当前标签。
 @MainActor
 @objc(FWDocumentHost)
@@ -9,13 +68,14 @@ public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations 
     private let notice: String?
     private let recoveredOriginal: DraftRecoveryHeader?
     private var draftRecovery: FWDraftCheckpoint!
-    private let recoveryLabel = NSTextField(labelWithString: "")
     private var actionBusy = false { didSet { stateDidChange?() } }
     private var saving = false
     private var closed = false
     private var conflict = false
     @objc public private(set) var lastError: String?
     @objc public private(set) var lastSavedURL: URL?
+    /// 写盘完成与“已无新修改”分别记录，保存期间继续编辑不能误报外部修改或自动关闭。
+    @objc public private(set) var successfulSaveGeneration: UInt64 = 0
     @objc public var stateDidChange: (() -> Void)?
     @objc public var documentTitle: String { content.path == nil ? recoveredOriginal.map { "恢复 · " + $0.title } ?? content.contentTitle : content.contentTitle }
     @objc public var documentURL: URL? { content.path }
@@ -31,7 +91,8 @@ public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations 
     @objc public var isEditing: Bool { (content as? FWTextContent)?.isEditing ?? !content.isReadOnly }
     @objc public var canBeginEditing: Bool { !busy && !closed && (content as? FWTextContent)?.canBeginEditing == true }
     @objc public var statusText: String {
-        let base = lastError ?? (content as? FWTextContent)?.statusText ?? (readOnly ? "只读" : modified ? "未保存" : "已保存")
+        let savedSnapshot = successfulSaveGeneration > 0 && modified && !busy && lastError == nil ? "上次快照已保存，当前仍有未保存修改 · " : ""
+        let base = savedSnapshot + (lastError ?? (content as? FWTextContent)?.statusText ?? (readOnly ? "只读" : modified ? "未保存" : "已保存"))
         return draftRecovery?.message.map { base + " · " + $0 } ?? base
     }
     @objc public var sessionState: String {
@@ -56,12 +117,10 @@ public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations 
                                           original: recovered, store: recoveryStore)
         draftRecovery.onStatusChanged = { [weak self] in
             guard let self else { return }
-            self.updateRecoveryLabel()
             self.stateDidChange?()
         }
         content.onStateChanged = { [weak self] in
             self?.draftRecovery.changed()
-            self?.updateRecoveryLabel()
             self?.stateDidChange?()
         }
         draftRecovery.changed()
@@ -179,15 +238,14 @@ public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations 
                         alert.addButton(withTitle: "删除所选…")
                         alert.addButton(withTitle: "稍后")
                     }
-                    let choice = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 500, height: 30))
-                    for item in items {
-                        let date = item.header.map { DateFormatter.localizedString(from: $0.updatedAt, dateStyle: .short, timeStyle: .short) } ?? "无法读取"
-                        choice.addItem(withTitle: "\(item.title) · \(date) · \(ByteCountFormatter.string(fromByteCount: Int64(item.bytes), countStyle: .file))")
+                    let choice = FWDraftRecoveryList(items: items)
+                    if !items.isEmpty {
+                        alert.accessoryView = choice
+                        choice.selectionChanged = { [weak alert] item in alert?.buttons.first?.isEnabled = item?.problem == nil && item != nil }
+                        alert.buttons.first?.isEnabled = choice.selectedItem?.problem == nil && choice.selectedItem != nil
                     }
-                    if !items.isEmpty { alert.accessoryView = choice }
                     let response = await recoveryAlert(alert, in: window)
-                    guard !items.isEmpty, items.indices.contains(choice.indexOfSelectedItem) else { completion(nil); return }
-                    let item = items[choice.indexOfSelectedItem]
+                    guard let item = choice.selectedItem else { completion(nil); return }
                     if response == .alertFirstButtonReturn {
                         if let problem = item.problem {
                             let error = NSAlert(); error.messageText = "草稿暂时无法恢复"; error.informativeText = problem
@@ -239,6 +297,8 @@ public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations 
 
     @objc(consumeEscapeWithCompletion:)
     public func consumeEscape(completion: @escaping (Bool) -> Void) {
+        if let csv = content as? FWCSVContent, csv.dismissFind() { completion(true); return }
+        if let pdf = content as? FWPDFContent { completion(pdf.dismissFind()); return }
         guard !actionBusy, let text = content as? FWTextContent else { completion(false); return }
         Task { completion(await text.consumeEscape()) }
     }
@@ -280,28 +340,13 @@ public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations 
             ])
             top = label.bottomAnchor
         }
-        recoveryLabel.font = .systemFont(ofSize: 11)
-        recoveryLabel.lineBreakMode = .byTruncatingMiddle
-        recoveryLabel.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(recoveryLabel)
-        updateRecoveryLabel()
         NSLayoutConstraint.activate([
-            recoveryLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            recoveryLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            recoveryLabel.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -5),
-            recoveryLabel.heightAnchor.constraint(equalToConstant: 16),
             child.view.topAnchor.constraint(equalTo: top, constant: notice == nil ? 0 : 10),
             child.view.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             child.view.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            child.view.bottomAnchor.constraint(equalTo: recoveryLabel.topAnchor, constant: -4)
+            child.view.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
         view = root
-    }
-
-    private func updateRecoveryLabel() {
-        recoveryLabel.stringValue = draftRecovery.message ?? (modified ? "未保存草稿将在本机保留恢复副本" : "当前内容无需恢复副本")
-        recoveryLabel.toolTip = recoveryLabel.stringValue
-        recoveryLabel.textColor = draftRecovery.isFailure ? .systemOrange : .secondaryLabelColor
     }
 
     @objc(saveIn:saveAs:completion:)
@@ -344,6 +389,7 @@ public final class FWDocumentHost: NSViewController, NSUserInterfaceValidations 
                 if let destination { try await content.saveAs(to: destination, overwriteExternalChanges: overwrite) }
                 else { try await content.save(overwriteExternalChanges: overwrite) }
                 lastSavedURL = content.path
+                successfulSaveGeneration &+= 1
                 lastError = nil
                 conflict = false
                 stateDidChange?()

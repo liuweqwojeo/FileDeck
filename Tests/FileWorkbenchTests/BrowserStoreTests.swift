@@ -239,7 +239,7 @@ final class BrowserStoreTests: XCTestCase {
         XCTAssertEqual(store.currentDirectory, child)
         XCTAssertNil(store.selectedURL)
         XCTAssertTrue(store.entries.isEmpty)
-        XCTAssertEqual(store.history, [firstDirectory, secondDirectory, firstDirectory, child])
+        XCTAssertEqual(store.history, [secondDirectory, child], "未完成准备就取消的打开不进入导航历史")
     }
 
     func testOpeningHiddenFileSurvivesSearchAndVisibilityCallbacks() async throws {
@@ -312,6 +312,8 @@ final class BrowserStoreTests: XCTestCase {
 
         for invalid in [root.appendingPathComponent("missing.txt"), directory] {
             store.openFile(invalid, remember: false)
+            XCTAssertTrue(store.isLoading)
+            try await settled(store)
             XCTAssertNotNil(store.actionError)
             XCTAssertEqual(store.rootURL, root)
             XCTAssertEqual(store.currentDirectory, root)
@@ -321,6 +323,32 @@ final class BrowserStoreTests: XCTestCase {
             XCTAssertEqual(store.selectedEntry?.url, file)
             XCTAssertEqual(store.entries, previousEntries)
             XCTAssertFalse(store.isLoading)
+        }
+    }
+
+    func testFailedOpenReconcilesSelectionWithFiltersChangedDuringPreparation() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("Folder", isDirectory: true)
+        let file = root.appendingPathComponent("selected.txt")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("content".utf8).write(to: file)
+        let store = BrowserStore(observesExternalChanges: false, restoreLastLocation: false)
+        store.openRoot(root, remember: false)
+        try await settled(store)
+        for useTypeFilter in [false, true] {
+            store.resetFilters()
+            store.selectedURL = file
+            store.openFile(root.appendingPathComponent("missing.txt"), remember: false)
+            // 同一主线程回合内改筛选，保证准备尚未回传；真实失败仍保留原目录。
+            XCTAssertTrue(store.isLoading)
+            if useTypeFilter { store.typeFilter = .folders } else { store.query = "Folder" }
+            try await settled(store)
+            XCTAssertEqual(store.currentDirectory, root)
+            XCTAssertEqual(store.visibleEntries.map(\.url), [directory])
+            XCTAssertTrue(store.selectedURLs.isEmpty)
+            XCTAssertNil(store.selectedURL)
+            XCTAssertNotNil(store.actionError)
         }
     }
 

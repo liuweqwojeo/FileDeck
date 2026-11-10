@@ -121,7 +121,9 @@ final class FileDragDropTests: XCTestCase {
             try await self.settled(store)
             XCTAssertEqual(try String(contentsOf: file), "source")
             XCTAssertEqual(try String(contentsOf: destination), "keep")
-            XCTAssertNotNil(store.actionError)
+            XCTAssertNil(store.actionError)
+            XCTAssertEqual(store.fileOperationFailureURLs, [file])
+            XCTAssertTrue(store.fileOperationSummary?.contains("失败 1") == true)
             try FileManager.default.removeItem(at: destination)
             try FileManager.default.createSymbolicLink(at: destination, withDestinationURL: root.appendingPathComponent("missing"))
             token = store.beginFileDrag(file, includingSelection: false)
@@ -129,7 +131,9 @@ final class FileDragDropTests: XCTestCase {
             try await self.settled(store)
             XCTAssertEqual(try String(contentsOf: file), "source")
             XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: destination.path), root.appendingPathComponent("missing").path)
-            XCTAssertNotNil(store.actionError)
+            XCTAssertNil(store.actionError)
+            XCTAssertEqual(store.fileOperationFailureURLs, [file])
+            XCTAssertTrue(store.fileOperationSummary?.contains("失败 1") == true)
         }
     }
 
@@ -151,7 +155,9 @@ final class FileDragDropTests: XCTestCase {
             try await self.settled(store)
             XCTAssertEqual(try String(contentsOf: file), "replacement")
             XCTAssertFalse(FileManager.default.fileExists(atPath: target.appendingPathComponent("changed.txt").path))
-            XCTAssertNotNil(store.actionError)
+            XCTAssertNil(store.actionError)
+            XCTAssertEqual(store.fileOperationFailureURLs, [file])
+            XCTAssertTrue(store.fileOperationSummary?.contains("失败 1") == true)
         }
     }
 
@@ -321,7 +327,9 @@ final class FileDragDropTests: XCTestCase {
             try Data("replacement".utf8).write(to: source)
             store.pasteFiles(from: board, into: target, move: true); try await self.settled(store)
             XCTAssertEqual(try String(contentsOf: source), "replacement"); XCTAssertEqual(try String(contentsOf: destination), "target")
-            XCTAssertNotNil(store.actionError)
+            XCTAssertNil(store.actionError)
+            XCTAssertEqual(store.fileOperationFailureURLs, [source])
+            XCTAssertTrue(store.fileOperationSummary?.contains("失败 1") == true)
         }
     }
 

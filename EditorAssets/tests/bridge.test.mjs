@@ -527,3 +527,67 @@ test("生产 HTML CSP 禁网络和内联脚本，仅引用本地 bundle", async 
   assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval|https?:|\*/);
   assert.deepEqual(Array.from(document.scripts, (script) => script.getAttribute("src")), ["editor.js"]);
 });
+
+test("Markdown 只在显式复制时发送地址，并由原生结果确认，不触发导航或修改", async () => {
+  await withWorkbench(async ({ controller, messages, document }) => {
+    controller.api.open({ id: "links", text: '[站点](https://example.com/a?x=1&y=2)', language: "markdown", mode: "preview", readOnly: true });
+    const link = document.querySelector(".md-link"), button = link.querySelector("button");
+    const before = messages.length;
+    link.querySelector("span").click();
+    assert.equal(messages.length, before);
+    button.click();
+    assert.deepEqual(messages.at(-1), { type: "copyLink", id: "links", address: "https://example.com/a?x=1&y=2" });
+    assert.equal(button.textContent, "复制地址");
+    assert.equal(controller.api.linkCopied({ id: "stale", address: link.dataset.linkAddress, success: true }), false);
+    controller.api.linkCopied({ id: "links", address: link.dataset.linkAddress, success: false });
+    assert.match(button.textContent, /复制失败/);
+    button.click();
+    controller.api.linkCopied({ id: "links", address: link.dataset.linkAddress, success: true });
+    assert.equal(button.textContent, "已复制");
+    assert.equal(messages.filter(({type}) => ["patch", "change"].includes(type)).length, 0);
+    assert.equal(document.querySelectorAll("a,[href],[src]").length, 0);
+  });
+});
+
+
+test("差量保存回执不携带正文，最终版本化快照仍包含保存期间的新输入", async () => {
+  await withWorkbench(async ({ controller, messages }) => {
+    const source = "line\r\n".repeat(50_000);
+    controller.api.open({ id: "save-ack", text: source, bridgeMode: "patch-v1" });
+    controller.view.dispatch({ changes: { from: 0, insert: "new" } });
+    const latest = controller.api.getSnapshot();
+    controller.api.markSaved({ id: "save-ack", text: source });
+    assert.deepEqual(messages.at(-1), { type: "saved", id: "save-ack", version: latest.version, dirty: true, canUndo: true, canRedo: false });
+    assert.equal(Object.hasOwn(messages.at(-1), "text"), false);
+    assert.deepEqual(controller.api.getSnapshot(), latest);
+    controller.api.undo();
+    assert.equal(controller.api.getText(), source);
+    assert.equal(messages.at(-1).dirty, undefined); // patch 的 dirty 仍由原生精确计算。
+  });
+});
+
+test("大 Markdown 输入按规模尾沿刷新，显式切换立即刷新并取消旧会话任务", async () => {
+  await withWorkbench(async ({ controller, document }) => {
+    const { api } = controller, window = document.defaultView, preview = document.querySelector("#preview");
+    const timers = new Map(); let timerID = 0;
+    window.setTimeout = (callback, delay) => { timers.set(++timerID, { callback, delay }); return timerID; };
+    window.clearTimeout = (id) => timers.delete(id);
+    const source = "# 标题\n\n" + "正文 ".repeat(30_000);
+    api.open({ id: "large-markdown", text: source, language: "markdown", mode: "split", bridgeMode: "patch-v1" });
+    const original = preview.innerHTML;
+    for (const char of ["甲", "乙", "丙"]) controller.view.dispatch({ changes: { from: 2, insert: char } });
+    assert.equal(preview.innerHTML, original);
+    assert.equal(preview.getAttribute("aria-busy"), "true");
+    assert.equal(timers.size, 1); assert.equal([...timers.values()][0].delay, 180);
+    [...timers.values()][0].callback();
+    assert.match(preview.querySelector("h1").textContent, /丙乙甲/);
+    assert.equal(preview.hasAttribute("aria-busy"), false);
+    controller.view.dispatch({ changes: { from: 2, insert: "新" } });
+    const cancelled = [...timers.values()].map((item) => item.callback);
+    api.setMode({ mode: "source" }); assert.equal(timers.size, 0);
+    api.setMode({ mode: "preview" }); assert.match(preview.querySelector("h1").textContent, /新/);
+    api.open({ id: "next-after-large", text: "next" });
+    cancelled.forEach((callback) => callback());
+    assert.equal(preview.childNodes.length, 0);
+  });
+});

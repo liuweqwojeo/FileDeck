@@ -82,6 +82,10 @@ struct FilePreviewView: View {
                         LocalMediaPreview(url: url, session: session)
                             .id(PreviewIdentity(url: url, revision: retryRevision))
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    case .success(.ofd):
+                        LocalOFDPreview(url: url, session: session)
+                            .id(PreviewIdentity(url: url, revision: retryRevision))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     case .success(.quickLook):
                         SystemQuickLookPreview(url: url, revision: retryRevision, session: session)
                             .id(PreviewIdentity(url: url, revision: retryRevision))
@@ -135,6 +139,8 @@ struct FilePreviewView: View {
             return "\(document.encodingName) · 只读文本预览"
         case .success(.media):
             return "本机媒体预览 · 不自动播放"
+        case .success(.ofd):
+            return "OFD 只读预览 · 本机离线处理"
         case .success(.quickLook):
             return "macOS 系统预览 · 格式支持取决于系统与已安装的预览扩展"
         default:

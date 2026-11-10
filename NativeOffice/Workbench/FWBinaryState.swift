@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 final class FWBinaryState {
     private enum Work { case saving, reloading }
     private(set) var data: Data
+    private(set) var revision: UInt64 = 0
     private var recoveredUnsaved = false
     private var savedData: Data
     private var fileState: FileSaveState?
@@ -38,6 +39,7 @@ final class FWBinaryState {
         if isReadOnly, let path { throw DocumentIOError.readOnly(path) }
         try validateSize(data)
         self.data = data
+        revision &+= 1
         onChange?()
     }
 
@@ -60,6 +62,7 @@ final class FWBinaryState {
         try Task.checkCancellation()
         try validateSize(result.0)
         data = result.0
+        revision &+= 1
         return result.1
     }
 
@@ -106,6 +109,7 @@ final class FWBinaryState {
         }.value
         try Task.checkCancellation()
         data = loaded.0.data
+        revision &+= 1
         savedData = loaded.0.data
         recoveredUnsaved = false
         fileState = loaded.0.state
@@ -199,6 +203,41 @@ final class FWMediaHistory {
 }
 
 @MainActor
+final class FWValidatedFields: NSStackView, NSTextFieldDelegate {
+    let inputs: [NSTextField]
+    let errorLabel = NSTextField(wrappingLabelWithString: "")
+    weak var submitButton: NSButton?
+    var validation: ([String]) -> String? = { _ in nil }
+    var onEdit: ((Int) -> Void)?
+
+    init(labels: [String], values: [String], fieldWidth: CGFloat = 330) {
+        inputs = values.map { NSTextField(string: $0) }
+        super.init(frame: NSRect(x: 0, y: 0, width: fieldWidth + 10, height: CGFloat(max(90, labels.count * 57 + 38))))
+        orientation = .vertical; alignment = .leading; spacing = 7
+        for (index, label) in labels.enumerated() {
+            addArrangedSubview(NSTextField(labelWithString: label))
+            let field = inputs[index]
+            field.delegate = self; field.setAccessibilityLabel(label)
+            field.widthAnchor.constraint(equalToConstant: fieldWidth).isActive = true
+            addArrangedSubview(field)
+        }
+        errorLabel.font = .systemFont(ofSize: 12); errorLabel.textColor = .systemOrange
+        errorLabel.widthAnchor.constraint(equalToConstant: fieldWidth).isActive = true
+        addArrangedSubview(errorLabel)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    func validate() {
+        let error = validation(inputs.map(\.stringValue))
+        errorLabel.stringValue = error ?? ""
+        submitButton?.isEnabled = error == nil
+    }
+    func controlTextDidChange(_ notification: Notification) {
+        if let field = notification.object as? NSTextField, let index = inputs.firstIndex(of: field) { onEdit?(index) }
+        validate()
+    }
+}
+
+@MainActor
 enum FWMediaUI {
     static func show(_ error: Error, in window: NSWindow?) {
         if error is CancellationError { return }
@@ -209,28 +248,23 @@ enum FWMediaUI {
         if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
     }
 
-    static func fields(title: String, labels: [String], values: [String]) -> [String]? {
+    /// 校验在输入入口完成；错误留在原面板，调用方只接收已解析的业务值。
+    static func fields<Value>(title: String, labels: [String], values: [String],
+                              parse: @escaping ([String]) throws -> Value) -> Value? {
         let alert = NSAlert()
         alert.messageText = title
         alert.addButton(withTitle: "确定")
         alert.addButton(withTitle: "取消")
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        var inputs: [NSTextField] = []
-        for (label, value) in zip(labels, values) {
-            let field = NSTextField(string: value)
-            field.frame.size.width = 300
-            inputs.append(field)
-            stack.addArrangedSubview(NSTextField(labelWithString: label))
-            stack.addArrangedSubview(field)
-            field.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        let form = FWValidatedFields(labels: labels, values: values)
+        var parsed: Value?
+        form.validation = { texts in
+            do { parsed = try parse(texts); return nil }
+            catch { parsed = nil; return error.localizedDescription }
         }
-        stack.frame = CGRect(x: 0, y: 0, width: 320, height: max(64, labels.count * 55))
-        alert.accessoryView = stack
+        form.submitButton = alert.buttons.first; form.validate()
+        alert.accessoryView = form
         guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        return inputs.map(\.stringValue)
+        return parsed
     }
 
     static func files(title: String, types: [UTType]) -> [URL]? {

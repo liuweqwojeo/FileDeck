@@ -51,10 +51,7 @@ public final class FWBrowserHost: NSViewController {
             if visible { self.showLegacyEditor() }
             else if self.previewModal?.mode == .legacy { self.previewModal?.finishLegacyClose() }
         }.store(in: &observations)
-        editorBridge.$isExpanded.removeDuplicates().dropFirst().sink { [weak self] expanded in
-            guard let modal = self?.previewModal, modal.mode == .legacy, modal.isExpanded != expanded else { return }
-            modal.toggleExpanded()
-        }.store(in: &observations)
+        // 原生工作层默认铺满内容区；旧桥接的自动展开只服务 SwiftUI 布局，不能触发系统全屏。
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }

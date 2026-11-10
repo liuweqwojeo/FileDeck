@@ -294,6 +294,38 @@ final class TextDocumentSessionTests: XCTestCase {
         }
     }
 
+    func testIncrementalBufferKeepsPublishedSnapshotsAndExactDirtyWithoutAdvancingForNoOp() async throws {
+        try await withDirectory { directory in
+            let url = directory.appendingPathComponent("buffer.txt")
+            let source = String(repeating: "x", count: 100_000) + "é😀\r\n"
+            try Data(source.utf8).write(to: url)
+            let session = try await TextDocumentSession.open(url: url)
+            let snapshot = session.text
+            let initialRevision = session.revision
+            try session.applyEdits([.init(from: 99_999, to: 100_000, text: "x")])
+            XCTAssertEqual(session.revision, initialRevision)
+            for index in 0..<40 {
+                try session.applyEdits([.init(from: 99_999, to: 100_000, text: index.isMultiple(of: 2) ? "y" : "z")])
+            }
+            XCTAssertEqual(snapshot, source)
+            XCTAssertEqual(session.revision, initialRevision + 40)
+            XCTAssertTrue(session.isModified)
+            try session.applyEdits([.init(from: 99_999, to: 100_000, text: "x")])
+            XCTAssertFalse(session.isModified)
+            try session.applyEdits([.init(from: 100_000, to: 100_001, text: "e\u{301}")])
+            XCTAssertTrue(session.isModified)
+            try session.applyEdits([.init(from: 100_000, to: 100_002, text: "é")])
+            XCTAssertFalse(session.isModified)
+            XCTAssertTrue(session.text.utf8.elementsEqual(source.utf8))
+            let revision = session.revision
+            try session.replaceText(source)
+            XCTAssertEqual(session.revision, revision)
+            try await session.reload(discardChanges: true)
+            XCTAssertGreaterThan(session.revision, revision)
+            XCTAssertFalse(session.isModified)
+        }
+    }
+
     private func gatedStorage(_ gate: SessionSaveGate) -> TextDocumentSession.Storage {
         TextDocumentSession.Storage(open: TextDocumentSession.Storage.fileSystem.open, save: { document, destination, overwrite in
             await gate.pause()

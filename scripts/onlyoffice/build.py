@@ -65,6 +65,7 @@ def build_core(runner, qt_prefix, clean=False, single_process=False, jobs=4):
     apply_all()
     # 资源压缩依赖内核按需读取；在内核编译前应用，不能只改发行包。
     apply_all("desktop-sdk")
+    apply_all("core")
     environment, qt_root = prepare_environment(qt_prefix, 1 if single_process else jobs)
     tools = SOURCE / "build_tools"
     # update=0 是必要边界：上游 update=1 会 checkout -f 各仓库并丢弃补丁。

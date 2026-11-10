@@ -98,7 +98,7 @@ enum SafeFileIO {
         guard data.count <= maximumBytes else { throw DocumentIOError.fileTooLarge(limitBytes: maximumBytes) }
 
         // 即使明确覆盖，也必须完整核对磁盘文件。外部已增大到编辑上限之外时拒绝覆盖，允许另存新路径。
-        let existing = try snapshotIfPresent(resolved, maximumBytes: maximumBytes)
+        let existing = try observationIfPresent(resolved, maximumBytes: maximumBytes)
         // 明确传入另存目标后允许重建已删除的原路径；普通保存仍报告冲突。
         // 已存在的外部版本仍比较指纹；新出现的文件由最终快照检查和 RENAME_EXCL 保护。
         let recreatingChosenSource = destination != nil && savingOriginal && existing == nil
@@ -132,7 +132,7 @@ enum SafeFileIO {
         guard futimes(descriptor, nil) == 0 else { throw systemError() }
         guard fsync(descriptor) == 0 else { throw systemError() }
         guard source.resolvingSymlinksInPath() == resolved else { throw DocumentIOError.symbolicLinkChanged }
-        let latest = try snapshotIfPresent(resolved, maximumBytes: maximumBytes)
+        let latest = try observationIfPresent(resolved, maximumBytes: maximumBytes)
         // 即使用户确认覆盖，也不覆盖“确认后、本次写入过程中”出现的另一轮外部更改。
         guard latest?.fingerprint == existing?.fingerprint else { throw DocumentIOError.externalModification }
         let status: Int32
@@ -153,16 +153,23 @@ enum SafeFileIO {
     private struct Snapshot {
         let data: Data
         let metadata: stat
-        var fingerprint: FileFingerprint { FileFingerprint(data: data, metadata: metadata) }
+        let fingerprint: FileFingerprint
     }
 
-    private static func snapshotIfPresent(_ url: URL, maximumBytes: Int) throws -> Snapshot? {
+    /// 保存只需要磁盘版本的身份和摘要；读取后立即释放正文，避免两轮检查同时保留大文件。
+    private struct Observation {
+        let metadata: stat
+        let fingerprint: FileFingerprint
+    }
+
+    private static func observationIfPresent(_ url: URL, maximumBytes: Int) throws -> Observation? {
         var value = stat()
         if lstat(url.path, &value) != 0 {
             if errno == ENOENT { return nil }
             throw systemError()
         }
-        return try readSnapshot(url, maximumBytes: maximumBytes)
+        let snapshot = try readSnapshot(url, maximumBytes: maximumBytes)
+        return Observation(metadata: snapshot.metadata, fingerprint: snapshot.fingerprint)
     }
 
     private static func readSnapshot(_ url: URL, maximumBytes: Int) throws -> Snapshot {
@@ -182,7 +189,8 @@ enum SafeFileIO {
         // 元数据前后变化或读取不完整时不能建立可保存文档，要求调用方重试完整加载。
         guard FileMetadata(before) == FileMetadata(after), data.count == after.st_size,
               FileMetadata(try metadata(at: url)) == FileMetadata(after) else { throw DocumentIOError.externalModification }
-        return Snapshot(data: data, metadata: after)
+        // 同一份不可变快照只计算一次摘要，打开与保存核对直接复用结果。
+        return Snapshot(data: data, metadata: after, fingerprint: FileFingerprint(data: data, metadata: after))
     }
 
     private static func metadata(at url: URL) throws -> stat {

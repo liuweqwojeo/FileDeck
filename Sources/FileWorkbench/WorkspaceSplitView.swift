@@ -1,68 +1,44 @@
 import AppKit
 import SwiftUI
 
-/// 两侧栏分别保存宽度，中栏占用剩余空间；隐藏预览不会覆盖用户之前设定的宽度。
-struct WorkspaceSplitView<Sidebar: View, Content: View, Preview: View>: View {
-    let showPreview: Bool
-    var expandPreview = false
+/// 浏览区只保留侧栏与内容；预览由原生模态层管理，拖动结束后才持久化宽度。
+struct WorkspaceSplitView<Sidebar: View, Content: View>: View {
     var showSidebar = true
     @ViewBuilder let sidebar: () -> Sidebar
     @ViewBuilder let content: () -> Content
-    @ViewBuilder let preview: () -> Preview
     @AppStorage("FileWorkbench.sidebarWidth") private var savedSidebarWidth = 260.0
-    @AppStorage("FileWorkbench.previewWidth") private var savedPreviewWidth = 520.0
     @State private var sidebarDragOrigin: CGFloat?
-    @State private var previewDragOrigin: CGFloat?
+    @State private var draggedSidebarWidth: CGFloat?
 
     var body: some View {
         GeometryReader { geometry in
-            let widths = columnWidths(available: geometry.size.width)
+            let sidebarWidth = showSidebar ? boundedSidebar(draggedSidebarWidth ?? savedSidebarWidth, available: geometry.size.width) : 0
             HStack(spacing: 0) {
-                sidebar().frame(width: widths.sidebar).clipped()
+                sidebar().frame(width: sidebarWidth).clipped()
                     .allowsHitTesting(showSidebar).accessibilityHidden(!showSidebar).disabled(!showSidebar)
                 if showSidebar {
                     divider(label: "调整导航栏宽度", change: { translation in
-                        if sidebarDragOrigin == nil { sidebarDragOrigin = widths.sidebar }
-                        savedSidebarWidth = boundedSidebar((sidebarDragOrigin ?? widths.sidebar) + translation,
-                                                           available: geometry.size.width)
-                    }, end: { sidebarDragOrigin = nil }, adjust: { direction in
-                        savedSidebarWidth = boundedSidebar(widths.sidebar + direction, available: geometry.size.width)
+                        if sidebarDragOrigin == nil { sidebarDragOrigin = sidebarWidth }
+                        // 高频拖动只更新瞬时状态，避免每个鼠标事件都提交 AppStorage。
+                        draggedSidebarWidth = boundedSidebar((sidebarDragOrigin ?? sidebarWidth) + translation,
+                                                             available: geometry.size.width)
+                    }, end: {
+                        if let draggedSidebarWidth { savedSidebarWidth = draggedSidebarWidth }
+                        draggedSidebarWidth = nil; sidebarDragOrigin = nil
+                    }, adjust: { direction in
+                        savedSidebarWidth = boundedSidebar(sidebarWidth + direction, available: geometry.size.width)
                     })
                 }
-                content().frame(width: expandPreview ? 0 : max(0, geometry.size.width - widths.sidebar - widths.preview - (showPreview ? 1 : 0) - (showSidebar ? 1 : 0)))
-                    .clipped().allowsHitTesting(!expandPreview).accessibilityHidden(expandPreview)
-                if showPreview && !expandPreview {
-                    divider(label: "调整预览栏宽度", change: { translation in
-                        if previewDragOrigin == nil { previewDragOrigin = widths.preview }
-                        savedPreviewWidth = boundedPreview((previewDragOrigin ?? widths.preview) - translation,
-                                                           available: geometry.size.width, sidebar: widths.sidebar)
-                    }, end: { previewDragOrigin = nil }, adjust: { direction in
-                        savedPreviewWidth = boundedPreview(widths.preview + direction,
-                                                           available: geometry.size.width, sidebar: widths.sidebar)
-                    })
-                }
-                // 隐藏时宽度归零，但原生编辑器仍挂载，继续持有未保存内容。
-                preview().frame(width: widths.preview).clipped()
-                    .allowsHitTesting(showPreview).accessibilityHidden(!showPreview)
+                content().frame(width: max(0, geometry.size.width - sidebarWidth - (showSidebar ? 1 : 0)))
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
     }
 
-    private func columnWidths(available: CGFloat) -> (sidebar: CGFloat, preview: CGFloat) {
-        let sidebar = showSidebar ? boundedSidebar(savedSidebarWidth, available: available) : 0
-        return (sidebar, showPreview ? (expandPreview ? available - sidebar - 1 : boundedPreview(savedPreviewWidth, available: available, sidebar: sidebar)) : 0)
-    }
-
     private func boundedSidebar(_ width: CGFloat, available: CGFloat) -> CGFloat {
-        // 最小窗口下仍为文件列表留出 360 pt，预览留出 320 pt；只约束显示，不改写存储宽度。
-        let maximum = max(220, min(340, available - 360 - (showPreview && !expandPreview ? 322 : 1)))
+        // 最小窗口下仍为文件列表留出 360 pt；显示约束不覆盖用户保存的宽度。
+        let maximum = max(220, min(340, available - 361))
         return min(max(width.isFinite ? width : 260, 220), maximum)
-    }
-
-    private func boundedPreview(_ width: CGFloat, available: CGFloat, sidebar: CGFloat) -> CGFloat {
-        let maximum = max(320, available - sidebar - 362)
-        return min(max(width.isFinite ? width : 520, 320), maximum)
     }
 
     private func divider(label: String, change: @escaping (CGFloat) -> Void,

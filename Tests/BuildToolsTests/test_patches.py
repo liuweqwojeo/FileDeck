@@ -101,6 +101,44 @@ def make(build_js=True):
             finally:
                 os.chdir(previous_cwd)
 
+    def test_revised_patch_migrates_old_version_and_preserves_unrelated_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            source = repository / "sample.txt"
+            source.write_text("original\n")
+            unrelated = repository / "personal.txt"
+            unrelated.write_text("keep me\n")
+            patches = root / "patches"
+            previous = patches / "superseded/sample.patch"
+            previous.parent.mkdir(parents=True)
+            previous.write_text("--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n-original\n+old version\n")
+            current = patches / "sample.patch"
+            current.write_text("--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n-original\n+new version\n")
+            self.assertTrue(apply_patch(repository, previous))
+            self.assertTrue(apply_patch(repository, current))
+            self.assertEqual(source.read_text(), "new version\n")
+            self.assertEqual(unrelated.read_text(), "keep me\n")
+            self.assertFalse(apply_patch(repository, current))
+
+    def test_failed_patch_migration_restores_previous_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            source = root / "sample.txt"
+            source.write_text("original\n")
+            previous = root / "patches/superseded/sample.patch"
+            previous.parent.mkdir(parents=True)
+            previous.write_text("--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n-original\n+old version\n")
+            current = root / "patches/sample.patch"
+            current.write_text("--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n-unmatched original\n+new version\n")
+            self.assertTrue(apply_patch(root, previous))
+            with self.assertRaisesRegex(RuntimeError, "不匹配"):
+                apply_patch(root, current)
+            self.assertEqual(source.read_text(), "old version\n")
+
     def test_applies_once_and_keeps_unrelated_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

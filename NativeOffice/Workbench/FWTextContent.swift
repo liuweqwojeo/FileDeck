@@ -34,6 +34,7 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
 
     private var webView: WKWebView!
     private let editorContainer = NSView()
+    private var recoveryToolbar: NSStackView?
     private let status = NSTextField(labelWithString: "正在加载编辑器…")
     private let recoverySaveButton = NSButton(title: "另存内存草稿…", target: nil, action: nil)
     private let recoveryEditorButton = NSButton(title: "恢复编辑器", target: nil, action: nil)
@@ -63,6 +64,7 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
         return FWTextContent(session: session, kind: kind, editing: !preview)
     }
 
+    var recoveryRevision: UInt64 { session.revision }
     var recoveryCapture: DraftRecoveryCapture? {
         guard !disposed, !session.isClosed, session.isModified else { return nil }
         return DraftRecoveryCapture(kind: kind, originalURL: path, title: contentTitle,
@@ -88,7 +90,8 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     override func loadView() {
-        let root = NSView()
+        let root = NSStackView()
+        root.orientation = .vertical; root.alignment = .leading; root.spacing = 0
         root.wantsLayer = true
         recoverySaveButton.target = self
         recoverySaveButton.action = #selector(saveRecoveryDraft)
@@ -104,19 +107,13 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
         status.font = .systemFont(ofSize: 11)
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
+        recoveryToolbar = toolbar
+        toolbar.isHidden = failure == nil
         for child in [toolbar, editorContainer] {
             child.translatesAutoresizingMaskIntoConstraints = false
-            root.addSubview(child)
+            root.addArrangedSubview(child)
+            child.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
         }
-        NSLayoutConstraint.activate([
-            toolbar.topAnchor.constraint(equalTo: root.topAnchor),
-            toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            toolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            editorContainer.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
-            editorContainer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            editorContainer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            editorContainer.bottomAnchor.constraint(equalTo: root.bottomAnchor)
-        ])
         view = root
         loadEditor()
     }
@@ -170,7 +167,14 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
               let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
         if type == "ready" { bridgeReady = true; initializeIfReady(); return }
         guard body["id"] as? String == bridgeSessionID else { return }
-        if type == "patch", editorReady {
+        if type == "copyLink", editorReady, let address = body["address"] as? String {
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            let copied = pasteboard.setString(address, forType: .string)
+            let token = bridgeSessionID
+            Task { _ = try? await javascript("return window.workbench.linkCopied({id, address, success})",
+                arguments: ["id": token, "address": address, "success": copied]) }
+        } else if type == "patch", editorReady {
             guard let version = body["version"] as? Int, version > bridgeVersion else { return }
             requiredBridgeVersion = max(requiredBridgeVersion, version)
             guard !bridgeNeedsSync, body["baseVersion"] as? Int == bridgeVersion, version == bridgeVersion + 1,
@@ -189,6 +193,13 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
                 editorCanRedo = body["canRedo"] as? Bool ?? false
                 changed()
             } catch { requestBridgeResync() }
+        } else if type == "saved", editorReady, let version = body["version"] as? Int, version >= bridgeVersion {
+            // 回执只声明网页当前版本；正文与 dirty 仍由保存后的完整快照门禁确认。
+            requiredBridgeVersion = max(requiredBridgeVersion, version)
+            if version == bridgeVersion {
+                editorCanUndo = body["canUndo"] as? Bool ?? false
+                editorCanRedo = body["canRedo"] as? Bool ?? false
+            }
         } else if type == "change" || type == "state", editorReady, let text = body["text"] as? String {
             guard let version = body["version"] as? Int, version >= bridgeVersion else { return }
             do {
@@ -502,6 +513,7 @@ final class FWTextContent: NSViewController, FWNativeContent, WKNavigationDelega
             status.stringValue = loading ? "正在加载编辑器…" : session.encoding.name + (isReadOnly ? " · 只读" : "") + (isModified ? " · 未保存" : "")
             status.toolTip = status.stringValue
         }
+        recoveryToolbar?.isHidden = failure == nil
         recoverySaveButton.isHidden = failure == nil || !isEditing
         recoverySaveButton.isEnabled = availableOperations.contains(.saveAs)
         recoveryEditorButton.isHidden = failure == nil

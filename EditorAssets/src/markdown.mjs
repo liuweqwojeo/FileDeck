@@ -27,7 +27,7 @@ markdown.renderer.rules.image = (tokens, index) => {
   return `<img src="${escape(source)}" alt="${escape(alt)}" loading="lazy" decoding="async">`;
 };
 // 不输出 href，防止键盘、右键或拖动等路径绕过普通 click 的阻止逻辑。
-markdown.renderer.rules.link_open = (tokens, index) => `<span class="md-link" title="${escape(tokens[index].attrGet("href") ?? "")}">`;
-markdown.renderer.rules.link_close = () => "</span>";
+markdown.renderer.rules.link_open = (tokens, index) => `<span class="md-link" data-link-address="${escape(tokens[index].attrGet("href") ?? "")}"><span title="仅显示链接，不会跳转">`;
+markdown.renderer.rules.link_close = () => '</span> <button type="button" class="md-copy-link" aria-label="复制链接地址" title="仅复制地址，不打开链接" aria-live="polite">复制地址</button></span>';
 
 export function renderMarkdown(text) { return markdown.render(text); }

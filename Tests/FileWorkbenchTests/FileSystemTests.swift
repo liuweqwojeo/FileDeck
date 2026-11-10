@@ -107,6 +107,30 @@ final class FileSystemTests: XCTestCase {
         XCTAssertNil(entries.first?.size)
     }
 
+    func testEmptyProbeIncludesHiddenEntriesAndRejectsNonDirectories() throws {
+        XCTAssertFalse(try FileSystem.hasEntries(at: temporaryDirectory))
+        let hidden = try makeFile(".hidden", contents: "body")
+        XCTAssertTrue(try FileSystem.hasEntries(at: temporaryDirectory))
+        let snapshot = try BrowserDirectorySnapshot.read(temporaryDirectory, showHidden: false)
+        XCTAssertTrue(snapshot.entries.isEmpty)
+        XCTAssertFalse(snapshot.trulyEmpty)
+        XCTAssertThrowsError(try FileSystem.hasEntries(at: hidden))
+        try FileManager.default.removeItem(at: hidden)
+        XCTAssertTrue(try BrowserDirectorySnapshot.read(temporaryDirectory, showHidden: false).trulyEmpty)
+    }
+
+    func testFolderListingKeepsIdentityWithoutFileMetadata() throws {
+        try makeFolder("folder2")
+        try makeFolder("folder10")
+        try makeFile("document.txt", contents: "hello")
+        let full = try FileSystem.entries(at: temporaryDirectory, showHidden: false)
+        let folders = try FileSystem.folders(at: temporaryDirectory, showHidden: false)
+        XCTAssertEqual(folders.map(\.url), full.filter(\.isBrowsableDirectory).map(\.url))
+        XCTAssertEqual(folders.map(\.identity), full.filter(\.isBrowsableDirectory).map(\.identity))
+        XCTAssertTrue(folders.allSatisfy { $0.modifiedAt == nil && $0.typeIdentifier == nil })
+        XCTAssertNotNil(full.last?.modifiedAt)
+    }
+
     @discardableResult
     private func makeFolder(_ name: String) throws -> URL {
         let url = temporaryDirectory.appendingPathComponent(name, isDirectory: true)

@@ -100,6 +100,22 @@ final class NativeTextTests: NSObject, NSApplicationDelegate {
             throw Failed.assertion("未知鼠标驱动：" + driver)
         }
         if let selected = ProcessInfo.processInfo.environment["FW_NATIVE_HOST_TEST_CASE"] {
+            if selected == "pdf-find-delay" {
+                try await pdfFindDelayCheck()
+                return
+            }
+            if selected == "workflow-interaction" {
+                try await workflowInteractionChecks()
+                return
+            }
+            if selected == "editor-interaction" {
+                try await editorInteractionChecks()
+                return
+            }
+            if selected == "interaction-polish" {
+                try await interactionPolishChecks()
+                return
+            }
             if selected == "navigation-swipes" {
                 try await navigationSwipeChecks()
                 return
@@ -117,7 +133,7 @@ final class NativeTextTests: NSObject, NSApplicationDelegate {
                 try await languageChecks()
                 return
             }
-            guard ["trash", "external-sync", "file-operations", "search", "text-selection", "interaction", "icons", "icons-interaction"].contains(selected) else { throw Failed.assertion("未知原生宿主专项：" + selected) }
+            guard ["trash", "external-sync", "file-operations", "file-clipboard", "file-rename", "preview-layout", "search", "text-selection", "interaction", "icons", "icons-interaction"].contains(selected) else { throw Failed.assertion("未知原生宿主专项：" + selected) }
             let browser = FWBrowserHost(editorView: NSTabView(frame: .zero), openHandler: { _, _ in }, commandHandler: { _ in })
             window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1440, height: 900), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
             window.contentViewController = browser
@@ -128,6 +144,9 @@ final class NativeTextTests: NSObject, NSApplicationDelegate {
             else if selected == "trash" { try await trashMenuChecks(browser) }
             else if selected == "external-sync" { try await externalSyncChecks(browser) }
             else if selected == "file-operations" { try await fileOperationChecks(browser) }
+            else if selected == "preview-layout" { try await previewLayoutChecks(browser) }
+            else if selected == "file-clipboard" { try await fileClipboardShortcutChecks(browser) }
+            else if selected == "file-rename" { try await fileRenameChecks(browser) }
             else if selected == "search" { try await directorySearchChecks(browser) }
             else { try await textSelectionChecks(browser) }
             return
@@ -367,11 +386,12 @@ final class NativeTextTests: NSObject, NSApplicationDelegate {
     }
 
     func captureBrowser(_ browser: FWBrowserHost, name: String) throws {
-        browser.view.layoutSubtreeIfNeeded()
-        guard let bitmap = browser.view.bitmapImageRepForCachingDisplay(in: browser.view.bounds) else {
+        let view: NSView = browser.previewModal?.overlay ?? browser.view
+        view.layoutSubtreeIfNeeded()
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
             throw Failed.assertion("无法生成工作台验收截图")
         }
-        browser.view.cacheDisplay(in: browser.view.bounds, to: bitmap)
+        view.cacheDisplay(in: view.bounds, to: bitmap)
         guard let data = bitmap.representation(using: .png, properties: [:]) else { throw Failed.assertion("无法编码工作台验收截图") }
         try data.write(to: output.appendingPathComponent(name))
     }
@@ -390,7 +410,9 @@ final class NativeTextTests: NSObject, NSApplicationDelegate {
         try await mouseClick(at: point)
     }
 
-    func mouseClick(at point: NSPoint, right: Bool = false, clickCount: Int = 1, nativeMouse: Bool = false) async throws {
+    func mouseClick(at point: NSPoint, right: Bool = false, clickCount: Int = 1, nativeMouse: Bool = false,
+                    in targetWindow: NSWindow? = nil) async throws {
+        let window = targetWindow ?? self.window!
         if nativeMouse || ProcessInfo.processInfo.environment["FW_NATIVE_HOST_MOUSE_DRIVER"] == "cgevent" {
             // 备用真实事件只允许打到当前测试进程的前台内容区；失焦或窗口变化时直接拒绝。
             guard NSApp.isActive, window.isKeyWindow, window.contentView?.frame.contains(point) == true,
@@ -578,13 +600,14 @@ final class NativeTextTests: NSObject, NSApplicationDelegate {
                           (try? FileSystem.identity(at: target)) == item.identity)
             }
             if replacing {
-                let summary = store.actionError ?? ""
-                try check("同名替换拒绝且部分失败按数量汇总", summary.contains("1 个项目移到废纸篓，1 个项目未完成（共 2 个）")
+                let summary = store.fileOperationSummary ?? ""
+                try check("同名替换拒绝且部分失败按数量汇总", summary.contains("成功 1，失败 1，未执行 0，共 2 项")
                           && summary.contains(files[1].lastPathComponent)
                           && (try String(contentsOf: files[1])) == "F1 replacement must survive")
                 try check("菜单打开后新选择没有被移走", store.selectedURL == files[2]
                           && FileManager.default.fileExists(atPath: files[2].path))
-                try await pressSheet("知道了")
+                try check("批量失败在结果区反馈并可定位，不重复弹窗", store.actionError == nil && window.attachedSheet == nil
+                          && store.fileOperationFailureURLs == [files[1]])
             } else {
                 try check("多选成功仅移走两项且未选项保留", store.actionError == nil && store.selectedURLs.isEmpty
                           && FileManager.default.fileExists(atPath: files[2].path))
@@ -1178,7 +1201,7 @@ final class NativeTextTests: NSObject, NSApplicationDelegate {
         guard let modal = browser.previewModal, let document = modal.documentHost,
               let _ = findWeb(document.view) else { throw Failed.assertion("没有真实弹窗编辑器") }
         try check("弹窗默认只读且焦点不进入编辑按钮或文本框", !document.isEditing && !document.modified && window.firstResponder === modal.overlay.dialog)
-        try check("弹窗位于同一窗口并具有模态语义", modal.overlay.isDescendant(of: browser.view) && document.view.window === window && modal.overlay.dialog.isAccessibilityModal())
+        try check("弹窗位于同一窗口并具有模态语义", modal.overlay.superview === window.contentView && document.view.window === window && modal.overlay.dialog.isAccessibilityModal())
         let blankPoint = modal.overlay.dialog.convert(NSPoint(x: modal.overlay.dialog.bounds.midX, y: 3), to: nil)
         for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
             let click = NSEvent.mouseEvent(with: type, location: blankPoint, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
@@ -1190,10 +1213,9 @@ final class NativeTextTests: NSObject, NSApplicationDelegate {
         try await event("\t", keyCode: 48)
         let responder = window.firstResponder as? NSView
         try check("Tab焦点被限制在弹窗内部", responder === modal.overlay.dialog || responder?.isDescendant(of: modal.overlay.dialog) == true)
-        modal.toggleExpanded(); browser.view.layoutSubtreeIfNeeded()
-        window.setContentSize(NSSize(width: 820, height: 580)); browser.view.layoutSubtreeIfNeeded()
-        try check("主窗口缩小时最大化弹窗仍保留安全边距", modal.overlay.dialog.frame.minX >= 16 && modal.overlay.dialog.frame.maxX <= browser.view.bounds.width - 16 && modal.overlay.dialog.frame.maxY <= browser.view.bounds.height - 16)
-        modal.toggleExpanded(); window.setContentSize(NSSize(width: 1440, height: 900)); browser.view.layoutSubtreeIfNeeded()
+        window.setContentSize(NSSize(width: 820, height: 580)); window.contentView?.layoutSubtreeIfNeeded()
+        try check("主窗口缩小时工作层仍铺满内容区", modal.overlay.dialog.frame == modal.overlay.bounds && modal.overlay.frame == window.contentView?.bounds)
+        window.setContentSize(NSSize(width: 1440, height: 900)); window.contentView?.layoutSubtreeIfNeeded()
         try check("关闭干净预览成功", await closePreview(browser))
         try await Task.sleep(for: .milliseconds(120))
         try check("关闭后目录选中树展开及原列表对象保持", store.currentDirectory == directory && store.selectedURL == source && store.expandedDirectories == expanded && browser.backgroundView === originalList)
@@ -1232,9 +1254,10 @@ final class NativeTextTests: NSObject, NSApplicationDelegate {
         try await waitUntil("取消关闭返回") { self.window.attachedSheet == nil && !editing.busy }
         let afterCancelText = try await text(editorWeb)
         try check("取消保持同一WK文档草稿与编辑焦点", browser.previewDocument === editing && editing.modified && findWeb(editing.view) === editorWeb && window.firstResponder !== table && afterCancelText == actualDraft)
-        browser.previewModal?.toggleExpanded(); browser.previewModal?.toggleExpanded()
+        window.setContentSize(NSSize(width: 1100, height: 780)); window.contentView?.layoutSubtreeIfNeeded()
+        window.setContentSize(NSSize(width: 1440, height: 900)); window.contentView?.layoutSubtreeIfNeeded()
         let afterResizeText = try await text(editorWeb)
-        try check("最大化恢复不会丢失未保存内容", editing.modified && afterResizeText == actualDraft)
+        try check("窗口缩放不会丢失未保存内容", editing.modified && afterResizeText == actualDraft)
         let saveInteraction = Task { try await pressSheet("保存") }
         let savedClosed = await closePreview(browser)
         try await saveInteraction.value
@@ -1267,7 +1290,7 @@ final class NativeTextTests: NSObject, NSApplicationDelegate {
         let selectedCase = ProcessInfo.processInfo.environment["FW_NATIVE_HOST_TEST_CASE"]
         let report: [String: Any] = ["passed": passed, "testCase": selectedCase ?? "all",
                                    "mouseDriver": selectedCase == "navigation-swipes" ? "cgevent" : ProcessInfo.processInfo.environment["FW_NATIVE_HOST_MOUSE_DRIVER"] ?? "nsevent", "engine": selectedCase == "navigation-swipes" ? "real AppKit/SwiftUI NSHostingView, NSScrollView and PDFKit" : "real WKWebView with FWTextContent/FWDocumentHost/FWBrowserHost", "checks": records,
-                                   "scope": selectedCase == "navigation-swipes" ? "window-server scroll phases through native event monitor and file rows: parent/child chain, branch invalidation, selection, momentum, cancellation, settings and narrow grid; native image/PDF zoom controls and center stability; not physical trackpad or other-macOS validation" : selectedCase == "interaction-fixes" ? "eight interaction fixes: native key routing, explicit CSV deletion, search line selection, media preview/edit/save/return, Office route and command forwarding, actual multi-selection context menu and Rust name sheet; Office engine tested separately" : selectedCase == "languages" ? "12 language fixtures created through real templates; native filename mapping, offline WKWebView highlighting, logical LF input and exact CRLF saves; all native classes compiled; no installed app or Office changes" : selectedCase == "icons-interaction" ? "icon-only regression: workspace resume, sidebar focus, direct key input, save-and-return, conflict preservation, inline name/content search and result preview/location; unchanged system folder authorization panel excluded" : selectedCase == "icons" ? "actual list/grid light/dark rendering; metadata-only classification; preserved app system icons and symbolic link badge; click icon retains native list selection and focus; fixtures are display-only, not document parsing" : selectedCase == "interaction" ? "real main workspace: system folder panel cancellation, isolated workspace resume, light/dark/narrow/sidebar focus, direct key input, native save-and-return and conflict retention, inline name/content search preview and location; no installed app or Office mixed-tab acceptance" : selectedCase == "text-selection" ? "focused TXT modal Command+A and real Command+C pasteboard copy, Unicode across virtualized lines, readonly deletion protection, native mouse focus and bounded large-file preview; all native classes compiled" : selectedCase == "search" ? "F5 real toolbar/search sheet, typing, name/content, cancel with isolated worker gate, result location and browser state protection; fd searches on UUID fixtures; not real slow volume" : selectedCase == "file-operations" ? "F4 focused real file progress/cancel/undo controls, system Trash and same-volume move/copy with isolated UUID samples; EXDEV and cleanup failures covered by unit injection" : selectedCase == "external-sync" ? "F2 focused real vnode automatic synchronization from independent filesystem processes (not Finder UI), native list selection/scroll/focus, rename/delete, dirty WK draft and current directory relocation; all native classes compiled" : selectedCase == "trash" ? "F1 focused real two-item context menu and system Trash, replacement rejection/partial failure and UUID identity recovery; all native classes compiled, full browser/text workflow not executed" : "all native and browser UI classes compiled; F5 recursive search toolbar/sheet/cancel/location and content line, F4 real progress/cancel/undo controls and UUID copy/move/system Trash; real two-item context menu trash, identity replacement/partial failure and exact UUID trash identity recovery; F2 real vnode changes from independent filesystem processes (not Finder UI), list selection/scroll/focus, dirty WK draft and directory rename during preview; real modal preview/editor, save routing, close cancellation and stale results; Office mixed tabs require separate acceptance"]
+                                   "scope": selectedCase == "file-rename" ? "real list context-menu rename sheet: initial focus, filename selection, typing, focus loss, Escape cancellation, Return and button submission, conflict retry and disk/selection preservation; isolated fixtures, no installed app or Office engine acceptance" : selectedCase == "preview-layout" ? "full-window preview over parent chrome, top toolbar and secondary menu, compact status, narrow light/dark rendering, real macOS fullscreen enter/exit, dirty content preservation and save/return" : selectedCase == "file-clipboard" ? "real file-list/grid Command+C/Command+V dispatch, empty destination, repeated copies, external standard file clipboard, input text semantics and preview close/return; isolated fixtures and restored pasteboard; no installed app or Office engine acceptance" : selectedCase == "navigation-swipes" ? "window-server scroll phases through native event monitor and file rows: parent/child chain, branch invalidation, selection, momentum, cancellation, settings and narrow grid; native image/PDF zoom controls and center stability; not physical trackpad or other-macOS validation" : selectedCase == "interaction-fixes" ? "eight interaction fixes: native key routing, explicit CSV deletion, search line selection, media preview/edit/save/return, Office route and command forwarding, actual multi-selection context menu and Rust name sheet; Office engine tested separately" : selectedCase == "languages" ? "12 language fixtures created through real templates; native filename mapping, offline WKWebView highlighting, logical LF input and exact CRLF saves; all native classes compiled; no installed app or Office changes" : selectedCase == "icons-interaction" ? "icon-only regression: workspace resume, sidebar focus, direct key input, save-and-return, conflict preservation, inline name/content search and result preview/location; unchanged system folder authorization panel excluded" : selectedCase == "icons" ? "actual list/grid light/dark rendering; metadata-only classification; preserved app system icons and symbolic link badge; click icon retains native list selection and focus; fixtures are display-only, not document parsing" : selectedCase == "interaction" ? "real main workspace: system folder panel cancellation, isolated workspace resume, light/dark/narrow/sidebar focus, direct key input, native save-and-return and conflict retention, inline name/content search preview and location; no installed app or Office mixed-tab acceptance" : selectedCase == "text-selection" ? "focused TXT modal Command+A and real Command+C pasteboard copy, Unicode across virtualized lines, readonly deletion protection, native mouse focus and bounded large-file preview; all native classes compiled" : selectedCase == "search" ? "F5 real toolbar/search sheet, typing, name/content, cancel with isolated worker gate, result location and browser state protection; fd searches on UUID fixtures; not real slow volume" : selectedCase == "file-operations" ? "F4 focused real file progress/cancel/undo controls, system Trash and same-volume move/copy with isolated UUID samples; EXDEV and cleanup failures covered by unit injection" : selectedCase == "external-sync" ? "F2 focused real vnode automatic synchronization from independent filesystem processes (not Finder UI), native list selection/scroll/focus, rename/delete, dirty WK draft and current directory relocation; all native classes compiled" : selectedCase == "trash" ? "F1 focused real two-item context menu and system Trash, replacement rejection/partial failure and UUID identity recovery; all native classes compiled, full browser/text workflow not executed" : "all native and browser UI classes compiled; F5 recursive search toolbar/sheet/cancel/location and content line, F4 real progress/cancel/undo controls and UUID copy/move/system Trash; real two-item context menu trash, identity replacement/partial failure and exact UUID trash identity recovery; F2 real vnode changes from independent filesystem processes (not Finder UI), list selection/scroll/focus, dirty WK draft and directory rename during preview; real modal preview/editor, save routing, close cancellation and stale results; Office mixed tabs require separate acceptance"]
         if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) { try? data.write(to: output.appendingPathComponent("report.json")) }
         exit(passed ? 0 : 1)
     }
@@ -1297,5 +1320,42 @@ struct Main {
         let delegate = NativeTextTests()
         application.delegate = delegate
         withExtendedLifetime(delegate) { application.run() }
+    }
+}
+
+// 输入后不按回车，等待系统搜索框的延迟动作，确保首匹配不会自行前进。
+extension NativeTextTests {
+    func pdfFindDelayCheck() async throws {
+        let fixture = NativePDFTextFixture("11 FIRST 11")
+        let source = output.appendingPathComponent("pdf-find-delay.pdf")
+        try fixture.dataWithPDF(inside: fixture.bounds).write(to: source)
+        let pdf = try await FWPDFContent.open(url: source)
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 780), styleMask: [.titled,.closable,.resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentViewController = pdf
+        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        pdf.find()
+        let field = pdf.view.allDescendants.compactMap { $0 as? NSSearchField }.first!
+        field.selectText(nil)
+        print("PDF_SEARCH_FIELD_FLAGS", field.sendsWholeSearchString, field.sendsSearchStringImmediately)
+        try await event("1", keyCode: 18)
+        try await event("1", keyCode: 18)
+        try await Task.sleep(for: .milliseconds(1200))
+        let labels = pdf.view.allDescendants.compactMap { ($0 as? NSTextField)?.stringValue }
+        print("PDF_FIND_DELAY", labels)
+        try check("PDF 输入停止后保持首个匹配", labels.contains("1 / 2"))
+        try await event("\r", keyCode: 36)
+        try check("PDF 回车才前进到下一匹配", pdf.view.allDescendants.compactMap { ($0 as? NSTextField)?.stringValue }.contains("2 / 2"))
+        try check("PDF 查找不改变正文", !pdf.isModified)
+    }
+}
+
+/// 使用 PDFKit 可提取的文字，确保查找验收覆盖系统延迟 action。
+@MainActor
+private final class NativePDFTextFixture: NSView {
+    let text: String
+    init(_ text: String) { self.text = text; super.init(frame: NSRect(x: 0, y: 0, width: 400, height: 300)) }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    override func draw(_ dirtyRect: NSRect) {
+        (text as NSString).draw(at: NSPoint(x: 20, y: 150), withAttributes: [.font: NSFont.systemFont(ofSize: 16)])
     }
 }

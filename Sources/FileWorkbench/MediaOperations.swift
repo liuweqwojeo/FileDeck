@@ -271,14 +271,17 @@ enum ImageOperations {
 
     /// 像素矩形采用左上角原点；必须落在图片内且为整数，避免隐式取整改变用户选区。
     static func crop(_ image: CGImage, pixelRect: CGRect) throws -> CGImage {
+        try validateCrop(image, pixelRect: pixelRect)
+        guard let cropped = image.cropping(to: pixelRect) else { throw MediaOperationError.invalidImage }
+        return cropped
+    }
+    static func validateCrop(_ image: CGImage, pixelRect: CGRect) throws {
         let components = [pixelRect.origin.x, pixelRect.origin.y, pixelRect.width, pixelRect.height]
         guard components.allSatisfy({ $0.isFinite && $0.rounded() == $0 }),
               pixelRect.width > 0, pixelRect.height > 0,
               CGRect(x: 0, y: 0, width: image.width, height: image.height).contains(pixelRect) else {
             throw MediaOperationError.invalidParameter("裁剪范围必须为图片内的整数像素矩形。")
         }
-        guard let cropped = image.cropping(to: pixelRect) else { throw MediaOperationError.invalidImage }
-        return cropped
     }
 
     static func resize(_ image: CGImage, width: Int, height: Int) throws -> CGImage {
@@ -368,7 +371,7 @@ enum ImageOperations {
         return output
     }
 
-    private static func validate(width: Int, height: Int) throws {
+    static func validate(width: Int, height: Int) throws {
         guard width > 0, height > 0, width <= maximumDimension, height <= maximumDimension,
               width * height <= maximumPixelCount else {
             throw MediaOperationError.invalidParameter("图片宽高须为正整数，单边不超过 32768 像素，且总像素不超过 6400 万。")

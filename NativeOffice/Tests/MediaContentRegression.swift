@@ -27,6 +27,7 @@ struct MediaContentRegression {
         try await pdfSaveAndUndo(pdfPath, directory: directory, original: pdf)
         try await pdfEditsDuringSave(pdfPath, directory: directory)
         try await csvSaveAndEncoding(directory: directory)
+        try await csvConfigurationAndDrafts(directory: directory)
         try await csvIncrementalUndoAndBaseline(directory: directory)
         try await newPDF(directory: directory, imagePath: imagePath)
         try await quickLookReadOnly(directory: directory)
@@ -81,7 +82,7 @@ struct MediaContentRegression {
         let rotated = try PDFOperations.rotate(baseline, pageIndexes: [0])
         let limit = max(baseline.count, rotated.count) + 512
         let content = try await FWPDFContent.open(url: source, maximumBytes: limit)
-        try mutation(content) { try content.rotate(pageIndexes: [0]) }
+        try await mutation(content) { try await content.rotate(pageIndexes: [0]) }
         content.undo()
         try expect(!content.isModified && content.canRedo && !content.canUndo, "PDF initial redo branch")
         for dirty in [false, true] {
@@ -89,7 +90,7 @@ struct MediaContentRegression {
             let before = directory.appendingPathComponent("before-limit-\(dirty).pdf")
             try await content.export(to: before, format: .pdf)
             do {
-                try content.addTextAnnotation(pageIndex: 0, bounds: CGRect(x: 5, y: 5, width: 20, height: 20),
+                try await content.addTextAnnotation(pageIndex: 0, bounds: CGRect(x: 5, y: 5, width: 20, height: 20),
                                               text: String(repeating: "oversized annotation", count: 4_000))
                 throw failure("Oversized PDF installation accepted")
             } catch DocumentIOError.fileTooLarge { }
@@ -148,15 +149,15 @@ struct MediaContentRegression {
         let image = try await FWImageContent.open(url: imagePath)
         let pdf = try await FWPDFContent.open(url: pdfPath)
         let preview = try await FWQuickLookContent.open(url: imagePath)
-        try expect(!csv.canFind && !image.canFind && !preview.canFind && !preview.canUndo && !preview.canRedo,
-                   "CSV, image and Quick Look must not advertise unimplemented find")
+        try expect(csv.canFind && !image.canFind && !preview.canFind && !preview.canUndo && !preview.canRedo,
+                   "CSV must advertise implemented find; image and Quick Look must not")
         try expect(pdf.canFind, "PDF text find must be available without editing")
         for content: any FWNativeContent in [csv, image, pdf] {
             try expect(!content.canUndo && !content.canRedo, "Empty history must disable undo and redo")
             try await mutation(content.controller) {
                 if let csv = content as? FWCSVContent { try csv.setCell("changed", row: 0, column: 0) }
                 if let image = content as? FWImageContent { try await image.rotate(clockwise: true) }
-                if let pdf = content as? FWPDFContent { try pdf.rotate(pageIndexes: [0]) }
+                if let pdf = content as? FWPDFContent { try await pdf.rotate(pageIndexes: [0]) }
             }
             try expect(content.canUndo && !content.canRedo, "A committed edit must enable only undo")
             content.undo()
@@ -165,7 +166,7 @@ struct MediaContentRegression {
             var busyWasDisabled = false
             content.onStateChanged = {
                 if content.isBusy {
-                    busyWasDisabled = !content.canFind && !content.canUndo && !content.canRedo
+                    busyWasDisabled = content.canFind == (content is FWCSVContent) && !content.canUndo && !content.canRedo
                     content.undo() // 禁用期间的直接调用也不得消耗历史。
                 }
             }
@@ -187,7 +188,7 @@ struct MediaContentRegression {
             case "csv": readonly = try await FWCSVContent.open(url: readonlyPath)
             default: readonly = try await FWImageContent.open(url: readonlyPath)
             }
-            try expect(readonly.isReadOnly && readonly.canFind == (source.pathExtension == "pdf") && !readonly.canUndo && !readonly.canRedo,
+            try expect(readonly.isReadOnly && readonly.canFind == ["pdf", "csv"].contains(source.pathExtension) && !readonly.canUndo && !readonly.canRedo,
                        "Read-only media and CSV must advertise only supported non-mutating commands")
             try await readonly.close()
         }
@@ -325,9 +326,9 @@ struct MediaContentRegression {
     }
     @MainActor static func pdfSaveAndUndo(_ source: URL, directory: URL, original: Data) async throws {
         let content = try await FWPDFContent.open(url: source)
-        try mutation(content) {
-            try content.rotate(pageIndexes: [0])
-            try content.addTextAnnotation(pageIndex: 0, bounds: CGRect(x: 10, y: 10, width: 20, height: 20), text: "工作台中文批注")
+        try await mutation(content) {
+            try await content.rotate(pageIndexes: [0])
+            try await content.addTextAnnotation(pageIndex: 0, bounds: CGRect(x: 10, y: 10, width: 20, height: 20), text: "工作台中文批注")
             try content.addHighlight(pageIndex: 1, bounds: CGRect(x: 10, y: 10, width: 40, height: 10))
         }
         try expect(content.isModified, "PDF annotations must mark dirty")
@@ -353,16 +354,16 @@ struct MediaContentRegression {
     @MainActor static func pdfEditsDuringSave(_ source: URL, directory: URL) async throws {
         let content = try await FWPDFContent.open(url: source)
         var changed = false
-        var editError: Error?
+        var editTask: Task<Void, Error>?
         content.onStateChanged = {
             if content.isBusy && !changed {
                 changed = true
-                do { try mutation(content) { try content.rotate(pageIndexes: [1]) } } catch { editError = error }
+                editTask = Task { try await mutation(content) { try await content.rotate(pageIndexes: [1]) } }
             }
         }
         let destination = directory.appendingPathComponent("PDF快照.pdf")
         try await content.saveAs(to: destination)
-        if let editError { throw editError }
+        try await editTask?.value
         try expect(content.isModified && !content.isBusy, "PDF edits during save remain dirty")
         try expect(PDFOperations.read(Data(contentsOf: destination)).page(at: 1)?.rotation == 0, "PDF snapshot before concurrent edit")
         try await content.save()
@@ -388,14 +389,80 @@ struct MediaContentRegression {
         content.onStateChanged = {
             if content.isBusy && !changed {
                 changed = true
-                do { try mutation(content) { try content.setCell("保存期间修改", row: 1, column: 1) } } catch { editError = error }
+                do { try mutation(content) {
+                    try content.setCell("保存期间修改", row: 1, column: 1)
+                    try content.setEncoding(.utf16BigEndian)
+                } } catch { editError = error }
             }
         }
         try await content.save()
         if let editError { throw editError }
-        try expect(content.isModified, "CSV edit during save must remain dirty")
+        try expect(content.isModified && DocumentIO.open(url: destination).encoding == .utf16LittleEndian, "CSV edits and encoding during save must preserve captured output and remain dirty")
         try await content.save()
-        try expect(DocumentIO.open(url: destination).text.contains("保存期间修改") && !content.isModified, "CSV second save")
+        try expect(DocumentIO.open(url: destination).text.contains("保存期间修改") && DocumentIO.open(url: destination).encoding == .utf16BigEndian && !content.isModified, "CSV second save writes concurrent text and encoding")
+    }
+
+    /// 同一真实 CSV 会话覆盖配置、撤销、查找位置与磁盘恢复副本，避免只断言内部计数器。
+    @MainActor static func csvConfigurationAndDrafts(directory: URL) async throws {
+        let source = directory.appendingPathComponent("configuration.csv")
+        let original = Data("left;right\none;one\n".utf8)
+        try original.write(to: source)
+        let content = try await FWCSVContent.open(url: source, encoding: nil, delimiter: .comma)
+        content.view.frame = NSRect(x: 0, y: 0, width: 1000, height: 700)
+        content.view.layoutSubtreeIfNeeded()
+        func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
+        let controls = views(content.view)
+        let table = controls.compactMap { $0 as? NSTableView }.first!
+        let search = controls.compactMap { $0 as? NSSearchField }.first!
+        let next = controls.compactMap { $0 as? NSButton }.first { $0.title == "下一格" }!
+        func hasSecondMatch() -> Bool {
+            controls.compactMap { ($0 as? NSTextField)?.stringValue }.contains { $0.hasPrefix("2 / 2 格") }
+        }
+        func wait(_ condition: () -> Bool) async throws {
+            for _ in 0..<100 {
+                if condition() { return }
+                try await Task.sleep(for: .milliseconds(30))
+            }
+            throw failure("CSV configuration/draft state did not settle")
+        }
+        let recoveryDirectory = directory.appendingPathComponent("configuration-drafts", isDirectory: true)
+        let checkpoint = FWDraftCheckpoint(content: content, store: DraftRecoveryStore(directory: recoveryDirectory))
+        content.onStateChanged = { checkpoint.changed() }
+        try await mutation(content) { try await content.setDelimiter(.semicolon) }
+        try expect(table.numberOfColumns == 2 && !content.isModified, "Delimiter preparation must install parsed columns while preserving raw clean bytes")
+        content.undo()
+        try expect(table.numberOfColumns == 1 && !content.isModified, "Delimiter undo must restore original interpretation")
+        content.redo()
+        content.find(); search.stringValue = "one"
+        content.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: search))
+        try await wait { controls.compactMap { ($0 as? NSTextField)?.stringValue }.contains { $0.hasPrefix("1 / 2 格") } }
+        next.performClick(nil)
+        try expect(hasSecondMatch(), "CSV fixture must reach second match before encoding change")
+        let selected = table.selectedRow
+        try mutation(content) { try content.setEncoding(.utf16BigEndian) }
+        try expect(hasSecondMatch() && table.selectedRow == selected, "Encoding must preserve current match and selected row without restarting search")
+        try await Task.sleep(for: .milliseconds(350))
+        try expect(hasSecondMatch(), "Encoding must not later reset search to first match")
+        content.undo()
+        try expect(!content.isModified && hasSecondMatch(), "Encoding-only undo must restore clean baseline and match position")
+        content.redo()
+        try await wait { checkpoint.message == "恢复副本已更新" }
+        let record = recoveryDirectory.appendingPathComponent(checkpoint.id.uuidString + ".fwdraft")
+        let draft = try Data(contentsOf: record)
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        try await Task.sleep(for: .milliseconds(1000))
+        try expect(Data(contentsOf: record) == draft, "Dirty CSV selection must not rewrite identical draft header or payload")
+        try mutation(content) { try content.setEncoding(.utf8(bom: true)) }
+        try await wait { checkpoint.message == "恢复副本已更新" }
+        try expect(Data(contentsOf: record) != draft, "Recovery revision must include changed output encoding")
+        let cancelled = Task { try await content.setDelimiter(.comma) }
+        cancelled.cancel()
+        do { try await cancelled.value; throw failure("Cancelled delimiter change installed") } catch is CancellationError { }
+        try expect(table.numberOfColumns == 2 && !content.isBusy, "Cancelled delimiter preparation must leave previous table usable")
+        try await content.save()
+        try await wait { !FileManager.default.fileExists(atPath: record.path) }
+        try expect(DocumentIO.open(url: source).encoding == .utf8(bom: true) && !content.isModified, "Encoding save must write requested bytes and clean draft")
+        try await content.close()
     }
 
     @MainActor static func csvIncrementalUndoAndBaseline(directory: URL) async throws {

@@ -8,26 +8,26 @@ FileDeck 是面向 **macOS 14+、Apple Silicon（ARM64）** 的本地文件工�
 
 ## 下载与安装
 
-完整应用从 [GitHub Releases · v0.1.2 构建14预览版](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build14) 下载：
+完整应用从 [GitHub Releases · v0.1.2 构建19预览版](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build19) 下载：
 
-- [FileDeck v0.1.2 · 构建14 · macOS ARM64 下载包](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2-build14/FileDeck-0.1.2-build14-macOS-arm64.zip)
-- [SHA-256 校验文件](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2-build14/SHA256SUMS.txt)
+- [FileDeck v0.1.2 · 构建19 · macOS ARM64 下载包](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2-build19/FileDeck-0.1.2-build19-macOS-arm64.zip)
+- [SHA-256 校验文件](https://github.com/liuweqwojeo/FileDeck/releases/download/v0.1.2-build19/SHA256SUMS.txt)
 
-当前版本为 **v0.1.2（构建号14），Release / ARM64**，源码标签为 [v0.1.2-build14](https://github.com/liuweqwojeo/FileDeck/tree/v0.1.2-build14)。本版补齐触控板父子目录导航、原生缩放与拖放反馈，并包含此前的常见语言支持、八项交互修复、递归搜索、草稿恢复和文件操作进度/撤销。
+当前版本为 **v0.1.2（构建号19），Release / ARM64**，源码标签为 [v0.1.2-build19](https://github.com/liuweqwojeo/FileDeck/tree/v0.1.2-build19)。本版修复列表重命名面板自动关闭，新增 OFD 只读预览，完善铺满窗口的预览/编辑、系统全屏、CSV/PDF 查找、图片裁剪与文件创建交互，并保留此前的父子目录导航、草稿恢复和文件批次撤销。
 
-293项Swift测试、零/非零起始各27项原生手势/缩放检查及37项既有交互回归通过。正式安装路径另通过16项手势/按钮、2项目录快捷键，以及禁网Office三格式编辑、保存、重开和关闭保护。完整内容和验证边界见[构建14发布说明](docs/release-build14.md)及[触控板规范](docs/trackpad-interactions.md)。
+312项Swift、162项构建工具和40项编辑器测试通过；重命名原生专项10项、正式安装版3项实测通过。新包禁网完成Office三格式编辑、保存、重开和工作台混合路由验证，签名、资源与安装内容核验通过。完整内容和验证边界见[构建19发布说明](docs/release-build19.md)；父子导航约定见[触控板规范](docs/trackpad-interactions.md)。
 
-ZIP为 **792,398,782 字节，约792.40 MB（755.69 MiB）**。SHA-256：`d358fc43be562589ac126dda68b589bfc1fef8090f6afbb3d4bd96dc3453d48c`。将ZIP和`SHA256SUMS.txt`下载到同一目录，执行：
+ZIP为 **792,591,109 字节，约792.59 MB（755.87 MiB）**。SHA-256：`0dd02dfe50b905246ad120d95c66ff53b3891a0bab1eb16ce5e686f08b033d7e`。将ZIP和`SHA256SUMS.txt`下载到同一目录，执行：
 
 ```bash
 shasum -a 256 -c SHA256SUMS.txt
 ```
 
-确认输出 `FileDeck-0.1.2-build14-macOS-arm64.zip: OK` 后，用macOS内置归档工具解压，将整个`FileDeck.app`拖入“应用程序”。升级前保存文档并正常退出旧版；回退可使用[构建8 Release](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build8)及配套校验文件。Release另附安装说明和准确源码获取入口。
+确认输出 `FileDeck-0.1.2-build19-macOS-arm64.zip: OK` 后，用macOS内置归档工具解压，将整个`FileDeck.app`拖入“应用程序”。升级前保存文档并正常退出旧版；回退可使用[构建14 Release](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build14)及配套校验文件。Release另附安装说明和准确源码获取入口。
 
 当前为开发预览版，使用临时签名，尚未完成 Developer ID 签名与 Apple 公证。如果系统阻止打开，请先确认下载来源和校验值，再参考 [Apple 官方打开说明](https://support.apple.com/zh-cn/102445)。
 
-此包保留现有编辑器、语言、拼写字典、文档模板和插件。打包时对完全相同的静态资源使用包内相对链接去重，并无损压缩离线帮助和拼写字典，按需读取且不创建完整解压缓存。压缩实现与历史体积对比见 [离线资源压缩说明](docs/onlyoffice-build.md#离线帮助与拼写字典压缩)；本版更新、验证结果及升级回退方法见 [构建14发布说明](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build14)。
+此包保留现有编辑器、语言、拼写字典、文档模板和插件。打包时对完全相同的静态资源使用包内相对链接去重，并无损压缩离线帮助和拼写字典，按需读取且不创建完整解压缓存。压缩实现与历史体积对比见 [离线资源压缩说明](docs/onlyoffice-build.md#离线帮助与拼写字典压缩)；本版更新、验证结果及升级回退方法见 [构建19发布说明](https://github.com/liuweqwojeo/FileDeck/releases/tag/v0.1.2-build19)。
 
 ## 功能介绍
 
@@ -56,6 +56,7 @@ shasum -a 256 -c SHA256SUMS.txt
 | Office：`.docx`、`.xlsx`、`.pptx` | 内置 ONLYOFFICE 编辑；浏览预览走系统服务 | 完整编辑无需外部办公软件；只读预览效果取决于 macOS 的 Quick Look。 |
 | CSV：`.csv` | 原生表格编辑，也可从浏览列表预览 | TSV 可新建并作为文本打开；CSV 编辑器可选择 Tab 分隔符。 |
 | PDF：`.pdf` | 系统预览和内置 PDFKit 编辑工具 | 页面与批注操作不是任意正文排版编辑。 |
+| OFD：`.ofd` | 电子行程单等版式文档的只读预览、多页滚动、缩放与适合窗口 | 需要完整 FileDeck 应用；本机离线处理，原文件保持不变。 |
 | 图片：`.png`、`.jpg`、`.jpeg`、`.heic` | 图片预览及基础编辑 | HEIC 修改后需另存为 PNG/JPEG。 |
 | 音视频 | 使用系统 AVPlayerView 播放 | 支持范围取决于系统解码能力；不自动播放，关闭预览会停止并释放资源。 |
 | RTF、SVG、旧 Office 及其他格式 | 尝试系统 Quick Look | 能新建不代表已有专用编辑器；不支持的格式提供文件属性和默认应用打开入口。 |
@@ -109,7 +110,7 @@ shasum -a 256 -c SHA256SUMS.txt
 
 Office 使用应用内的真实空白模板，PDF 和 PNG/JPEG 生成可解码的有效文件。自定义扩展名匹配已知模板时仍使用对应模板；未支持的二进制格式会提示错误，不能通过改扩展名生成有效的压缩包、音视频或其他二进制文档。
 
-当前源码已补齐上述常见语言入口与离线高亮映射（尚未发布）：按完整文件名、后缀和语言别名选择语法，支持大小写后缀、`.mjs/.cjs`、`.mts/.cts`、`.cc/.cxx`、`.hh/.hxx`、`.pyi` 等常用变体。`.m` 默认按 Objective-C，`.h` 默认按 C，C++ 头文件使用 `.hpp/.hh/.hxx`；Svelte 和 Julia 随本地编辑资源打包。未识别的语言仍按纯文本编辑，高亮本身不运行代码。
+当前版本已补齐上述常见语言入口与离线高亮映射：按完整文件名、后缀和语言别名选择语法，支持大小写后缀、`.mjs/.cjs`、`.mts/.cts`、`.cc/.cxx`、`.hh/.hxx`、`.pyi` 等常用变体。`.m` 默认按 Objective-C，`.h` 默认按 C，C++ 头文件使用 `.hpp/.hh/.hxx`；Svelte 和 Julia 随本地编辑资源打包。未识别的语言仍按纯文本编辑，高亮本身不运行代码。
 
 选择具体文件类型后，未填写扩展名时自动补齐；显式填写不兼容的扩展名仍提示检查。创建时检查目标目录是否变化，拒绝同名覆盖；失败后保留填写的名称，成功后显示并选中新文件。
 

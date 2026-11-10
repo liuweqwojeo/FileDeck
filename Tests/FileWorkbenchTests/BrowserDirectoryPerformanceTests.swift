@@ -60,6 +60,7 @@ final class BrowserDirectoryPerformanceTests: XCTestCase {
         store.query = ".txt"
         let searched = store.displaySnapshot
         XCTAssertFalse(initial === searched)
+        XCTAssertTrue(initial.sorting === searched.sorting, "筛选词变化复用目录排序")
         XCTAssertEqual(store.visibleEntries.count, 2)
         store.query = ".txt"
         XCTAssertTrue(searched === store.displaySnapshot)
@@ -68,9 +69,11 @@ final class BrowserDirectoryPerformanceTests: XCTestCase {
         XCTAssertNil(store.selectedURL)
         store.query = ""
         XCTAssertEqual(store.visibleEntries.map(\.name), ["Folder"])
+        XCTAssertTrue(initial.sorting === store.displaySnapshot.sorting, "类型筛选变化复用目录排序")
         let filtered = store.displaySnapshot
         store.sortByModified.toggle()
         XCTAssertFalse(filtered === store.displaySnapshot)
+        XCTAssertFalse(filtered.sorting === store.displaySnapshot.sorting)
         let sorted = store.displaySnapshot
         store.refresh()
         try await settled(store)
@@ -336,6 +339,90 @@ final class BrowserDirectoryPerformanceTests: XCTestCase {
         XCTAssertNil(store.treeErrors[root])
     }
 
+    func testTreeOnlyReadIsLightweightAndLateListPromotesSharedJob() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Folder", isDirectory: true), withIntermediateDirectories: true)
+        try Data("body".utf8).write(to: root.appendingPathComponent("file.txt"))
+        let light = ReadProbe(), full = ReadProbe()
+        let loader = BrowserDirectoryLoader(read: { try full.read($0, $1) },
+                                            readFolders: { try light.read($0, $1, foldersOnly: true) })
+        var tree: BrowserDirectorySnapshot?
+        loader.request(root, hidden: false, generation: UUID(), foldersOnly: true) { tree = try? $0.get() }
+        try await wait { tree != nil }
+        XCTAssertEqual(tree?.entries.map(\.name), ["Folder"])
+        XCTAssertNil(tree?.entries.first?.modifiedAt)
+        XCTAssertNotNil(tree?.entries.first?.identity)
+        XCTAssertEqual(full.calls(root), 0)
+
+        // 强制树任务已经进入 I/O，再加入列表订阅；不能将轻量结果交给列表或开启并行重复读取。
+        light.block([root])
+        defer { light.releaseAll(); full.releaseAll() }
+        let generation = UUID()
+        var completed = 0
+        loader.request(root, hidden: false, generation: generation, foldersOnly: true) { _ in completed += 1 }
+        try await wait { light.calls(root) == 2 }
+        var list: BrowserDirectorySnapshot?
+        loader.request(root, hidden: false, generation: generation, foreground: true) { result in
+            list = try? result.get(); completed += 1
+        }
+        XCTAssertEqual(full.calls(root), 0)
+        light.releaseAll()
+        try await wait { completed == 2 }
+        XCTAssertEqual(light.calls(root), 2)
+        XCTAssertEqual(full.calls(root), 1)
+        XCTAssertEqual(list?.entries.map(\.name), ["Folder", "file.txt"])
+        XCTAssertEqual(list?.entries.last?.size, 4)
+    }
+
+    func testCancelledListDoesNotPromoteRunningTreeRead() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Folder", isDirectory: true), withIntermediateDirectories: true)
+        try Data("body".utf8).write(to: root.appendingPathComponent("file.txt"))
+        let light = ReadProbe(), full = ReadProbe()
+        light.block([root])
+        defer { light.releaseAll(); full.releaseAll() }
+        let loader = BrowserDirectoryLoader(read: { try full.read($0, $1) },
+                                            readFolders: { try light.read($0, $1, foldersOnly: true) })
+        let generation = UUID()
+        var tree: BrowserDirectorySnapshot?
+        loader.request(root, hidden: false, generation: generation, foldersOnly: true) { tree = try? $0.get() }
+        try await wait { light.calls(root) == 1 }
+        var cancelled = false
+        let ticket = loader.request(root, hidden: false, generation: generation, foreground: true) { result in
+            if case .failure(let error) = result { cancelled = error is CancellationError }
+        }
+        loader.cancel(ticket)
+        XCTAssertTrue(cancelled)
+        light.releaseAll()
+        try await wait { tree != nil }
+        XCTAssertEqual(tree?.entries.map(\.name), ["Folder"])
+        XCTAssertEqual(light.calls(root), 1)
+        XCTAssertEqual(full.calls(root), 0, "仅剩树订阅时不能再读取普通文件元数据")
+    }
+
+    func testRepeatedRefreshAndEqualPreferencesDoNotRewriteDefaults() async throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let name = "BrowserPersistence-\(UUID())"
+        let defaults = CountingDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let store = BrowserStore(observesExternalChanges: false, defaults: defaults, arguments: [])
+        store.openRoot(root)
+        try await settled(store)
+        store.gridView = true
+        store.sortKey = .size
+        store.sortAscending = false
+        let initial = defaults.writes
+        store.gridView = true
+        store.sortKey = .size
+        store.sortAscending = false
+        store.refresh()
+        try await settled(store)
+        XCTAssertEqual(defaults.writes, initial, "相同设置和工作区快照不重复持久化")
+    }
+
     private func makeRoot() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("FileDeckO4-\(UUID())", isDirectory: true)
             .standardizedFileURL.resolvingSymlinksInPath()
@@ -371,13 +458,22 @@ private final class ReadProbe: @unchecked Sendable {
     func block(_ urls: [URL]) { condition.lock(); blocked.formUnion(urls); condition.unlock() }
     func release(_ url: URL) { condition.lock(); blocked.remove(url); condition.broadcast(); condition.unlock() }
     func releaseAll() { condition.lock(); blocked = []; condition.broadcast(); condition.unlock() }
-    func read(_ url: URL, _ hidden: Bool) throws -> BrowserDirectorySnapshot {
-        let result = Result { try BrowserDirectorySnapshot.read(url, showHidden: hidden) }
+    func read(_ url: URL, _ hidden: Bool, foldersOnly: Bool = false) throws -> BrowserDirectorySnapshot {
+        let result = Result { try BrowserDirectorySnapshot.read(url, showHidden: hidden, foldersOnly: foldersOnly) }
         condition.lock()
         records.append((url, hidden)); active += 1; peak = max(peak, active)
         while blocked.contains(url) { condition.wait() }
         active -= 1
         condition.unlock()
         return try result.get()
+    }
+}
+
+/// 仅观察真实 UserDefaults 写入边界，实际编码、读取和持久化仍由系统实现。
+private final class CountingDefaults: UserDefaults, @unchecked Sendable {
+    var writes: [String: Int] = [:]
+    override func set(_ value: Any?, forKey defaultName: String) {
+        writes[defaultName, default: 0] += 1
+        super.set(value, forKey: defaultName)
     }
 }

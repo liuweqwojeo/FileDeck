@@ -1,7 +1,19 @@
 import AppKit
 
+/// 记录用户实际指向的列；NSTableView 的行选择不能单独代表某个单元格。
 @MainActor
-final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSource, NSTableViewDelegate {
+final class FWCSVTable: NSTableView {
+    var cellSelected: ((Int, Int) -> Void)?
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let row = row(at: point), column = column(at: point)
+        super.mouseDown(with: event)
+        if row >= 0, column >= 0 { cellSelected?(row, column) }
+    }
+}
+
+@MainActor
+final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     let id = UUID()
     let kind = WorkbenchFileKind.csv
     var controller: NSViewController { self }
@@ -9,6 +21,7 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
     var path: URL? { document.sourceURL }
     var isReadOnly: Bool { document.isReadOnly }
     var isBusy: Bool { work != nil }
+    var canFind: Bool { !closed && work != .reloading }
     var canUndo: Bool { canEdit && !isBusy && history.canUndo }
     var canRedo: Bool { canEdit && !isBusy && history.canRedo }
     var isModified: Bool { recoveredUnsaved || textModified || selectedEncoding != savedEncoding }
@@ -31,11 +44,27 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
     private var textModified = false
     private var savedSignature: CSVDocument.SerializationSignature?
     private var revision: UInt64 = 0
+    private(set) var recoveryRevision: UInt64 = 0
     private var savedEncoding: TextFileEncoding
     private var selectedEncoding: TextFileEncoding
     private var work: Work?
     private var closed = false
-    private let table = NSTableView()
+    private let table = FWCSVTable()
+    private var activeColumn: Int?
+    private let searchField = NSSearchField()
+    private let searchBar = NSStackView()
+    private let searchCount = NSTextField(labelWithString: "输入查找内容")
+    private let previousMatch = NSButton(title: "上一格", target: nil, action: nil)
+    private let nextMatch = NSButton(title: "下一格", target: nil, action: nil)
+    private var searchTask: Task<Void, Never>?
+    private var searchRevision: UInt64?
+    private var matches: [(row: Int, column: Int)] = []
+    private var matchIndex: Int?
+    private var selectedCell: (row: Int, column: Int)? {
+        guard model.rows.indices.contains(table.selectedRow), let column = activeColumn,
+              model.rows[table.selectedRow].indices.contains(column) else { return nil }
+        return (table.selectedRow, column)
+    }
     private let status = NSTextField(labelWithString: "")
     private let delimiterPopup = NSPopUpButton()
     private let encodingPopup = NSPopUpButton()
@@ -128,7 +157,22 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
                                           NSButton(title: "按此编码重新读取", target: self, action: #selector(redecode))])
         let toolbar = NSStackView(views: [actions, settings])
         toolbar.orientation = .vertical; toolbar.alignment = .leading; toolbar.spacing = 6
+        searchField.placeholderString = "查找单元格内容"; searchField.delegate = self
+        // 输入由 delegate 重算；只在回车时触发下一格，避免 NSSearchField 延迟 action 自动跳过首格。
+        searchField.sendsWholeSearchString = true
+        searchField.setAccessibilityIdentifier("csv.find.query")
+        searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
+        searchField.target = self; searchField.action = #selector(nextSearchMatch)
+        previousMatch.target = self; previousMatch.action = #selector(previousSearchMatch)
+        nextMatch.target = self; nextMatch.action = #selector(nextSearchMatch)
+        previousMatch.keyEquivalent = "g"; previousMatch.keyEquivalentModifierMask = [.command, .shift]
+        nextMatch.keyEquivalent = "g"; nextMatch.keyEquivalentModifierMask = .command
+        for item in [searchField, searchCount, previousMatch, nextMatch,
+                     NSButton(title: "关闭查找", target: self, action: #selector(closeSearch))] { searchBar.addArrangedSubview(item) }
+        searchBar.spacing = 8; searchBar.isHidden = true
+        toolbar.addArrangedSubview(searchBar)
         table.dataSource = self; table.delegate = self
+        table.cellSelected = { [weak self] _, column in self?.activeColumn = column; self?.refreshState() }
         table.allowsColumnSelection = true
         table.allowsMultipleSelection = false
         table.gridStyleMask = [.solidHorizontalGridLineMask, .solidVerticalGridLineMask]
@@ -147,7 +191,16 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
               model.rows[row].indices.contains(column) else { return nil }
         return model.rows[row][column]
     }
-    func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool { canEdit }
+    func tableView(_ tableView: NSTableView, shouldEdit tableColumn: NSTableColumn?, row: Int) -> Bool {
+        activeColumn = tableColumn.flatMap { Int($0.identifier.rawValue) }
+        refreshState()
+        return canEdit
+    }
+    func tableView(_ tableView: NSTableView, willDisplayCell cell: Any, for tableColumn: NSTableColumn?, row: Int) {
+        guard let cell = cell as? NSTextFieldCell else { return }
+        cell.drawsBackground = row == table.selectedRow && tableColumn?.identifier.rawValue == activeColumn.map(String.init)
+        cell.backgroundColor = .controlAccentColor.withAlphaComponent(0.2)
+    }
     func tableViewSelectionDidChange(_ notification: Notification) { refreshState() }
     func tableView(_ tableView: NSTableView, setObjectValue object: Any?, for tableColumn: NSTableColumn?, row: Int) {
         guard let column = tableColumn.flatMap({ Int($0.identifier.rawValue) }), let text = object as? String else { return }
@@ -184,7 +237,7 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
         try requireIdle()
         try commitCellEditor()
         guard !isModified || discardChanges else { throw DocumentSessionError.unsavedChanges }
-        closed = true; refreshState()
+        closed = true; searchTask?.cancel(); refreshState()
     }
     func undo() { if canUndo { history.undo() } }
     func redo() { if canRedo { history.redo() } }
@@ -229,7 +282,7 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
         }.value
         recoveredUnsaved = false
         document = loaded.0; model = loaded.1; savedText = document.text; originalText = document.text
-        savedSignature = model.serializationSignature; textModified = false; revision &+= 1
+        savedSignature = model.serializationSignature; textModified = false; revision &+= 1; recoveryRevision &+= 1
         savedEncoding = document.encoding; selectedEncoding = document.encoding
         history.removeAllActions(); refreshTable()
     }
@@ -240,15 +293,15 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
         guard next != model else { return }
         try install(Snapshot(model: next, originalText: nil, encoding: selectedEncoding), name: name)
     }
-    private func install(_ snapshot: Snapshot, name: String) throws {
+    private func install(_ snapshot: Snapshot, name: String, signaturePrepared: Bool = false) throws {
         try requireEditable()
         let previous = Snapshot(model: model, originalText: originalText, encoding: selectedEncoding)
         let previousDelimiter = model.delimiter
         model = snapshot.model; originalText = snapshot.originalText; selectedEncoding = snapshot.encoding
-        if previousDelimiter != model.delimiter {
+        if previousDelimiter != model.delimiter, !signaturePrepared {
             savedSignature = (try? CSVDocument(text: savedText, delimiter: model.delimiter))?.serializationSignature
         }
-        revision &+= 1
+        revision &+= 1; recoveryRevision &+= 1
         updateModifiedState()
         history.registerUndo(withTarget: self) { target in
             MainActor.assumeIsolated { target.perform { try target.install(previous, name: name) } }
@@ -264,7 +317,7 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
         let previousOriginal = originalText
         try model.restoreCell(cell)
         originalText = restoredText
-        revision &+= 1
+        revision &+= 1; recoveryRevision &+= 1
         updateModifiedState()
         history.registerUndo(withTarget: self) { target in
             MainActor.assumeIsolated { target.perform { try target.installCell(previous, originalText: previousOriginal, name: name) } }
@@ -275,6 +328,71 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
         }
         refreshState()
     }
+
+    func find() {
+        guard canFind else { return }
+        _ = view
+        searchBar.isHidden = false
+        view.window?.makeFirstResponder(searchField)
+        searchCells()
+    }
+    @discardableResult func dismissFind() -> Bool {
+        guard isViewLoaded, !searchBar.isHidden else { return false }
+        searchTask?.cancel(); searchTask = nil
+        searchBar.isHidden = true
+        view.window?.makeFirstResponder(table)
+        return true
+    }
+    func dispose() { searchTask?.cancel() }
+    func controlTextDidChange(_ notification: Notification) {
+        if notification.object as? NSSearchField === searchField { searchCells() }
+    }
+    /// 捕获不可变表格在后台逐格查找；修改、撤销与重新读取使旧结果失效，不改变内容历史。
+    private func searchCells() {
+        searchTask?.cancel(); matches = []; matchIndex = nil
+        searchRevision = revision
+        previousMatch.isEnabled = false; nextMatch.isEnabled = false
+        let term = searchField.stringValue
+        guard !term.isEmpty else { searchCount.stringValue = "输入查找内容"; return }
+        searchCount.stringValue = "正在查找…"
+        let rows = model.rows
+        searchTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+            let worker = Task.detached(priority: .userInitiated) {
+                var result: [(row: Int, column: Int)] = []
+                for (row, cells) in rows.enumerated() {
+                    if Task.isCancelled { break }
+                    for (column, value) in cells.enumerated() where value.range(of: term, options: .caseInsensitive) != nil {
+                        result.append((row, column))
+                    }
+                }
+                return result
+            }
+            let found = await withTaskCancellationHandler(operation: { await worker.value }, onCancel: { worker.cancel() })
+            guard !Task.isCancelled, let self else { return }
+            self.matches = found
+            self.showMatch(step: 1)
+        }
+    }
+    private func showMatch(step: Int) {
+        guard !searchBar.isHidden else { return }
+        previousMatch.isEnabled = !matches.isEmpty; nextMatch.isEnabled = !matches.isEmpty
+        guard !matches.isEmpty else { searchCount.stringValue = "0 格匹配"; return }
+        let index = matchIndex.map { ($0 + step + matches.count) % matches.count } ?? (step > 0 ? 0 : matches.count - 1)
+        matchIndex = index
+        let cell = matches[index]
+        activeColumn = cell.column
+        // AppKit 的列选择会清空行选择；保留明确行目标，以单元格背景指示命中列。
+        table.deselectAll(nil)
+        table.selectRowIndexes(IndexSet(integer: cell.row), byExtendingSelection: false)
+        table.needsDisplay = true
+        table.scrollRowToVisible(cell.row); table.scrollColumnToVisible(cell.column)
+        searchCount.stringValue = "\(index + 1) / \(matches.count) 格 · R\(cell.row + 1)C\(cell.column + 1)"
+        refreshState()
+    }
+    @objc private func nextSearchMatch() { showMatch(step: 1) }
+    @objc private func previousSearchMatch() { showMatch(step: -1) }
+    @objc private func closeSearch() { dismissFind() }
 
     private func currentText() throws -> String { try originalText ?? model.serialize() }
 
@@ -314,19 +432,45 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
         guard canEdit, column >= 0, column < model.columnCount else { return }
         perform { try commitCellEditor(); try mutate(name: "删除列") { try $0.deleteColumn(at: column) } }
     }
+    /// 读取方式变化可能重建十万行；主线程只提交单元格、冻结快照和安装结果。
+    func setDelimiter(_ delimiter: CSVDelimiter) async throws {
+        try requireIdle(); try requireEditable(); try commitCellEditor()
+        guard delimiter != model.delimiter else { return }
+        let current = model, original = originalText, baseline = savedText
+        work = .reloading; refreshState()
+        defer { work = nil; refreshState() }
+        let prepared = try await Task.detached(priority: .userInitiated) {
+            let text = try original ?? current.serialize()
+            return (try CSVDocument(text: text, delimiter: delimiter), text,
+                    (try? CSVDocument(text: baseline, delimiter: delimiter))?.serializationSignature)
+        }.value
+        try Task.checkCancellation()
+        work = nil
+        savedSignature = prepared.2
+        try install(Snapshot(model: prepared.0, originalText: prepared.1, encoding: selectedEncoding),
+                    name: "切换分隔符", signaturePrepared: true)
+    }
     @objc private func changeDelimiter() {
-        perform {
-            try commitCellEditor()
-            let delimiter = CSVDelimiter.allCases[delimiterPopup.indexOfSelectedItem]
-            let text = try currentText()
-            let next = try CSVDocument(text: text, delimiter: delimiter)
-            try install(Snapshot(model: next, originalText: text, encoding: selectedEncoding), name: "切换分隔符")
+        let delimiter = CSVDelimiter.allCases[delimiterPopup.indexOfSelectedItem]
+        Task {
+            do { try await setDelimiter(delimiter) }
+            catch { FWMediaUI.show(error, in: view.window); refreshState() }
         }
+    }
+    /// 保存编码不改变表格正文；撤销只保留一个编码值，查找结果和选区无需重建。
+    func setEncoding(_ encoding: TextFileEncoding) throws {
+        try requireEditable()
+        guard encoding != selectedEncoding else { return }
+        let previous = selectedEncoding
+        selectedEncoding = encoding; recoveryRevision &+= 1
+        history.registerUndo(withTarget: self) { target in
+            MainActor.assumeIsolated { target.perform { try target.setEncoding(previous) } }
+        }
+        history.setActionName("选择保存编码")
         refreshState()
     }
     @objc private func changeEncoding() {
-        perform { try install(Snapshot(model: model, originalText: originalText, encoding: Self.encodings[encodingPopup.indexOfSelectedItem]), name: "选择保存编码") }
-        refreshState()
+        perform { try setEncoding(Self.encodings[encodingPopup.indexOfSelectedItem]) }
     }
     @objc private func redecode() {
         guard !isBusy, path != nil else { return }
@@ -339,11 +483,10 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
         }
     }
     @objc private func editSelectedCell() {
-        guard canEdit else { return }
+        guard canEdit, let cell = selectedCell else { return }
         perform {
             try commitCellEditor()
-            let row = max(0, table.selectedRow), column = max(0, table.selectedColumn)
-            guard row < model.rowCount, column < model.columnCount else { throw CSVDocumentError.indexOutOfRange }
+            let (row, column) = cell
             let alert = NSAlert()
             alert.messageText = "编辑第 \(row + 1) 行、第 \(column + 1) 列（支持换行）"
             alert.addButton(withTitle: "确定"); alert.addButton(withTitle: "取消")
@@ -370,6 +513,7 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
         table.reloadData(); refreshState()
     }
     private func refreshState() {
+        if isViewLoaded, !searchBar.isHidden, searchRevision != revision { searchCells() }
         for button in editButtons {
             button.isEnabled = canEdit
             if button.action == #selector(removeRow) {
@@ -378,14 +522,18 @@ final class FWCSVContent: NSViewController, FWNativeContent, NSTableViewDataSour
             } else if button.action == #selector(removeColumn) {
                 button.isEnabled = canEdit && table.selectedColumn >= 0 && table.selectedColumn < model.columnCount
                 button.toolTip = button.isEnabled ? "删除第 \(table.selectedColumn + 1) 列" : "请先选择要删除的列"
+            } else if button.action == #selector(editSelectedCell) {
+                button.isEnabled = canEdit && selectedCell != nil
+                button.toolTip = selectedCell.map { "编辑第 \($0.row + 1) 行、第 \($0.column + 1) 列" } ?? "请先点击要编辑的单元格"
             }
         }
-        delimiterPopup.isEnabled = canEdit; encodingPopup.isEnabled = canEdit
+        delimiterPopup.isEnabled = canEdit && !isBusy; encodingPopup.isEnabled = canEdit
         delimiterPopup.selectItem(at: CSVDelimiter.allCases.firstIndex(of: model.delimiter) ?? 0)
         encodingPopup.selectItem(at: Self.encodings.firstIndex(of: selectedEncoding) ?? 0)
         status.stringValue = "\(model.rowCount) 行 × \(model.columnCount) 列 · \(selectedEncoding.name) · \(model.preferredLineEnding == .crlf ? "CRLF" : model.preferredLineEnding == .cr ? "CR" : "LF")" + (isBusy ? " · 正在处理…" : "")
         if table.selectedRow >= 0 { status.stringValue += " · 已选第 \(table.selectedRow + 1) 行" }
         if table.selectedColumn >= 0 { status.stringValue += " · 已选第 \(table.selectedColumn + 1) 列" }
+        if let cell = selectedCell { status.stringValue += " · 当前单元格 R\(cell.row + 1)C\(cell.column + 1)" }
         onStateChanged?()
     }
     private func perform(_ operation: () throws -> Void) {

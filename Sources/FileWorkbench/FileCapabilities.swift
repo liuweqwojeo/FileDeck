@@ -157,7 +157,7 @@ struct FileCapabilityRegistry: Sendable {
         case "png": return .png
         case "jpg", "jpeg", "jpe": return .jpeg
         case "heic", "heif": return .heic
-        case "doc", "xls", "ppt", "docm", "xlsm", "pptm", "rtf", "rtfd", "svg", "pages", "numbers", "key": return .other
+        case "doc", "xls", "ppt", "docm", "xlsm", "pptm", "rtf", "rtfd", "svg", "pages", "numbers", "key", "ofd": return .other
         default: break
         }
         if sourceExtensions.contains(ext) { return .code }

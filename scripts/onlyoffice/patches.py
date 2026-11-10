@@ -12,6 +12,19 @@ def apply_patch(repository, patch):
         return False
     code, detail = capture(arguments + ["--check", str(patch)])
     if code:
+        # 修订旧补丁时只迁移可完整反向验证的已应用版本；新补丁失败则恢复旧版，保留其他本地修改。
+        previous = patch.parent / "superseded" / patch.name
+        if previous.is_file() and capture(arguments + ["--reverse", "--check", str(previous)])[0] == 0:
+            status, message = capture(arguments + ["--reverse", str(previous)])
+            if status:
+                raise RuntimeError("迁移旧补丁失败：" + patch.name + "\n" + message)
+            try:
+                return apply_patch(repository, patch)
+            except Exception:
+                status, message = capture(arguments + [str(previous)])
+                if status:
+                    raise RuntimeError("恢复旧补丁失败：" + patch.name + "\n" + message)
+                raise
         raise RuntimeError("上游补丁与当前源码不匹配：" + patch.name + "\n" + detail)
     code, detail = capture(arguments + [str(patch)])
     if code:
@@ -21,7 +34,7 @@ def apply_patch(repository, patch):
 
 
 def apply_all(repository_name="build_tools"):
-    repositories = {name: SOURCE / name for name in ("build_tools", "desktop-apps", "desktop-sdk")}
+    repositories = {name: SOURCE / name for name in ("build_tools", "desktop-apps", "desktop-sdk", "core")}
     repositories["hunspell"] = SOURCE / "core/Common/3dParty/hunspell/hunspell"
     if repository_name not in repositories:
         raise RuntimeError("没有配置此上游仓库的补丁：" + repository_name)
@@ -38,5 +51,5 @@ def apply_all(repository_name="build_tools"):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("repository", choices=("build_tools", "desktop-apps", "desktop-sdk", "hunspell"))
+    parser.add_argument("repository", choices=("build_tools", "desktop-apps", "desktop-sdk", "core", "hunspell"))
     apply_all(parser.parse_args().repository)

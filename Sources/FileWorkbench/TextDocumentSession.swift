@@ -32,6 +32,13 @@ final class TextDocumentSession: DocumentSession {
     private(set) var isModified: Bool
     private(set) var isClosed = false
     private var document: TextFileDocument
+    /// 正文以可变 UTF-16 缓冲区接收差量；只有保存、恢复副本或完整同步才冻结为 String。
+    private let buffer: NSMutableString
+    private var textSnapshot: String?
+    private var savedBuffer: NSString
+    // 长度与保存基线相同时跟踪不同码元数，同长度小修改只比较受影响范围。
+    private var differingUnits: Int?
+    private(set) var revision: UInt64 = 0
     // 重建 WebKit 时需要恢复真实磁盘基线，不能把内存草稿误标为已保存。
     private(set) var savedText: String
     private var recoveredUnsaved = false
@@ -39,7 +46,12 @@ final class TextDocumentSession: DocumentSession {
     private let storage: Storage
 
     var path: URL? { document.sourceURL }
-    var text: String { document.text }
+    var text: String {
+        if let textSnapshot { return textSnapshot }
+        let snapshot = (buffer.copy() as! NSString) as String
+        textSnapshot = snapshot
+        return snapshot
+    }
     var encoding: TextFileEncoding { document.encoding }
     var isReadOnly: Bool { document.isReadOnly }
     var isBusy: Bool { work != nil }
@@ -57,9 +69,15 @@ final class TextDocumentSession: DocumentSession {
 
     private init(document: TextFileDocument, savedText: String, storage: Storage) {
         self.document = document
+        buffer = NSMutableString(string: document.text)
+        textSnapshot = document.text
         self.savedText = savedText
+        savedBuffer = savedText as NSString
         self.storage = storage
+        differingUnits = nil
         isModified = !document.text.utf8.elementsEqual(savedText.utf8)
+        if isModified { compareSavedBuffer() }
+        else { differingUnits = 0 }
     }
 
     static func create(text: String = "", encoding: TextFileEncoding = .utf8(bom: false),
@@ -86,10 +104,12 @@ final class TextDocumentSession: DocumentSession {
         try requireOpen()
         guard work != .reloading else { throw DocumentSessionError.busy }
         if isReadOnly, let path { throw DocumentIOError.readOnly(path) }
-        // String == 会把 NFC/NFD 视为相等，不能用于决定用户实际输入是否需要保存。
-        guard !document.text.utf8.elementsEqual(text.utf8) else { return }
-        document.text = text
-        isModified = recoveredUnsaved || !text.utf8.elementsEqual(savedText.utf8)
+        let incoming = text as NSString
+        guard !equalUnits(buffer, incoming) else { return }
+        buffer.setString(text)
+        textSnapshot = text
+        revision &+= 1
+        compareSavedBuffer()
     }
 
     /// 所有偏移基于同一份原始 UTF-16；先校验全部范围，再倒序提交，错误不能留下半份草稿。
@@ -97,7 +117,7 @@ final class TextDocumentSession: DocumentSession {
         try requireOpen()
         guard work != .reloading else { throw DocumentSessionError.busy }
         if isReadOnly, let path { throw DocumentIOError.readOnly(path) }
-        let source = document.text as NSString
+        let source = buffer
         let length = source.length
         // NSRange 可以切开 UTF-16 高/低代理对，必须拒绝；组合附加符的合法边界仍允许编辑。
         func isScalarBoundary(_ offset: Int) -> Bool {
@@ -113,12 +133,21 @@ final class TextDocumentSession: DocumentSession {
             }
             previousEnd = edit.to
         }
-        guard !edits.isEmpty else { return }
-        let updated = NSMutableString(string: document.text)
-        for edit in edits.reversed() {
-            updated.replaceCharacters(in: NSRange(location: edit.from, length: edit.to - edit.from), with: edit.text)
+        let changes = edits.filter { edit in
+            !source.substring(with: NSRange(location: edit.from, length: edit.to - edit.from)).utf16.elementsEqual(edit.text.utf16)
         }
-        try replaceText(updated as String)
+        guard !changes.isEmpty else { return }
+        let preserveOffsets = differingUnits != nil && changes.allSatisfy { $0.to - $0.from == ($0.text as NSString).length }
+        for edit in changes.reversed() {
+            let range = NSRange(location: edit.from, length: edit.to - edit.from)
+            if preserveOffsets { differingUnits! -= differences(in: range) }
+            buffer.replaceCharacters(in: range, with: edit.text)
+            if preserveOffsets { differingUnits! += differences(in: range) }
+        }
+        textSnapshot = nil
+        revision &+= 1
+        if preserveOffsets { isModified = recoveredUnsaved || differingUnits != 0 }
+        else { compareSavedBuffer() }
     }
 
     func save(overwriteExternalChanges: Bool) async throws {
@@ -151,7 +180,12 @@ final class TextDocumentSession: DocumentSession {
         defer { work = nil }
         let loaded = try await storage.open(path, encoding ?? document.encoding)
         document = loaded
+        buffer.setString(loaded.text)
+        textSnapshot = loaded.text
         savedText = loaded.text
+        savedBuffer = loaded.text as NSString
+        differingUnits = 0
+        revision &+= 1
         recoveredUnsaved = false
         isModified = false
     }
@@ -159,17 +193,33 @@ final class TextDocumentSession: DocumentSession {
     private func persist(to destination: URL?, overwriteExternalChanges: Bool) async throws {
         // 所有保存入口在写入前集中检查并占用会话，检查与设置 busy 之间没有异步等待。
         try requireIdle()
-        let snapshot = document
+        var snapshot = document
+        snapshot.text = text
         work = .saving
         defer { work = nil }
         let saved = try await storage.save(snapshot, destination, overwriteExternalChanges)
         // 文件状态与基线必须推进到本次成功写入的快照，但等待期间的新输入仍留在编辑缓冲区。
-        let currentText = document.text
         document = saved
-        document.text = currentText
         savedText = saved.text
+        savedBuffer = saved.text as NSString
         recoveredUnsaved = false
-        isModified = !currentText.utf8.elementsEqual(savedText.utf8)
+        compareSavedBuffer()
+    }
+
+    /// Unicode 标准等价不能清除 dirty；比较 UTF-16 码元可区分 NFC/NFD，且不构造全文 String。
+    private func equalUnits(_ lhs: NSString, _ rhs: NSString) -> Bool {
+        guard lhs.length == rhs.length else { return false }
+        for index in 0..<lhs.length where lhs.character(at: index) != rhs.character(at: index) { return false }
+        return true
+    }
+    private func differences(in range: NSRange) -> Int {
+        var count = 0
+        for index in range.location..<NSMaxRange(range) where buffer.character(at: index) != savedBuffer.character(at: index) { count += 1 }
+        return count
+    }
+    private func compareSavedBuffer() {
+        differingUnits = buffer.length == savedBuffer.length ? differences(in: NSRange(location: 0, length: buffer.length)) : nil
+        isModified = recoveredUnsaved || differingUnits != 0
     }
 
     private func requireOpen() throws {

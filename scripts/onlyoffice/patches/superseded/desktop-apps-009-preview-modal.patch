@@ -1,0 +1,50 @@
+--- a/macos/ONLYOFFICE.xcodeproj/project.pbxproj
++++ b/macos/ONLYOFFICE.xcodeproj/project.pbxproj
+@@ -139,6 +139,7 @@
+ 		FC0BD68F258B63F700C47F95 /* ASCExternalController.m in Sources */ = {isa = PBXBuildFile; fileRef = FCF2898021510C16002FD438 /* ASCExternalController.m */; };
+ 		FC0BD690258B63F700C47F95 /* PFMoveApplication.m in Sources */ = {isa = PBXBuildFile; fileRef = FCB454FE1C326A4E00FEACF2 /* PFMoveApplication.m */; settings = {COMPILER_FLAGS = "-fno-objc-arc"; }; };
+ 		FC0BD691258B63F700C47F95 /* ASCBlockHolder.m in Sources */ = {isa = PBXBuildFile; fileRef = FCCC2FD621E5DF7700FB9209 /* ASCBlockHolder.m */; };
++		14796D00062A1F91FD47B078 /* FWPreviewModal.swift in Sources */ = {isa = PBXBuildFile; fileRef = F94E2FD49495272FAD1940C0 /* FWPreviewModal.swift */; };
+ 		FC0BD692258B63F700C47F95 /* ASCTabView.m in Sources */ = {isa = PBXBuildFile; fileRef = FCC77C8E206CEE85001B7837 /* ASCTabView.m */; };
+ 		FC0BD693258B63F700C47F95 /* ASCMenuButtonCell.m in Sources */ = {isa = PBXBuildFile; fileRef = FCC77C71206CEE5A001B7837 /* ASCMenuButtonCell.m */; };
+ 		FC0BD694258B63F700C47F95 /* SFBPopoverWindow.m in Sources */ = {isa = PBXBuildFile; fileRef = FC3BFDFD1BBE83AB0040C904 /* SFBPopoverWindow.m */; };
+@@ -1116,6 +1117,7 @@
+ 		FCC77C8B206CEE85001B7837 /* ASCTabsControl.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = ASCTabsControl.h; sourceTree = "<group>"; };
+ 		FCC77C8C206CEE85001B7837 /* ASCTabsControl.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = ASCTabsControl.m; sourceTree = "<group>"; };
+ 		FCC77C8D206CEE85001B7837 /* ASCTabView.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = ASCTabView.h; sourceTree = "<group>"; };
++		F94E2FD49495272FAD1940C0 /* FWPreviewModal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FWPreviewModal.swift; sourceTree = "<group>"; };
+ 		FCC77C8E206CEE85001B7837 /* ASCTabView.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = ASCTabView.m; sourceTree = "<group>"; };
+ 		FCC77C8F206CEE85001B7837 /* ASCTabViewCell.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = ASCTabViewCell.h; sourceTree = "<group>"; };
+ 		FCC77C90206CEE85001B7837 /* ASCTabViewCell.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = ASCTabViewCell.m; sourceTree = "<group>"; };
+@@ -1642,6 +1644,15 @@
+ 			path = "ONLYOFFICE-arm";
+ 			sourceTree = "<group>";
+ 		};
++		43D844179411A3FA1857916F /* FileDeckModal */ = {
++			isa = PBXGroup;
++			children = (
++				F94E2FD49495272FAD1940C0 /* FWPreviewModal.swift */,
++			);
++			name = FileDeckModal;
++			path = FileWorkbenchNative;
++			sourceTree = "<group>";
++		};
+ 		FCBC425F1B9D650400405301 = {
+ 			isa = PBXGroup;
+ 			children = (
+@@ -1669,6 +1680,7 @@
+ 				FC29CD421F979946003F4136 /* Storyboard */,
+ 				FC5A2CFE1BABEF42001ACEB1 /* SDK */,
+ 				FCF289712150E65A002FD438 /* Code */,
++				43D844179411A3FA1857916F /* FileDeckModal */,
+ 				FC67182F1BD918250028600F /* Vendor */,
+ 				FCBC426D1B9D650400405301 /* AppDelegate.h */,
+ 				FCBC426E1B9D650400405301 /* AppDelegate.mm */,
+@@ -2644,6 +2656,7 @@
+ 				FCB4C6CB26DD018B0012C20D /* SFBPopoverWindow.m in Sources */,
+ 				FCB4C6CC26DD018B0012C20D /* NSWindow+Extensions.m in Sources */,
+ 				5AAE526D28B53B9A001E31F4 /* ASCThemesController.m in Sources */,
++				14796D00062A1F91FD47B078 /* FWPreviewModal.swift in Sources */,
+ 				FCB4C6CD26DD018B0012C20D /* ASCHelper.m in Sources */,
+ 				FCB4C6CE26DD018B0012C20D /* ASCUserInfoViewController.m in Sources */,
+ 				FCB4C6CF26DD018B0012C20D /* NSColor+Extensions.m in Sources */,

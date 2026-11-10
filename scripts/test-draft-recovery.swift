@@ -97,7 +97,7 @@ final class DraftRecoveryAcceptance: NSObject, NSApplicationDelegate {
         let csvHost = FWDocumentHost(content:csv); hosts.append(csvHost)
         try csv.setCell("恢复;值\n第二行",row:0,column:1)
         let pdf = try await FWPDFContent.open(url:pdfURL), pdfHost = FWDocumentHost(content:pdf)
-        hosts.append(pdfHost); try pdf.rotate(pageIndexes:[0])
+        hosts.append(pdfHost); try await pdf.rotate(pageIndexes:[0])
         let image = try await FWImageContent.open(url:imageURL), imageHost = FWDocumentHost(content:image)
         hosts.append(imageHost); try await image.rotate(clockwise:true)
         let cleanup = try await FWTextContent.open(url:cleanupURL,kind:.text), cleanupHost = FWDocumentHost(content:cleanup)
@@ -129,17 +129,20 @@ final class DraftRecoveryAcceptance: NSObject, NSApplicationDelegate {
         for child in view.subviews { if let found = findButton(child,title) { return found } }
         return nil
     }
-    func popup(_ view:NSView) -> NSPopUpButton? {
-        if let value = view as? NSPopUpButton { return value }
-        for child in view.subviews { if let found = popup(child) { return found } }
+    func draftList(_ view:NSView) -> FWDraftRecoveryList? {
+        if let value = view as? FWDraftRecoveryList { return value }
+        for child in view.subviews { if let found = draftList(child) { return found } }
         return nil
     }
     func press(_ title: String, selecting: String? = nil) async throws {
         try await wait { self.window.attachedSheet?.contentView.flatMap { self.findButton($0,title) } != nil }
         guard let view = window.attachedSheet?.contentView,let button = findButton(view,title) else { throw Failed.assertion("缺少面板按钮") }
         if let selecting {
-            guard let choice = popup(view),let index = choice.itemTitles.firstIndex(where:{$0.hasPrefix(selecting + " · ")}) else { throw Failed.assertion("缺少预期草稿选项") }
-            choice.selectItem(at:index)
+            guard let choice = draftList(view), let index = (0..<choice.table.numberOfRows).first(where: { row in
+                guard let cell = choice.table.view(atColumn: 0, row: row, makeIfNecessary: true) else { return false }
+                return cell.accessibilityLabel()?.contains(selecting) == true
+            }) else { throw Failed.assertion("缺少预期草稿选项") }
+            choice.table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
         }
         if title == "稍后", selecting == nil { try capture(view,name:"recovery-center.png") }
         button.performClick(nil)
